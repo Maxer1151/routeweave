@@ -1,0 +1,12 @@
+.env
+*.log
+*:Zone.Identifier
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.bak-*
+.DS_Store
+state.json
+*.zip
+*.gz

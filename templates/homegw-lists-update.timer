@@ -1,0 +1,11 @@
+[Unit]
+Description=Routeweave: ежедневное обновление списков (04:15)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=homegw-lists-update.service
+
+[Install]
+WantedBy=timers.target

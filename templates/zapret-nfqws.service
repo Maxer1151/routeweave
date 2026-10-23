@@ -1,0 +1,16 @@
+[Unit]
+Description=Routeweave zapret (nfqws DPI desync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/homegateway/zapret.conf
+ExecStartPre=/etc/homegateway/fw-nfq.sh start
+ExecStart=/bin/sh -c 'exec /opt/zapret/bin/nfqws --qnum=${QNUM} --dpi-desync=${DESYNC} --dpi-desync-fooling=${FOOLING} ${AUTOTTL_ARG} ${TTL_ARG} ${EXTRA} --hostlist=${HOSTLIST}'
+ExecStopPost=/etc/homegateway/fw-nfq.sh stop
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

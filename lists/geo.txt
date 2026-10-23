@@ -1,0 +1,29 @@
+# Гео-блокировки → исходящий SOCKS (или VLESS-туннель), см. README
+# Формат: +.domain.com = домен и все поддомены
++.chatgpt.com
++.openai.com
++.oaistatic.com
++.oaiusercontent.com
++.ai.com
++.claude.ai
++.anthropic.com
++.gemini.google.com
++.aistudio.google.com
++.generativelanguage.googleapis.com
++.alkalimakersuite-pa.clients6.google.com
++.deepmind.google
++.deepmind.com
++.copilot.microsoft.com
++.perplexity.ai
++.x.ai
++.grok.com
++.x.com
++.twitter.com
++.twimg.com
++.instagram.com
++.cdninstagram.com
++.facebook.com
++.fbcdn.net
++.netflix.com
++.nflxvideo.net
++.spotify.com

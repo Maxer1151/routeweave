@@ -1,0 +1,29 @@
+# Российские сервисы → всегда НАПРЯМУЮ (без прокси)
+# GEOIP,RU в правилах ловит остальное; здесь — то, что резолвится за рубежом
++.yandex.ru
++.yandex.net
++.ya.ru
++.mail.ru
++.list.ru
++.bk.ru
++.inbox.ru
++.vk.com
++.vk.ru
++.userapi.com
++.sber.ru
++.sberbank.ru
++.gosuslugi.ru
++.nalog.ru
++.moex.com
++.tbank.ru
++.tinkoff.ru
++.alfabank.ru
++.vtb.ru
++.gazprombank.ru
++.avito.ru
++.ozon.ru
++.wildberries.ru
++.rutube.ru
++.ok.ru
++.dzen.ru
++.habr.com

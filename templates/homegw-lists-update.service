@@ -1,0 +1,10 @@
+[Unit]
+Description=Routeweave: обновление списков geo/ru-direct
+After=network-online.target mihomo.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/homegw-update-lists.sh
+Nice=10
+IOSchedulingClass=idle
