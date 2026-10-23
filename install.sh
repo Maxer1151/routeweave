@@ -12,8 +12,8 @@
 set -Eeuo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ETC=/etc/homegateway
-OPT_PANEL=/opt/homegateway-panel
+ETC=/etc/routeweave
+OPT_PANEL=/opt/routeweave-panel
 ZAPRET_DIR=/opt/zapret
 MIHOMO_FALLBACK_VER="v1.19.13"
 
@@ -70,7 +70,7 @@ install_wdtt() {
     WDTT_STATUS="уже установлен"
     ok "WDTT-Plus уже установлен — обновление не требуется"
     wdtt_ensure_ip_rule
-    systemctl restart homegw-firewall >/dev/null 2>&1 || true
+    systemctl restart routeweave-firewall >/dev/null 2>&1 || true
     [ -x "$WDTT_DIR/install.sh" ] && bash "$WDTT_DIR/install.sh" status || true
     return 0
   fi
@@ -79,7 +79,7 @@ install_wdtt() {
     return 1
   fi
 
-  WDTT_TMP=$(mktemp -d /tmp/homegw-wdtt.XXXXXX) || { wdtt_fail "не удалось создать временный каталог"; return 1; }
+  WDTT_TMP=$(mktemp -d /tmp/routeweave-wdtt.XXXXXX) || { wdtt_fail "не удалось создать временный каталог"; return 1; }
 
   if [ ! -x "$WDTT_DIR/install.sh" ] || [ ! -x "$WDTT_DIR/wdtt-server" ]; then
     local asset tag name url src binver
@@ -158,7 +158,7 @@ for item in data.get("assets", []):
   fi
 
   wdtt_ensure_ip_rule
-  systemctl restart homegw-firewall >/dev/null 2>&1 || true
+  systemctl restart routeweave-firewall >/dev/null 2>&1 || true
   if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
     ufw allow "$WDTT_DTLS_PORT"/udp >/dev/null 2>&1 || true
     ufw route allow in on wdtt0 >/dev/null 2>&1 || true
@@ -273,7 +273,7 @@ if ss -lun 2>/dev/null | grep -q ':53 '; then
   if systemctl is-active --quiet systemd-resolved; then
     info "Освобождаю порт 53 (systemd-resolved stub)..."
     mkdir -p /etc/systemd/resolved.conf.d
-    cat > /etc/systemd/resolved.conf.d/homegw.conf <<'EOF'
+    cat > /etc/systemd/resolved.conf.d/routeweave.conf <<'EOF'
 [Resolve]
 DNSStubListener=no
 EOF
@@ -319,7 +319,7 @@ elif [ -n "$VER" ]; then
   ok "mihomo $VER установлен: $(mihomo -v | head -n1)"
 fi
 
-# ---------- 5. Конфигурация /etc/homegateway ----------
+# ---------- 5. Конфигурация /etc/routeweave ----------
 info "Создание ${ETC}..."
 mkdir -p "$ETC/lists"
 cp -n "$APP_DIR"/lists/*.txt "$ETC/lists/" 2>/dev/null || true
@@ -407,13 +407,13 @@ fi
 
 # ---------- 7. systemd-юниты ----------
 info "Установка systemd-юнитов..."
-install -m 0644 "$APP_DIR/templates/mihomo.service"            /etc/systemd/system/mihomo.service
-install -m 0644 "$APP_DIR/templates/homegw-firewall.service"   /etc/systemd/system/homegw-firewall.service
-install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"      /etc/systemd/system/zapret-nfqws.service
-install -m 0644 "$APP_DIR/templates/homegw-panel.service"      /etc/systemd/system/homegw-panel.service
-install -m 0755 "$APP_DIR/templates/homegw-update-lists.sh"     /usr/local/sbin/homegw-update-lists.sh
-install -m 0644 "$APP_DIR/templates/homegw-lists-update.service" /etc/systemd/system/homegw-lists-update.service
-install -m 0644 "$APP_DIR/templates/homegw-lists-update.timer"   /etc/systemd/system/homegw-lists-update.timer
+install -m 0644 "$APP_DIR/templates/mihomo.service"                  /etc/systemd/system/mihomo.service
+install -m 0644 "$APP_DIR/templates/routeweave-firewall.service"     /etc/systemd/system/routeweave-firewall.service
+install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"            /etc/systemd/system/zapret-nfqws.service
+install -m 0644 "$APP_DIR/templates/routeweave-panel.service"        /etc/systemd/system/routeweave-panel.service
+install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
+install -m 0644 "$APP_DIR/templates/routeweave-lists-update.service" /etc/systemd/system/routeweave-lists-update.service
+install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/systemd/system/routeweave-lists-update.timer
 
 # ---------- 8. Панель (venv + статика zashboard) ----------
 info "Установка веб-панели..."
@@ -466,21 +466,21 @@ fi
 # ---------- 11. Запуск ----------
 info "Запуск сервисов..."
 systemctl daemon-reload
-systemctl enable --now homegw-firewall mihomo zapret-nfqws homegw-panel >/dev/null 2>&1 || true
-systemctl enable --now homegw-lists-update.timer >/dev/null 2>&1 \
-  || warn "не удалось включить homegw-lists-update.timer — проверьте: systemctl status homegw-lists-update.timer"
+systemctl enable --now routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
+systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
+  || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
 sleep 3
 
 FAIL=0
-for u in homegw-firewall mihomo zapret-nfqws homegw-panel homegw-lists-update.timer; do
+for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lists-update.timer; do
   st=$(systemctl is-active "$u" || true)
   if [ "$st" = "active" ]; then ok "$u: active"; else warn "$u: $st (journalctl -u $u -n 30)"; FAIL=1; fi
 done
 [ "$FAIL" = 0 ] || warn "Есть незапущенные сервисы — установка завершена, но проверьте их!"
 
 info "Первый прогон обновления списков..."
-systemctl start homegw-lists-update.service \
-  || warn "обновление списков завершилось ошибкой — journalctl -u homegw-lists-update -n 50"
+systemctl start routeweave-lists-update.service \
+  || warn "обновление списков завершилось ошибкой — journalctl -u routeweave-lists-update -n 50"
 
 # ---------- 12. WDTT-Plus (VPN-сервер для Android) ----------
 if [ "$INSTALL_WDTT" = "yes" ]; then
@@ -503,7 +503,7 @@ echo -e "Панель:        ${C_B}http://$SERVER_IP:$PANEL_PORT${C_N}  (лог
 echo -e "Zashboard:     ${C_B}http://$SERVER_IP:9090/ui/${C_N}  (backend: http://$SERVER_IP:9090, секрет: $ETC/.env → MIHOMO_SECRET)"
 echo -e "Конфиг:        $ETC/.env (chmod 600)"
 if [ "$INSTALL_TGWS" = "yes" ]; then
-  echo -e "TG MTProto:    секрет — ${C_B}docker logs homegw-tgwsproxy${C_N}"
+  echo -e "TG MTProto:    секрет — ${C_B}docker logs routeweave-tgwsproxy${C_N}"
 fi
 if [ "$WDTT_OK" = 1 ]; then
   echo -e "WDTT-Plus:     ${C_G}сервер установлен${C_N} (приложение WDTT Plus для Android)"
@@ -520,7 +520,7 @@ if [ "$INSTALL_TGWS" = "yes" ]; then
      дом   -> $SERVER_IP:1443
      WDTT  -> 10.66.66.1:1443
      TS    -> <tailscale-имя сервера>:1443
-     секрет прокси: docker logs homegw-tgwsproxy
+     секрет прокси: docker logs routeweave-tgwsproxy
 "
   STEP=$((STEP + 1))
   TAIL="${TAIL}  $STEP. CF Worker для tg-ws-proxy (опционально): docs/cf-worker-tg.md
@@ -540,8 +540,8 @@ cat <<EOF
      (IPv6 в локалке лучше отключить — иначе клиенты пойдут мимо шлюза)
   2. Подбор стратегии zapret: sudo /opt/zapret/blockcheck.sh
      -> результат в $ETC/zapret.conf -> systemctl restart zapret-nfqws
-  3. Автообновление списков: homegw-lists-update.timer — ежедневно в 04:15
-     + случайная задержка; журнал: journalctl -u homegw-lists-update
+  3. Автообновление списков: routeweave-lists-update.timer — ежедневно в 04:15
+     + случайная задержка; журнал: journalctl -u routeweave-lists-update
   4. Списки доменов и custom-списки правьте в панели (порт $PANEL_PORT);
      файлы — в $ETC/lists/
 $TAIL======================================================

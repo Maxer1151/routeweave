@@ -6,11 +6,11 @@
 set -euo pipefail
 
 # shellcheck disable=SC1091
-[ -f /etc/homegateway/zapret.conf ] && . /etc/homegateway/zapret.conf
+[ -f /etc/routeweave/zapret.conf ] && . /etc/routeweave/zapret.conf
 QNUM="${QNUM:-200}"
 WAN_IFACE="${WAN_IFACE:-$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')}"
-SRC_HOSTLIST="${SRC_HOSTLIST:-/etc/homegateway/lists/dpi.txt}"
-HOSTLIST="${HOSTLIST:-/run/homegateway/dpi-zapret.txt}"
+SRC_HOSTLIST="${SRC_HOSTLIST:-/etc/routeweave/lists/dpi.txt}"
+HOSTLIST="${HOSTLIST:-/run/routeweave/dpi-zapret.txt}"
 
 RULE=(-p tcp -m multiport --dports 80,443
       -m connbytes --connbytes 1:10 --connbytes-mode packets --connbytes-dir original

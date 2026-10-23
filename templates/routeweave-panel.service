@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/homegateway/.env
-WorkingDirectory=/opt/homegateway-panel
-ExecStart=/bin/sh -c 'exec /opt/homegateway-panel/venv/bin/uvicorn app:app --host 0.0.0.0 --port "${PANEL_PORT}"'
+EnvironmentFile=/etc/routeweave/.env
+WorkingDirectory=/opt/routeweave-panel
+ExecStart=/bin/sh -c 'exec /opt/routeweave-panel/venv/bin/uvicorn app:app --host 0.0.0.0 --port "${PANEL_PORT}"'
 Restart=on-failure
 RestartSec=3
 

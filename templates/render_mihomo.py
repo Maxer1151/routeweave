@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Генератор /etc/homegateway/config.yaml для mihomo.
+"""Генератор /etc/routeweave/config.yaml для mihomo.
 
-Читает переменные из /etc/homegateway/.env и из окружения
+Читает переменные из /etc/routeweave/.env и из окружения
 (окружение имеет приоритет — так установщик прокидывает дефолты).
 Запуск: render_mihomo.py <путь-к-.env> <выходной-config.yaml>
 """
@@ -56,8 +56,8 @@ def parse_socks(url: str):
 
 
 def main() -> int:
-    env_file = sys.argv[1] if len(sys.argv) > 1 else "/etc/homegateway/.env"
-    out_file = sys.argv[2] if len(sys.argv) > 2 else "/etc/homegateway/config.yaml"
+    env_file = sys.argv[1] if len(sys.argv) > 1 else "/etc/routeweave/.env"
+    out_file = sys.argv[2] if len(sys.argv) > 2 else "/etc/routeweave/config.yaml"
 
     cfg_env = load_env(env_file)
     data = {**cfg_env, **os.environ}  # окружение важнее файла
@@ -135,15 +135,15 @@ def main() -> int:
         "rule-providers": {
             "geo-domains": {
                 "type": "file", "behavior": "domain", "format": "text",
-                "path": "/etc/homegateway/lists/geo.txt", "interval": 300,
+                "path": "/etc/routeweave/lists/geo.txt", "interval": 300,
             },
             "dpi-domains": {
                 "type": "file", "behavior": "domain", "format": "text",
-                "path": "/etc/homegateway/lists/dpi.txt", "interval": 300,
+                "path": "/etc/routeweave/lists/dpi.txt", "interval": 300,
             },
             "ru-domains": {
                 "type": "file", "behavior": "domain", "format": "text",
-                "path": "/etc/homegateway/lists/ru-direct.txt", "interval": 300,
+                "path": "/etc/routeweave/lists/ru-direct.txt", "interval": 300,
             },
         },
         "rules": [
@@ -168,7 +168,7 @@ def main() -> int:
     ]
 
     with open(out_file, "w", encoding="utf-8") as f:
-        f.write("# Сгенерировано render_mihomo.py — правки вносить в /etc/homegateway/.env\n")
+        f.write("# Сгенерировано render_mihomo.py — правки вносить в /etc/routeweave/.env\n")
         f.write("# или через веб-панель (списки). Ручные правки будут потеряны.\n")
         yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
 

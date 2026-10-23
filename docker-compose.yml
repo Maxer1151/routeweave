@@ -1,11 +1,13 @@
 # Routeweave: опциональный компонент tg-ws-proxy (только при INSTALL_TGWS=yes).
 # Требует Docker Engine + compose v2. Ядро шлюза работает без этого файла.
+name: routeweave
+
 services:
   tg-ws-proxy:
     image: valnesfjord/tg-ws-proxy-rs:latest
-    container_name: homegw-tgwsproxy
+    container_name: routeweave-tgwsproxy
     restart: unless-stopped
     ports:
       - "1443:1443"
     env_file:
-      - /etc/homegateway/.env
+      - /etc/routeweave/.env

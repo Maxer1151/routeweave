@@ -34,7 +34,7 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
   `:9090` (секрет в `.env`), zashboard на `/ui/`.
 - **zapret (nfqws)** — NFQUEUE на исходящих TCP 80/443, десинк только доменов
   из `dpi.txt`.
-- **Списки доменов** — `/etc/homegateway/lists/`: geo, dpi, ru-direct и custom-файлы.
+- **Списки доменов** — `/etc/routeweave/lists/`: geo, dpi, ru-direct и custom-файлы.
 - **Панель (FastAPI)** — статусы сервисов, пробы путей, редактор списков,
   перезапуски; Basic-авторизация.
 - **Firewall** — `fw-base.sh` / `fw-nfq.sh`, systemd-юниты, policy-routing для WDTT.
@@ -72,7 +72,7 @@ mihomo до свежего релиза (если версия отличает�
 
 ## Параметры `.env`
 
-Файл `/etc/homegateway/.env` создаётся с `chmod 600`. Секреты генерирует
+Файл `/etc/routeweave/.env` создаётся с `chmod 600`. Секреты генерирует
 установщик, в консоль они не печатаются.
 
 | Ключ | Назначение |
@@ -97,20 +97,20 @@ mihomo до свежего релиза (если версия отличает�
 1. **DHCP.** В роутере выдайте клиентам шлюз и DNS = `SERVER_IP`.
    IPv6 в LAN отключите — иначе устройства уйдут мимо шлюза.
 2. **Панель.** Откройте `http://SERVER_IP:PANEL_PORT`, логин `PANEL_USER`,
-   пароль — `PANEL_PASS` из `/etc/homegateway/.env`.
+   пароль — `PANEL_PASS` из `/etc/routeweave/.env`.
 3. **Zashboard.** Откройте `http://SERVER_IP:9090/ui/`, укажите backend
    `http://SERVER_IP:9090` и секрет `MIHOMO_SECRET` из `.env`.
-4. **Списки.** Проверьте `/etc/homegateway/lists/` и при необходимости
+4. **Списки.** Проверьте `/etc/routeweave/lists/` и при необходимости
    добавьте домены в `geo-custom.txt`, `dpi.txt` или `ru-direct-custom.txt`
    (см. раздел «Панель»).
 5. **Стратегия zapret.** Запустите `sudo /opt/zapret/blockcheck.sh`, перенесите
-   рабочую стратегию в `/etc/homegateway/zapret.conf` и выполните
+   рабочую стратегию в `/etc/routeweave/zapret.conf` и выполните
    `sudo systemctl restart zapret-nfqws`.
 
 ## Автообновление списков
 
-Апдейтер: `/usr/local/sbin/homegw-update-lists.sh`. Юниты:
-`homegw-lists-update.service` и `homegw-lists-update.timer`.
+Апдейтер: `/usr/local/sbin/routeweave-update-lists.sh`. Юниты:
+`routeweave-lists-update.service` и `routeweave-lists-update.timer`.
 Таймер: `OnCalendar=04:15`, `RandomizedDelaySec=300`, `Persistent=true`.
 
 Что делает апдейтер:
@@ -125,8 +125,8 @@ mihomo до свежего релиза (если версия отличает�
 Ручной прогон и лог:
 
 ```bash
-sudo systemctl start homegw-lists-update.service
-journalctl -u homegw-lists-update -n 50
+sudo systemctl start routeweave-lists-update.service
+journalctl -u routeweave-lists-update -n 50
 ```
 
 Важно: `geo.txt` и `ru-direct.txt` — генерируемые файлы. Правьте
@@ -148,7 +148,7 @@ mihomo» запускает апдейтер (для `dpi` — перезапу�
 
 ## DPI и fwmark
 
-Критично: в `EXTRA` в `/etc/homegateway/zapret.conf` обязателен
+Критично: в `EXTRA` в `/etc/routeweave/zapret.conf` обязателен
 `--dpi-desync-fwmark=0x80000`. Без метки фейковые пакеты nfqws уходят в TUN
 mihomo и съедаются — YouTube не пробивается. Маркированные пакеты должны
 уходить в `main`, а не в TUN.
@@ -160,7 +160,7 @@ arm64 — `mihomo-linux-arm64`. Стратегия по умолчанию — `
 ## Опционально: Telegram
 
 Включается `INSTALL_TGWS=yes`. Нужны Docker Engine и compose v2, порт `1443`.
-Секрет прокси для клиентов смотрите в `docker logs homegw-tgwsproxy`.
+Секрет прокси для клиентов смотрите в `docker logs routeweave-tgwsproxy`.
 CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
 `TG_CF_WORKER_DOMAIN`, `TG_LINK_IP`. Без этого компонента ядро работает как
 обычно.
@@ -214,18 +214,18 @@ Tailscale настраивается отдельно, Routeweave его не т
 
 - **mihomo не стартует.** `systemctl status mihomo`, `journalctl -u mihomo -n 50`.
   Проверьте, что порт `:53` свободен, есть `/dev/net/tun`, а конфиг валиден:
-  `mihomo -d /etc/homegateway -t`.
+  `mihomo -d /etc/routeweave -t`.
 - **`mihomo v3` / `unsupported instruction`.** Нужен `-compatible` бинарник.
   Установщик уже ставит его на amd64; при ручной замене перекачайте
   `mihomo-linux-amd64-compatible`.
 - **YouTube FAIL.** Проверьте `--dpi-desync-fwmark=0x80000` в
-  `/etc/homegateway/zapret.conf`.
+  `/etc/routeweave/zapret.conf`.
 - **Таймер затёр ручные правки.** Правьте `geo-custom.txt`,
   `ru-direct-custom.txt` и `dpi.txt`, а не генерируемые `geo.txt` /
   `ru-direct.txt`.
 - **Панель не пускает.** Проверьте `PANEL_PASS` в `.env`; пустой пароль —
   панель не стартует.
-- **tgws не подключается.** Проверьте Docker, `docker logs homegw-tgwsproxy`
+- **tgws не подключается.** Проверьте Docker, `docker logs routeweave-tgwsproxy`
   и совпадение секрета в клиенте.
 - **WDTT.** `systemctl status wdtt`, `journalctl -u wdtt -n 50`,
   `ss -lunp | grep 56000`.
@@ -239,7 +239,7 @@ Tailscale настраивается отдельно, Routeweave его не т
 
 `sudo bash uninstall.sh` останавливает и удаляет юниты, панель, zapret,
 mihomo, таймер и апдейтер списков; контейнер tg-ws-proxy также останавливается
-и удаляется. Каталог `/etc/homegateway` остаётся. WDTT-Plus не затрагивается.
+и удаляется. Каталог `/etc/routeweave` остаётся. WDTT-Plus не затрагивается.
 
 ## Лицензия
 
@@ -254,9 +254,3 @@ MIT, см. `LICENSE`.
 - WDTT-Plus — Ivan4537
 - списки Amnezia — lib4u/amnezia-tunneling-ru
 - geoblock — Internet-Helper/Unblock-for-Russia
-
-## Примечание об историческом префиксе
-
-Внутренние имена `homegw`, `/etc/homegateway`, `/opt/homegateway-panel` и
-юниты `homegw-*` сохранены для совместимости с уже развёрнутыми шлюзами. Это
-не пользовательские данные и не название проекта.

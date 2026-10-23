@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Routeweave веб-панель: статусы сервисов, пробы путей, редактор списков, рестарты.
 
-Нативный сервис (systemd), читает /etc/homegateway/.env.
+Нативный сервис (systemd), читает /etc/routeweave/.env.
 Доступ только по Basic-авторизации (PANEL_USER / PANEL_PASS).
 """
 import base64
@@ -17,11 +17,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-CFG_DIR = Path("/etc/homegateway")
+CFG_DIR = Path("/etc/routeweave")
 ENV_FILE = CFG_DIR / ".env"
 LISTS_DIR = CFG_DIR / "lists"
 LISTS = {"geo-custom": "geo-custom.txt", "dpi": "dpi.txt", "ru-custom": "ru-direct-custom.txt"}
-UPDATER = "/usr/local/sbin/homegw-update-lists.sh"
+UPDATER = "/usr/local/sbin/routeweave-update-lists.sh"
 MIHOMO_API = "http://127.0.0.1:9090"
 MIXED_PORT = 7890
 
@@ -43,7 +43,7 @@ ENV = load_env()
 PANEL_USER = ENV.get("PANEL_USER") or "admin"
 PANEL_PASS = ENV.get("PANEL_PASS") or ""
 if not PANEL_PASS:
-    raise SystemExit("PANEL_PASS не задан в /etc/homegateway/.env — панель не запускается. Задайте пароль и перезапустите homegw-panel.")
+    raise SystemExit("PANEL_PASS не задан в /etc/routeweave/.env — панель не запускается. Задайте пароль и перезапустите routeweave-panel.")
 
 
 def run(cmd: list, timeout: int = 15) -> tuple:
@@ -80,7 +80,7 @@ def docker_container_state(name: str) -> str:
 
 
 def tgws_enabled() -> bool:
-    state = docker_container_state("homegw-tgwsproxy")
+    state = docker_container_state("routeweave-tgwsproxy")
     return state not in ("absent", "no-docker-socket") or bool((ENV.get("TG_SECRET") or "").strip())
 
 
@@ -199,9 +199,9 @@ def api_status():
     services = {
         "mihomo": svc_active("mihomo"),
         "zapret-nfqws": svc_active("zapret-nfqws"),
-        "homegw-firewall": svc_active("homegw-firewall"),
-        "homegw-panel": svc_active("homegw-panel"),
-        "homegw-tgwsproxy": docker_container_state("homegw-tgwsproxy"),
+        "routeweave-firewall": svc_active("routeweave-firewall"),
+        "routeweave-panel": svc_active("routeweave-panel"),
+        "routeweave-tgwsproxy": docker_container_state("routeweave-tgwsproxy"),
     }
     socks_set = bool((ENV.get("SOCKS_URL") or "").strip())
     return {
@@ -289,14 +289,14 @@ def api_apply(target: str):
 
 @app.post("/api/restart/{name}")
 def api_restart(name: str):
-    units = {"mihomo": "mihomo", "zapret": "zapret-nfqws", "panel": "homegw-panel"}
+    units = {"mihomo": "mihomo", "zapret": "zapret-nfqws", "panel": "routeweave-panel"}
     if name in units:
         rc, out = run(["systemctl", "restart", units[name]], timeout=30)
         return {"ok": rc == 0, "detail": out[:300]}
     if name == "tgwsproxy":
         try:
             with docker_client() as c:
-                r = c.post("/containers/homegw-tgwsproxy/restart?t=10")
+                r = c.post("/containers/routeweave-tgwsproxy/restart?t=10")
             return {"ok": r.status_code == 204, "detail": r.text[:200]}
         except Exception as e:
             return {"ok": False, "detail": f"{type(e).__name__}: {e}"}

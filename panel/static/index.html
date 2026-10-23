@@ -62,7 +62,7 @@
   <button data-l="dpi">dpi (→ zapret)</button>
   <button data-l="ru-custom">ru-custom (→ direct)</button>
 </div>
-<div class="hint">geo.txt и ru-direct.txt генерируются таймером homegw-lists-update (04:15 + случайная задержка) — правьте только custom-списки и dpi.txt</div>
+<div class="hint">geo.txt и ru-direct.txt генерируются таймером routeweave-lists-update (04:15 + случайная задержка) — правьте только custom-списки и dpi.txt</div>
 <textarea id="listArea" spellcheck="false"></textarea>
 <div class="row">
   <button id="saveList">Сохранить</button>
@@ -84,7 +84,7 @@ const PROBE_NAMES = {
   tg_ws_proxy: "tg-ws-proxy :1443",
   cf_worker: "CF Worker (BASE_DOMAIN)"
 };
-const SVC_NAMES = { mihomo: "mihomo (шлюз)", "zapret-nfqws": "zapret (DPI)", "homegw-tgwsproxy": "tg-ws-proxy (docker, опционально)", "homegw-firewall": "firewall", "homegw-panel": "панель" };
+const SVC_NAMES = { mihomo: "mihomo (шлюз)", "zapret-nfqws": "zapret (DPI)", "routeweave-tgwsproxy": "tg-ws-proxy (docker, опционально)", "routeweave-firewall": "firewall", "routeweave-panel": "панель" };
 let curList = "geo-custom";
 
 function msg(t, ok=true){ const m=document.getElementById('msg'); m.textContent=t; m.style.display='block';
@@ -107,7 +107,7 @@ function renderServices(svcs){
     d.innerHTML=`<div class="name"><span class="dot ${dotCls(v)}"></span>${SVC_NAMES[k]||k}</div>
       <div class="st">systemctl/docker: ${v}</div>`;
     const b=document.createElement('button'); b.textContent='Перезапустить';
-    b.onclick=async()=>{ b.disabled=true; try{ const r=await api('/api/restart/'+(k==='homegw-tgwsproxy'?'tgwsproxy':(k==='mihomo'?'mihomo':(k==='zapret-nfqws'?'zapret':'panel'))),{method:'POST'}); msg(r.ok?'Перезапущено':'Ошибка: '+r.detail, r.ok);}catch(e){msg(e.message,false);} b.disabled=false; loadStatus(); };
+    b.onclick=async()=>{ b.disabled=true; try{ const r=await api('/api/restart/'+(k==='routeweave-tgwsproxy'?'tgwsproxy':(k==='mihomo'?'mihomo':(k==='zapret-nfqws'?'zapret':'panel'))),{method:'POST'}); msg(r.ok?'Перезапущено':'Ошибка: '+r.detail, r.ok);}catch(e){msg(e.message,false);} b.disabled=false; loadStatus(); };
     d.appendChild(b); box.appendChild(d);
   }
 }
@@ -145,7 +145,7 @@ async function loadStatus(){
       const ip=c.server_ip, wg=c.wg_subnet? c.wg_subnet.split('/')[0].replace(/\.0$/,'.1'):'';
       tgBox.style.display='block';
       tgBox.innerHTML =
-        `Telegram → Настройки → Продвинутые → Прокси (MTProto, порт 1443, секрет из <code>docker logs homegw-tgwsproxy</code>): `+
+        `Telegram → Настройки → Продвинутые → Прокси (MTProto, порт 1443, секрет из <code>docker logs routeweave-tgwsproxy</code>): `+
         `дом — <code>${ip||'LAN_IP'}:1443</code>, WDTT — <code>${wg||'WG_IP'}:1443</code>, Tailscale — <code>tailscale-имя-сервера:1443</code>`;
     }else{
       tgBox.innerHTML=''; tgBox.style.display='none';

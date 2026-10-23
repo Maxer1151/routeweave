@@ -29,11 +29,11 @@
 
 ## 3. Подключение к tg-ws-proxy-rs
 
-Панель/конфиг: в `/etc/homegateway/.env` задайте
+Панель/конфиг: в `/etc/routeweave/.env` задайте
 ```
 BASE_DOMAIN=myhome.dpdns.org
 ```
-и `sudo systemctl restart mihomo homegw-panel` (домен уедет в fake-ip-filter и
+и `sudo systemctl restart mihomo routeweave-panel` (домен уедет в fake-ip-filter и
 в правило DIRECT, чтобы туннель не заворачивался сам в себя).
 
 Дальше — по документации tg-ws-proxy-rs (docs/Deployment.md в репозитории

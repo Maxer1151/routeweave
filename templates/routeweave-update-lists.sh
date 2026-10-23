@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Routeweave: ежедневное обновление geo/ru-direct для mihomo. DPI-домены исключаются из geo.
 set -euo pipefail
-L=/etc/homegateway/lists; E=/etc/homegateway/.env
+L=/etc/routeweave/lists; E=/etc/routeweave/.env
 [ -f "$E" ] && { set -a; . "$E"; set +a; }
 log(){ echo "[$(date '+%F %T')] $*"; }
 P=""; case "${SOCKS_URL:-}" in socks5://*) P="socks5h://${SOCKS_URL#socks5://}";; socks5h://*) P="$SOCKS_URL";; http://*|https://*) P="$SOCKS_URL";; esac

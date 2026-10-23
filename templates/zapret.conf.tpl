@@ -10,9 +10,9 @@ QNUM=200
 WAN_IFACE={{WAN_IFACE}}
 
 # Hostlist (домены из списка десинким)
-# Файл генерируется из /etc/homegateway/lists/dpi.txt при старте сервиса:
+# Файл генерируется из /etc/routeweave/lists/dpi.txt при старте сервиса:
 # формат mihomo (+.domain) преобразуется в голые хосты для nfqws.
-HOSTLIST=/run/homegateway/dpi-zapret.txt
+HOSTLIST=/run/routeweave/dpi-zapret.txt
 
 # Стартовая стратегия: fake + multidisorder, TLS-режим с подменой SNI.
 # Подбирается blockcheck.sh под вашего провайдера.

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # shellcheck disable=SC1091
-[ -f /etc/homegateway/.env ] && . /etc/homegateway/.env
+[ -f /etc/routeweave/.env ] && . /etc/routeweave/.env
 QUIC_DROP="${QUIC_DROP:-yes}"
 WDTT_SUBNET="10.66.66.0/24"
 LAN_IFACE="${LAN_IFACE:-$(ip route get 192.168.0.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')}"
