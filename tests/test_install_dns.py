@@ -1,13 +1,16 @@
 """Тесты логики DNS в install.sh/uninstall.sh без root.
 
-Проверяются два инварианта:
+Проверяются инварианты:
 - хелпер is_routeweave_dropin в обоих скриптах одинаково отличает свой
   drop-in systemd-resolved от чужого (маркер и совместимость со старым
   содержимым);
+- установщик запоминает цель симлинка /etc/resolv.conf, а uninstall
+  восстанавливает ссылку (а не обычный файл), когда цель доступна;
 - апдейтер списков берёт Bearer-секрет из уже прочитанного .env, а не
   разбирает файл через sed (тот оставлял кавычки и ломал авторизацию).
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -83,3 +86,114 @@ def test_update_lists_uses_env_secret():
     text = UPDATE_LISTS.read_text(encoding="utf-8")
     assert "sed -n 's/^MIHOMO_SECRET=//p'" not in text
     assert "${MIHOMO_SECRET:-}" in text
+
+
+def extract_function(script_name, func_name):
+    """Собрать одну функцию из скрипта по имени."""
+    text = (REPO_ROOT / script_name).read_text(encoding="utf-8")
+    func = re.search(
+        rf"^{re.escape(func_name)}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL
+    )
+    assert func, f"{script_name}: не найдена функция {func_name}"
+    return func.group(0)
+
+
+def run_function(script_name, func_name, *args):
+    """Выполнить извлечённую функцию в bash и вернуть завершённый процесс."""
+    script = extract_function(script_name, func_name) + f'\n{func_name} "$@"\n'
+    return subprocess.run(
+        ["bash", "-c", script, "bash", *map(str, args)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_save_restore_relative_symlink(tmp_path):
+    """Относительная цель: save пишет её, restore возвращает ту же ссылку."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (tmp_path / "run").mkdir()
+    (tmp_path / "run" / "stub-resolv.conf").write_text(
+        "nameserver 127.0.0.53\n", encoding="utf-8"
+    )
+    (etc / "resolv.conf").symlink_to("../run/stub-resolv.conf")
+    out = tmp_path / "resolv.conf.orig.link"
+
+    proc = run_function("install.sh", "save_resolv_symlink", etc, out)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text(encoding="utf-8") == "../run/stub-resolv.conf\n"
+
+    # uninstall уже вернул обычный файл, затем вызывает restore.
+    (etc / "resolv.conf").unlink()
+    (etc / "resolv.conf").write_text("nameserver 77.88.8.8\n", encoding="utf-8")
+    proc = run_function("uninstall.sh", "restore_resolv_symlink", etc, out)
+    assert proc.returncode == 0, proc.stderr
+    assert (etc / "resolv.conf").is_symlink()
+    assert os.readlink(etc / "resolv.conf") == "../run/stub-resolv.conf"
+
+
+def test_save_restore_absolute_symlink(tmp_path):
+    """Абсолютная цель: сохраняется и восстанавливается без изменений."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    target = tmp_path / "stub-resolv.conf"
+    target.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    (etc / "resolv.conf").symlink_to(target)
+    out = tmp_path / "resolv.conf.orig.link"
+
+    proc = run_function("install.sh", "save_resolv_symlink", etc, out)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text(encoding="utf-8") == f"{target}\n"
+
+    (etc / "resolv.conf").unlink()
+    (etc / "resolv.conf").write_text("nameserver 77.88.8.8\n", encoding="utf-8")
+    proc = run_function("uninstall.sh", "restore_resolv_symlink", etc, out)
+    assert proc.returncode == 0, proc.stderr
+    assert (etc / "resolv.conf").is_symlink()
+    assert os.readlink(etc / "resolv.conf") == str(target)
+
+
+def test_save_regular_file_writes_nothing(tmp_path):
+    """Обычный файл: save возвращает 1 и не создаёт файл с целью ссылки."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "resolv.conf").write_text("nameserver 192.168.1.1\n", encoding="utf-8")
+    out = tmp_path / "resolv.conf.orig.link"
+
+    proc = run_function("install.sh", "save_resolv_symlink", etc, out)
+    assert proc.returncode == 1, proc.stderr
+    assert not out.exists()
+
+
+def test_restore_dangling_symlink_keeps_regular_file(tmp_path):
+    """Цель ссылки недоступна: restore возвращает 2, файл остаётся обычным."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "resolv.conf").symlink_to("../run/missing.conf")
+    out = tmp_path / "resolv.conf.orig.link"
+
+    proc = run_function("install.sh", "save_resolv_symlink", etc, out)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_text(encoding="utf-8") == "../run/missing.conf\n"
+
+    (etc / "resolv.conf").unlink()
+    (etc / "resolv.conf").write_text("nameserver 77.88.8.8\n", encoding="utf-8")
+    proc = run_function("uninstall.sh", "restore_resolv_symlink", etc, out)
+    assert proc.returncode == 2, proc.stderr
+    assert not (etc / "resolv.conf").is_symlink()
+    assert (etc / "resolv.conf").read_text(encoding="utf-8") == "nameserver 77.88.8.8\n"
+
+
+def test_restore_without_link_file(tmp_path):
+    """Файла с целью ссылки нет: restore возвращает 1 и ничего не трогает."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "resolv.conf").write_text("nameserver 77.88.8.8\n", encoding="utf-8")
+
+    proc = run_function(
+        "uninstall.sh", "restore_resolv_symlink", etc, tmp_path / "absent.link"
+    )
+    assert proc.returncode == 1, proc.stderr
+    assert not (etc / "resolv.conf").is_symlink()
+    assert (etc / "resolv.conf").read_text(encoding="utf-8") == "nameserver 77.88.8.8\n"

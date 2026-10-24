@@ -157,6 +157,26 @@ is_routeweave_dropin() {
   [ "$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null)" = "$(printf '[Resolve]\nDNSStubListener=no')" ]
 }
 
+# Восстанавливает симлинк resolv.conf, если он был симлинком до установки.
+# Коды: 0 — ссылка восстановлена, 1 — записанной ссылки нет,
+#       2 — цель ссылки отсутствует (оставляем обычный файл),
+#       3/4 — ошибка создания/подмены.
+restore_resolv_symlink() {
+  local etc=${1:-/etc} linkf=$2 target abs tmp
+  [ -s "$linkf" ] || return 1
+  target=$(head -n1 "$linkf")
+  [ -n "$target" ] || return 1
+  case $target in
+    /*) abs=$target ;;
+    *)  abs="$etc/$target" ;;
+  esac
+  [ -e "$abs" ] || return 2
+  tmp="$etc/.resolv.conf.lnk.$$"
+  ln -sfn "$target" "$tmp" 2>/dev/null || return 3
+  mv -f "$tmp" "$etc/resolv.conf" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 4; }
+  return 0
+}
+
 # install.sh заменил /etc/resolv.conf обычным файлом и положил drop-in
 # systemd-resolved. Возвращаем исходное состояние: сначала файл (атомарно,
 # через временный файл в /etc + mv), потом drop-in, потом рестарт юнита.
@@ -218,6 +238,31 @@ if systemctl cat systemd-resolved.service >/dev/null 2>&1; then
 else
   info "юнита systemd-resolved нет — рестарт пропущен"
 fi
+
+# Симлинк возвращаем после рестарта: цель /run/systemd/resolve/stub-resolv.conf
+# появляется только при работающем systemd-resolved. При ошибке остаётся
+# обычный файл, восстановленный выше, — DNS продолжает работать.
+restore_rc=0
+restore_resolv_symlink /etc "$BACKUP_DIR/resolv.conf.orig.link" || restore_rc=$?
+case "$restore_rc" in
+  0)
+    ok "/etc/resolv.conf восстановлен как симлинк на $(readlink /etc/resolv.conf 2>/dev/null)"
+    ;;
+  1)
+    : # записанной ссылки нет — обычный случай
+    ;;
+  2)
+    link_target=$(head -n1 "$BACKUP_DIR/resolv.conf.orig.link" 2>/dev/null || true)
+    case "$link_target" in
+      /*) link_abs=$link_target ;;
+      *)  link_abs="/etc/$link_target" ;;
+    esac
+    info "цель $link_abs пока недоступна — оставляю /etc/resolv.conf обычным файлом с тем же содержимым"
+    ;;
+  *)
+    warn "не удалось восстановить симлинк /etc/resolv.conf — оставлен обычный файл"
+    ;;
+esac
 
 # Согласованность после рестарта, без сетевых проверок: если resolv.conf
 # указывает на stub (127.0.0.53/127.0.0.1), а порт 53 никто не слушает, DNS

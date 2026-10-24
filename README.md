@@ -344,6 +344,10 @@ reverse-proxy: открывайте только те порты, которые
   файл (чужой восстанавливает из бэкапа). Если после удаления
   `/etc/resolv.conf` указывает на `127.0.0.53`, а порт 53 никто не слушает,
   скрипт записывает рабочий статический `resolv.conf` с публичным DNS.
+  Если до установки `/etc/resolv.conf` был симлинком (в Ubuntu 26.04 — на
+  `../run/systemd/resolve/stub-resolv.conf`), `uninstall.sh` после рестарта
+  `systemd-resolved` возвращает ссылку, а не обычный файл с её содержимым;
+  цель сохраняется при установке в `backup/resolv.conf.orig.link`.
   Повторный `install.sh` не трогает `systemd-resolved`, если порт 53 уже
   слушает mihomo.
 - **`mihomo v3` / `unsupported instruction`.** Нужен `-compatible` бинарник.

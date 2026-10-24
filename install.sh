@@ -637,6 +637,17 @@ is_routeweave_dropin() {
   [ "$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null)" = "$(printf '[Resolve]\nDNSStubListener=no')" ]
 }
 
+# Запоминает цель симлинка resolv.conf, чтобы uninstall вернул ссылку, а не
+# обычный файл с её содержимым. <etc-dir> <файл-назначение>
+save_resolv_symlink() {
+  local etc=${1:-/etc} out=$2 target
+  rm -f "$out" 2>/dev/null || true
+  [ -L "$etc/resolv.conf" ] || return 1
+  target=$(readlink "$etc/resolv.conf" 2>/dev/null) || return 1
+  [ -n "$target" ] || return 1
+  printf '%s\n' "$target" > "$out" || return 1
+}
+
 # Кто слушает 53: free | mihomo | resolved | other
 port53_owner() {
   local out
@@ -659,6 +670,10 @@ case "$(port53_owner)" in
     # Бэкап исходного resolv.conf — один раз, повторные запуски не перезаписывают.
     if [ ! -e "$BACKUP_DIR/resolv.conf.orig" ] && [ -e /etc/resolv.conf ]; then
       cp -aL /etc/resolv.conf "$BACKUP_DIR/resolv.conf.orig"
+      # Цель ссылки сохраняем один раз вместе с бэкапом: при повторной
+      # установке /etc/resolv.conf уже обычный файл, и перезапись потеряла бы
+      # исходную цель.
+      save_resolv_symlink /etc "$BACKUP_DIR/resolv.conf.orig.link" || true
     fi
     # Бэкапим drop-in только если он чужой: свой файл восстанавливать не нужно.
     if [ -f "$RESOLVED_DROPIN" ] && ! is_routeweave_dropin "$RESOLVED_DROPIN" \
