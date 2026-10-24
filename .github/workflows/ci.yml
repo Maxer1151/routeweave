@@ -53,6 +53,8 @@ jobs:
   # отдельный шаг проверяет, что хотя бы часть тестов реально прошла.
   # В container-job шаги по умолчанию идут через sh (dash), а в шаге
   # pytest используется set -o pipefail — поэтому принудительно bash.
+  # Профиль AppArmor docker-default запрещает mount, без которого не работает
+  # ip netns add, поэтому для netns-тестов он отключён (capability остаются).
   firewall:
     runs-on: ubuntu-latest
     defaults:
@@ -60,7 +62,7 @@ jobs:
         shell: bash
     container:
       image: ubuntu:24.04
-      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN
+      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
     steps:
       - name: Установить git для checkout
         run: |
