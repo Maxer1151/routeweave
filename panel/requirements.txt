@@ -1,3 +1,7 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-httpx[socks]>=0.27
+# Точные пины: панель обновляется редко, а зависимости должны ставиться
+# без сюрпризов на Python 3.12 и 3.14. Набор проверен совместно:
+# fastapi 0.162 → starlette 1.10 + pydantic 2.x.
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+# httpx нужен для проб путей; extra socks — для socks5-прокси mihomo.
+httpx[socks]==0.28.1
