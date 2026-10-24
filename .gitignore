@@ -13,3 +13,4 @@ venv/
 state.json
 *.zip
 *.gz
+*.local.md
