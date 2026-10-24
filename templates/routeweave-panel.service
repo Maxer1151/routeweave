@@ -1,23 +1,34 @@
 # Routeweave: веб-панель (FastAPI/uvicorn) от непривилегированного пользователя.
 #
-# Почему User=routeweave, пустой CapabilityBoundingSet и не root:
+# Почему User=routeweave и не root:
 #   панели root не нужен. Все привилегированные действия (restart mihomo /
 #   zapret-nfqws / routeweave-panel, обновление списков, tg-ws-proxy) она
 #   делает через `sudo -n` строго по allowlist из
 #   /etc/sudoers.d/routeweave-panel — там перечислены конкретные команды, без
 #   wildcard. Если панель скомпрометируют (RCE в веб-морде), атакующий
-#   получит только эти команды, а не root. Пустой CapabilityBoundingSet
-#   гарантирует, что даже при ошибке в юните процесс не унаследует ни одной
-#   capability: ядро отдаст их пустой набор.
+#   получит только эти команды, а не root.
 #
-# Почему NoNewPrivileges здесь НЕ включается:
+# Почему CapabilityBoundingSet непустой:
+#   /usr/bin/sudo — setuid-root бинарник, и при exec ядро поднимает его
+#   capabilities только в пределах bounding set процесса: чего в наборе нет,
+#   того sudo не получит. С пустым набором sudo не может сменить пользователя
+#   и падает с «unable to set groups» / «could not restore to saved user id»
+#   (особенно в sudo-rs на Ubuntu 25.10+/26.04), поэтому кнопки панели
+#   перестают работать. Перечисленный набор — минимум для elevate и работы от
+#   другого пользователя: CAP_SETUID, CAP_SETGID, CAP_CHOWN,
+#   CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_KILL,
+#   CAP_AUDIT_WRITE, CAP_SYS_CHROOT. Широких capability (CAP_SYS_ADMIN,
+#   CAP_NET_ADMIN, CAP_SYS_PTRACE и т.п.) в нём нет, так что компрометация
+#   панели по-прежнему ограничена sudo-allowlist'ом.
+#
+# Почему NoNewPrivileges=no:
 #   NoNewPrivileges=yes запрещает повышение привилегий через execve setuid-
 #   бинарников, а /usr/bin/sudo именно setuid-root. С этим флагом панель
 #   получила бы от sudo «The "no new privileges" flag is set, which prevents
 #   sudo from running as root», и кнопки перезапуска/обновления сломались бы.
-#   Эквивалентная защита достигнута иначе: пустой CapabilityBoundingSet,
-#   ProtectSystem=strict, ProtectHome, PrivateTmp, RestrictAddressFamilies и
-#   sudo-allowlist без wildcard.
+#   Остальные ограничения (узкий CapabilityBoundingSet, ProtectSystem=strict,
+#   ProtectHome, PrivateTmp, RestrictAddressFamilies и sudo-allowlist без
+#   wildcard) остаются в силе.
 #
 # Почему ProtectSystem=strict и ReadWritePaths только списки/run:
 #   панель не должна писать в /etc, /opt, /usr — это делает установщик от
@@ -51,7 +62,7 @@ ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/etc/routeweave/lists /run
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT
 
 [Install]
 WantedBy=multi-user.target
