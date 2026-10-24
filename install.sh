@@ -202,6 +202,7 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-tgws-restart.sh \
     templates/routeweave-tgws-state.sh \
     templates/fw-base.sh \
+    templates/fw-wan.sh \
     templates/fw-nfq.sh \
     templates/mihomo.service \
     templates/routeweave-firewall.service \
@@ -782,6 +783,7 @@ fi
 
 # fw-скрипты и конфиг zapret
 install -m 0755 "$APP_DIR/templates/fw-base.sh" "$ETC/fw-base.sh"
+install -m 0755 "$APP_DIR/templates/fw-wan.sh" "$ETC/fw-wan.sh"
 install -m 0755 "$APP_DIR/templates/fw-nfq.sh"  "$ETC/fw-nfq.sh"
 
 # .env — источник истины для config.yaml и LAN_IFACE; из LAN_IFACE ниже

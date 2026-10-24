@@ -1,3 +1,7 @@
+# mihomo при старте пересоздаёт policy-routing (таблица 2022, правила
+# 9001/9002), поэтому правило WAN-доступа (priority 8993) переутверждается
+# после каждого (пере)запуска. Префикс "-" в ExecStartPost: на старых
+# установках без fw-wan.sh юнит не должен падать.
 [Unit]
 Description=Routeweave mihomo (transparent proxy core)
 Documentation=https://wiki.metacubex.one
@@ -9,6 +13,7 @@ Type=simple
 LimitNOFILE=1048576
 ExecStartPre=/usr/bin/test -c /dev/net/tun
 ExecStart=/usr/local/bin/mihomo -d /etc/routeweave
+ExecStartPost=-/etc/routeweave/fw-wan.sh start
 WorkingDirectory=/etc/routeweave
 Restart=on-failure
 RestartSec=3

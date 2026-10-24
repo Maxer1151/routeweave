@@ -50,7 +50,7 @@ Routeweave — удаление шлюза.
 
 Что делает:
   - останавливает и отключает systemd-юниты Routeweave;
-  - снимает правила firewall (fw-nfq.sh stop, fw-base.sh stop);
+  - снимает правила firewall (fw-nfq.sh stop, fw-wan.sh stop, fw-base.sh stop);
   - удаляет юниты, helper-скрипты, sudoers панели, лаунчер nfqws, панель,
     zapret и mihomo;
   - останавливает и удаляет docker-контейнер routeweave-tgwsproxy;
@@ -109,6 +109,11 @@ if [ -x "$ETC/fw-nfq.sh" ]; then
   "$ETC/fw-nfq.sh" stop >/dev/null 2>&1 || warn "fw-nfq.sh stop завершился с ошибкой (проверьте iptables -t mangle -S)"
 else
   warn "$ETC/fw-nfq.sh не найден — правило NFQUEUE снимите вручную (iptables -t mangle -S | grep NFQUEUE)"
+fi
+if [ -x "$ETC/fw-wan.sh" ]; then
+  "$ETC/fw-wan.sh" stop >/dev/null 2>&1 || warn "fw-wan.sh stop завершился с ошибкой (проверьте iptables -t mangle -S ROUTEWEAVE-WANMARK и ip rule show)"
+else
+  warn "$ETC/fw-wan.sh не найден — цепочки ROUTEWEAVE-WANMARK* и ip rule priority 8993 снимите вручную"
 fi
 if [ -x "$ETC/fw-base.sh" ]; then
   "$ETC/fw-base.sh" stop >/dev/null 2>&1 || warn "fw-base.sh stop завершился с ошибкой (проверьте iptables -S ROUTEWEAVE-FWD)"
@@ -304,7 +309,8 @@ echo -e "${C_G}[+] Routeweave удалён.${C_N}"
 echo
 echo "Удалено:"
 echo "  - systemd-юниты: routeweave-firewall, mihomo, zapret-nfqws, routeweave-panel,"
-echo "    routeweave-lists-update.service/.timer (+ правила firewall сняты);"
+echo "    routeweave-lists-update.service/.timer (+ правила firewall сняты,"
+echo "    включая WAN-маркировку и ip rule 8993);"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"
 echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin;"
 echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws;"

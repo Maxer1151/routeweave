@@ -53,6 +53,17 @@
 
 ### Добавлено
 
+- `feat(firewall): доступ из WAN (WAN_INGRESS)`:
+  - цепочка `ROUTEWEAVE-WANMARK` помечает входящие NEW-соединения на
+    `WAN_PORTS` и восстанавливает connmark на ответах (`restore-mark` первым,
+    иначе ответ контейнера с приватным src теряет метку);
+  - `ip rule fwmark 0x40000/0x40000 lookup main priority 8993` уводит
+    помеченные пакеты в `main` до правил mihomo `9001`/`9002`;
+  - `fw-wan.sh start|stop|status|doctor`, идемпотентные запуск и остановка,
+    диагностика маршрута, приоритетов и `auto-redirect`;
+  - `mihomo.service` переутверждает правило через `ExecStartPost` после
+    пересоздания policy-routing, `routeweave-firewall.service` получил второй
+    `ExecStart`/`ExecStop`.
 - `pytest.ini`, `tests/conftest.py`, `Makefile` (`lint`, `test`, `all`,
   `clean`, `help`) и CI на GitHub Actions: линт, тесты и отдельный job с
   netns/iptables для firewall-тестов.
