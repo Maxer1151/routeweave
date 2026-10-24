@@ -10,7 +10,8 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 
 - Маршрутизация по доменам: отдельные списки для geo (SOCKS), dpi (zapret) и RU-направления.
 - fake-ip DNS на порту 53 и правила mihomo на файловых rule-provider'ах.
-- Firewall: `ip_forward`, FORWARD-правила для LAN и WDTT, опциональный drop QUIC.
+- Firewall: отдельная цепочка `ROUTEWEAVE-FWD`, forwarding для LAN и VPN,
+  опциональный drop QUIC выше разрешающих правил.
 - Автообновление списков по systemd-таймеру.
 - Веб-панель: статусы сервисов, пробы путей, редактор списков, перезапуски.
 - zashboard для соединений и трафика.
@@ -70,20 +71,26 @@ sudo env INSTALL_WDTT=yes bash install.sh   # + WDTT-Plus (amd64)
 mihomo до свежего релиза (если версия отличается), юниты и конфиги, но сохраняет
 `.env` и списки.
 
+Если на шлюзе активен ufw, установщик открывает доступ из LAN и `WG_SUBNET`
+к `53/tcp+udp`, `7890/tcp`, `9090/tcp`, `PANEL_PORT/tcp` и `1443/tcp` (при
+`INSTALL_TGWS=yes`), а также разрешает forwarding для LAN-интерфейса и
+`wdtt0`. Правила добавляются идемпотентно, повторный запуск дублей не создаёт.
+
 ## Параметры `.env`
 
-Файл `/etc/routeweave/.env` создаётся с `chmod 600`. Секреты генерирует
-установщик, в консоль они не печатаются.
+Файл `/etc/routeweave/.env` создаётся с правами `0640 root:routeweave`:
+читать его могут только root и сервисный пользователь панели. Секреты
+генерирует установщик, в консоль они не печатаются.
 
 | Ключ | Назначение |
 |---|---|
 | `LAN_IFACE` | LAN-интерфейс сервера (единственная NIC) |
 | `SERVER_IP` | LAN-IP сервера, статичный или зарезервированный в DHCP |
-| `SOCKS_URL` | Внешний SOCKS/HTTP-прокси для geo; пусто = гео напрямую |
+| `SOCKS_URL` | Внешний прокси для geo: `socks5h://` (имя резолвит прокси), `socks5://`, `socks://`, `http://`, `https://`; пусто = гео напрямую |
 | `BASE_DOMAIN` | Домен CF Worker для tg-ws-proxy |
 | `TG_CF_WORKER_DOMAIN` | Домен CF Worker (обычно совпадает с `BASE_DOMAIN`) |
-| `TG_LINK_IP` | IP/хост для tg://-ссылки; пусто = `SERVER_IP` |
-| `WG_SUBNET` | Подсеть клиентов WDTT, по умолчанию `10.66.66.0/24` |
+| `TG_LINK_IP` | IP/хост для `tg://`-ссылки в панели; пусто = `SERVER_IP` |
+| `WG_SUBNET` | Подсеть клиентов WDTT (`wdtt0`), по умолчанию `10.66.66.0/24`; policy-routing — `ip rule` priority 8990 |
 | `PANEL_PORT` | Порт веб-панели, по умолчанию `8080` |
 | `PANEL_USER` | Логин панели, по умолчанию `admin` |
 | `PANEL_PASS` | Пароль панели; генерируется установщиком |
@@ -91,6 +98,17 @@ mihomo до свежего релиза (если версия отличает�
 | `TG_SECRET` | Секрет MTProto-прокси; только при `INSTALL_TGWS=yes` |
 | `QUIC_DROP` | Резать UDP/443: `yes`/`no` |
 | `FAKEIP_EXTRA` | Доп. записи в fake-ip-filter через запятую |
+
+Переменные времени установки читаются из окружения, а не из `.env`:
+
+| Переменная | Назначение |
+|---|---|
+| `ZAPRET_REF` | Ветка/тег zapret при клонировании и обновлении, по умолчанию `master`; фактический коммит пишется в `/etc/routeweave/zapret.commit` |
+| `MIHOMO_SHA256` | Ожидаемая sha256 архива mihomo, если апстрим не публикует `<url>.sha256` |
+| `ZASHBOARD_SHA256` | То же для `dist.zip` zashboard |
+
+Если контрольная сумма недоступна ни у апстрима, ни в переменной, установщик
+предупреждает, что целостность загрузки не проверена.
 
 ## После установки
 
@@ -134,17 +152,26 @@ journalctl -u routeweave-lists-update -n 50
 
 ## Панель
 
-Панель закрыта Basic-авторизацией (`PANEL_USER` / `PANEL_PASS`). Вкладки:
+Панель закрыта Basic-авторизацией (`PANEL_USER` / `PANEL_PASS`). Она работает
+от системного пользователя `routeweave`, а привилегированные действия
+(перезапуск mihomo/zapret/панели, обновление списков, управление tgws)
+выполняются через `sudo -n` строго по allowlist из
+`/etc/sudoers.d/routeweave-panel` — без wildcard. Изменяющие запросы защищены
+от CSRF, ответы отдаются с CSP и security-заголовками. Вкладки:
 
 - `geo-custom (→ SOCKS)` — пишет `geo-custom.txt`;
 - `dpi (→ zapret)` — пишет `dpi.txt`;
 - `ru-custom (→ direct)` — пишет `ru-direct-custom.txt`.
 
 Кнопка «Сохранить» только пишет файл. Кнопка «Сохранить, обновить списки и
-mihomo» запускает апдейтер (для `dpi` — перезапуск `zapret-nfqws`).
-Подсказка в панели напоминает, что `geo.txt` и `ru-direct.txt` генерируются
-таймером, поэтому править нужно custom-списки и `dpi.txt`. Zashboard открывается
+mihomo» запускает апдейтер (для `dpi` — перезапуск `zapret-nfqws`); применение
+выполняется в фоне, прогресс отдаёт `GET /api/jobs/apply`. Подсказка в панели
+напоминает, что `geo.txt` и `ru-direct.txt` генерируются таймером, поэтому
+править нужно custom-списки и `dpi.txt`. Zashboard открывается
 по `http://SERVER_IP:9090/ui/`.
+
+При заданном `TG_SECRET` панель показывает готовую ссылку
+`tg://proxy?server=<TG_LINK_IP|SERVER_IP>&port=1443&secret=<TG_SECRET>`.
 
 ## DPI и fwmark
 
@@ -168,10 +195,12 @@ CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
 ## Опционально: WDTT-Plus и Tailscale
 
 WDTT-Plus включается `INSTALL_WDTT=yes`, только amd64. DTLS `56000/udp`,
-внутренний WireGuard `56001/udp`, начальный конфиг
+внутренний WireGuard `56001/udp`, интерфейс `wdtt0`, начальный конфиг
 `/root/wdtt-initial.json`. VK-хеш создаётся вручную. Управление:
 `/opt/wdtt-installer/install.sh status|doctor|monitor`. Подсеть `WG_SUBNET`
-получает ту же политику, что LAN.
+(по умолчанию `10.66.66.0/24`) получает ту же политику, что LAN; для неё
+добавляется `ip rule` priority 8990. Firewall учитывает `wdtt0`,
+`tailscale0` и существующие `wg*`.
 
 Tailscale настраивается отдельно, Routeweave его не трогает. При проблемах
 смотрите `tailscale status`.
@@ -181,7 +210,7 @@ Tailscale настраивается отдельно, Routeweave его не т
 | Порт | Протокол | Назначение |
 |---|---|---|
 | 53 | TCP + UDP | DNS mihomo (fake-ip) |
-| 8080 | TCP | Веб-панель |
+| 8080 | TCP | Веб-панель (`PANEL_PORT`) |
 | 9090 | TCP | mihomo API и zashboard |
 | 7890 | TCP | mixed-proxy mihomo (`allow-lan`) |
 | 1443 | TCP | tg-ws-proxy (опц.) |
@@ -193,12 +222,29 @@ Tailscale настраивается отдельно, Routeweave его не т
 
 ## Безопасность
 
-- `.env` создаётся с правами `0600`.
-- Установщик не печатает пароли и секреты в консоль.
-- Панель не отдаёт `.env`.
-- Не выставляйте `8080`, `9090`, `1443` и `53` в интернет.
-- SOCKS-креды лежат в `.env`; не публикуйте файл.
+- Панель рассчитана на доверенную LAN. Не выставляйте `8080`, `9090`, `1443`,
+  `7890` и `53` в интернет; при необходимости удалённого доступа — VPN или
+  reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
+- `.env` создаётся с правами `0640 root:routeweave`. Контейнер tg-ws-proxy
+  получает только свои три переменные (`.env.tgws`) и не видит секретов
+  панели и mihomo.
+- Панель работает от пользователя `routeweave`; root-доступ — только через
+  `sudo -n` по allowlist `/etc/sudoers.d/routeweave-panel`, без wildcard.
+- `NoNewPrivileges=no` в юните панели стоит осознанно: иначе setuid-`sudo`
+  не работает. Компенсация — пустой `CapabilityBoundingSet`,
+  `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+  `RestrictAddressFamilies` и узкий sudo-allowlist.
+- Изменяющие запросы защищены от CSRF (`Origin`, `Referer`,
+  `Sec-Fetch-Site`), CSP запрещает inline-скрипты и стили, ответы получают
+  security-заголовки.
+- Firewall держит правила в отдельной цепочке `ROUTEWEAVE-FWD`; `QUIC_DROP`
+  стоит выше `ACCEPT`.
+- Установщик не печатает секреты в консоль и не отдаёт `.env` через панель.
+- SOCKS-креды лежат в `.env`; не публикуйте файл, логи и дампы.
 - Не коммитьте `.env`, логи и дампы: в логах могут быть креды.
+
+Подробности модели угроз и порядок ответственного раскрытия — в
+[`SECURITY.md`](SECURITY.md).
 
 ## Ограничения
 
@@ -233,13 +279,39 @@ Tailscale настраивается отдельно, Routeweave его не т
 ## Обновление и удаление
 
 Повторный `sudo bash install.sh` обновляет mihomo при новой версии, юниты и
-конфиги; `.env` и списки сохраняются. `config.yaml` и `zapret.conf` создаются
-заново (рендер из `.env` и шаблона), поэтому ручные правки `zapret.conf` лучше
-сохранить заранее.
+конфиги; `.env` и списки сохраняются. `zapret.conf` **сохраняется**: при
+изменении `LAN_IFACE` обновляется только строка `WAN_IFACE=`, а перед
+правкой делается бэкап `zapret.conf.bak-<timestamp>`. `config.yaml`
+регенерируется из `.env`, но прежняя версия также сохраняется в бэкап.
 
 `sudo bash uninstall.sh` останавливает и удаляет юниты, панель, zapret,
 mihomo, таймер и апдейтер списков; контейнер tg-ws-proxy также останавливается
 и удаляется. Каталог `/etc/routeweave` остаётся. WDTT-Plus не затрагивается.
+
+## Разработка
+
+Зависимости для тестов ставьте в venv:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r panel/requirements.txt pytest pyyaml
+```
+
+Основные команды:
+
+```bash
+make lint    # bash -n, shellcheck, ruff, compileall
+make test    # pytest tests -v
+make all     # lint + test (цель по умолчанию)
+make help    # список целей
+```
+
+`make lint` требует `shellcheck` и `ruff` в PATH; пути можно задать
+переменными (`make lint SHELLCHECK=... RUFF=...`). Firewall-тесты помечены
+`privileged` и без root/netns корректно пропускаются. CI (GitHub Actions)
+прогоняет линт, тесты и отдельный job с `NET_ADMIN`/`SYS_ADMIN` для
+firewall-тестов.
 
 ## Лицензия
 

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установить shellcheck и ruff
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          python -m pip install ruff==0.17.2
+
+      - name: make lint
+        run: make lint SHELLCHECK=shellcheck RUFF=ruff
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r panel/requirements.txt pytest pyyaml
+
+      - name: pytest
+        run: python -m pytest tests -v -rs
+
+      - name: Проверить синтаксис Python
+        run: python -m compileall -q panel templates tests
+
+  # netns (ip netns add) требует SYS_ADMIN, а iptables внутри namespace —
+  # NET_ADMIN. Без этих capability тесты молча уйдут в skip, поэтому ниже
+  # отдельный шаг проверяет, что хотя бы часть тестов реально прошла.
+  firewall:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN
+    steps:
+      - name: Установить git для checkout
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - uses: actions/checkout@v4
+
+      - name: Установить iptables, iproute2 и pytest
+        run: |
+          apt-get install -y --no-install-recommends iptables iproute2 python3 python3-pip
+          python3 -m pip install --break-system-packages pytest
+
+      - name: pytest (firewall)
+        run: |
+          set -o pipefail
+          python3 -m pytest tests/test_firewall.py -v -rs | tee /tmp/fw.log
+
+      - name: Проверить, что тесты не все skip
+        run: |
+          if ! grep -qE '[1-9][0-9]* passed' /tmp/fw.log; then
+            echo "::error::firewall-тесты не выполнились (все skip?)"
+            exit 1
+          fi
