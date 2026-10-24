@@ -1,189 +1,270 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Routeweave panel</title>
-<style>
-  :root{--bg:#0f1419;--card:#1a2129;--card2:#212b36;--tx:#dbe4ee;--mut:#7d8ca0;--ok:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#4c8dff;}
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;padding:24px;max-width:1080px;margin:0 auto}
-  h1{font-size:20px;margin-bottom:4px}
-  .sub{color:var(--mut);margin-bottom:20px}
-  h2{font-size:15px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:26px 0 10px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
-  .card{background:var(--card);border:1px solid #263141;border-radius:10px;padding:14px}
-  .card .name{font-weight:600;display:flex;align-items:center;gap:8px}
-  .dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:none}
-  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)}
-  .card .st{color:var(--mut);font-size:12px;margin:6px 0 10px}
-  button{background:var(--card2);color:var(--tx);border:1px solid #2c3a4d;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px}
-  button:hover{border-color:var(--acc)}
-  button.pri{background:#1d3a68;border-color:#2b5aa8}
-  button:disabled{opacity:.5;cursor:wait}
-  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid #263141;border-radius:10px;overflow:hidden}
-  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid #22303f;font-size:13px}
-  th{color:var(--mut);font-weight:600;background:#161d26}
-  tr:last-child td{border-bottom:none}
-  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;font-weight:600}
-  .b-ok{background:#12351c;color:var(--ok)} .b-bad{background:#3d1512;color:var(--bad)} .b-skip{background:#333b1a00;color:var(--mut);border:1px solid #2c3a4d}
-  .detail{color:var(--mut)}
-  textarea{width:100%;min-height:260px;background:#0d1117;color:var(--tx);border:1px solid #2c3a4d;border-radius:8px;padding:10px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;resize:vertical}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
-  .tabs{display:flex;gap:6px;margin-bottom:8px}
-  .tabs button{border-radius:8px 8px 0 0}
-  .tabs button.on{background:#1d3a68;border-color:#2b5aa8}
-  .kv{display:grid;grid-template-columns:220px 1fr;gap:6px 14px;background:var(--card);border:1px solid #263141;border-radius:10px;padding:14px;font-size:13px}
-  .kv b{color:var(--mut);font-weight:500}
-  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
-  #msg{position:fixed;right:18px;bottom:18px;background:var(--card2);border:1px solid #2c3a4d;border-radius:10px;padding:10px 16px;display:none;max-width:420px}
-  .hint{color:var(--mut);font-size:12px;margin-top:6px}
-</style>
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Локальная панель шлюза Routeweave: состояние сервисов, пробы путей, списки доменов и конфигурация.">
+<title>Routeweave — панель шлюза</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
 </head>
 <body>
-<h1>Routeweave</h1>
-<div class="sub">Локальная панель шлюза · <a href="/ui/" target="_blank">Zashboard (соединения/трафик)</a></div>
+<a class="skip-link" href="#main">Перейти к содержимому</a>
 
-<h2>Сервисы</h2>
-<div class="grid" id="svc"></div>
+<svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></symbol>
+  <symbol id="i-routes" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M6 16V9a4 4 0 0 1 4-4h4"/><path d="M15 12l3 3 3-3" transform="translate(-3 -2)"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M2 2l20 20"/><path d="M9 18.5a3 3 0 0 1 6 0"/><path d="M5.5 14.5a9 9 0 0 1 3-2"/><path d="M2 9a15 15 0 0 1 4.5-2.5"/><path d="M15.5 5.5A15 15 0 0 1 22 9"/><path d="M14 12.5a5 5 0 0 1 2.5 1"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-logo" viewBox="0 0 32 32"><path d="M6 22c6 0 8-12 14-12" stroke-width="3"/><path d="M6 10c6 0 8 12 14 12" stroke-width="3"/><circle cx="24.5" cy="8.5" r="2.5" fill="currentColor" stroke="none"/><circle cx="24.5" cy="23.5" r="2.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-spinner" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9" /></symbol>
+</svg>
 
-<h2>Пробы путей</h2>
-<div class="row"><button class="pri" id="runProbe">Запустить пробы</button><span class="hint" id="probeTs"></span></div>
-<div style="margin-top:10px">
-<table id="probeTable">
-  <tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr>
-</table>
-<div class="hint">chatgpt — через mihomo→SOCKS · youtube — прямой путь + zapret · tg — локальный tg-ws-proxy:1443 (опционально) · worker — ваш CF Worker</div>
+<div class="page">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg class="icon icon-lg"><use href="#i-logo"/></svg></span>
+      <span class="brand-text">
+        <span class="brand-name">Routeweave</span>
+        <span class="brand-sub">панель шлюза</span>
+      </span>
+    </div>
+    <div class="topbar-tools">
+      <span class="pill pill--mono" id="gw-ip" hidden></span>
+      <span class="updated" id="updated-at" aria-live="off">—</span>
+      <button type="button" class="icon-btn" id="theme-toggle" aria-label="Переключить тему">
+        <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-moon" id="theme-icon"/></svg>
+      </button>
+      <button type="button" class="btn btn--ghost" id="refresh-btn" aria-label="Обновить данные">
+        <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>
+        <span>Обновить</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner banner--auth" id="auth-banner" role="alert" hidden>
+    <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+    <div class="banner-body">
+      <strong>Требуется авторизация</strong>
+      <span>Обновите страницу и введите логин и пароль из <code>/etc/routeweave/.env</code>.</span>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" id="auth-reload">Обновить страницу</button>
+  </div>
+
+  <div class="banner banner--warn" id="net-banner" role="alert" hidden>
+    <svg class="icon" aria-hidden="true"><use href="#i-wifi-off"/></svg>
+    <div class="banner-body">
+      <strong>Нет связи с панелью</strong>
+      <span>Последние данные могли устареть. Панель перезапускается или недоступна в сети.</span>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" id="net-retry">Повторить</button>
+  </div>
+
+  <main id="main">
+
+    <section class="hero" id="hero" aria-labelledby="hero-title" data-tone="pending">
+      <div class="hero-status">
+        <span class="hero-icon" id="hero-icon" aria-hidden="true"><svg class="icon icon-xl"><use href="#i-spinner"/></svg></span>
+        <div class="hero-body">
+          <p class="eyebrow">Состояние шлюза</p>
+          <h1 class="hero-title" id="hero-title">Проверяем состояние…</h1>
+          <p class="hero-desc" id="hero-desc">Получаем данные от панели — это займёт пару секунд.</p>
+        </div>
+      </div>
+      <dl class="hero-facts">
+        <div class="fact">
+          <dt>Сервисы</dt>
+          <dd id="fact-services">—</dd>
+        </div>
+        <div class="fact">
+          <dt>Пробы</dt>
+          <dd id="fact-probes">—</dd>
+        </div>
+        <div class="fact">
+          <dt>mihomo API</dt>
+          <dd id="fact-api">—</dd>
+        </div>
+        <div class="fact">
+          <dt>Обновлено</dt>
+          <dd id="fact-updated">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="section" aria-labelledby="h-services">
+      <div class="section-head">
+        <h2 id="h-services">Сервисы</h2>
+        <p class="section-meta" id="services-meta">systemd и docker</p>
+      </div>
+      <div class="services" id="services"></div>
+    </section>
+
+    <section class="section" aria-labelledby="h-probes">
+      <div class="section-head">
+        <h2 id="h-probes">Пробы путей</h2>
+        <div class="section-tools">
+          <span class="section-meta" id="probes-ts">пробы ещё не запускались</span>
+          <button type="button" class="btn btn--primary" id="probe-run">
+            <span class="btn-icon" id="probe-run-icon" aria-hidden="true"><svg class="icon"><use href="#i-play"/></svg></span>
+            <span id="probe-run-label">Запустить пробы</span>
+          </button>
+        </div>
+      </div>
+      <p class="section-hint">ChatGPT — через SOCKS, YouTube — напрямую с desync, Telegram — локальный прокси :1443, Worker — ваш домен на Cloudflare.</p>
+      <div class="table-wrap">
+        <table class="probe-table" id="probe-table">
+          <caption class="sr-only">Результаты проб путей</caption>
+          <thead>
+            <tr>
+              <th scope="col">Проверка</th>
+              <th scope="col">Результат</th>
+              <th scope="col">Детали</th>
+            </tr>
+          </thead>
+          <tbody id="probe-body">
+            <tr><td colspan="3" class="empty">Загружаем результаты…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="h-lists">
+      <div class="section-head">
+        <h2 id="h-lists">Списки доменов</h2>
+        <p class="section-meta" id="lists-path">/etc/routeweave/lists/</p>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Списки доменов">
+        <button type="button" class="tab" role="tab" id="tab-geo-custom" aria-controls="list-panel" aria-selected="true" tabindex="0" data-list="geo-custom">
+          geo-custom
+          <span class="tab-note">→ SOCKS</span>
+          <span class="tab-dirty" id="dirty-geo-custom" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+        <button type="button" class="tab" role="tab" id="tab-dpi" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="dpi">
+          dpi
+          <span class="tab-note">→ zapret</span>
+          <span class="tab-dirty" id="dirty-dpi" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+        <button type="button" class="tab" role="tab" id="tab-ru-custom" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="ru-custom">
+          ru-custom
+          <span class="tab-note">→ direct</span>
+          <span class="tab-dirty" id="dirty-ru-custom" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+      </div>
+
+      <div class="editor-card" id="list-panel" role="tabpanel" aria-labelledby="tab-geo-custom" tabindex="0">
+        <div class="editor-head">
+          <div class="editor-title">
+            <code class="file-name" id="list-file">geo-custom.txt</code>
+            <span class="pill" id="list-route">→ SOCKS</span>
+            <span class="pill pill--dirty" id="list-dirty" hidden>не сохранено</span>
+          </div>
+          <p class="editor-desc" id="list-desc">Домены, которые идут через внешний SOCKS/HTTP-прокси.</p>
+        </div>
+
+        <label class="sr-only" for="list-editor">Содержимое списка доменов</label>
+        <textarea id="list-editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-describedby="list-counts editor-state"></textarea>
+
+        <div class="editor-foot">
+          <p class="counts" id="list-counts">Строк: — · Символов: —</p>
+          <p class="editor-state" id="editor-state" role="status"></p>
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" class="btn" id="list-save">
+            <svg class="icon" aria-hidden="true"><use href="#i-save"/></svg>
+            <span>Сохранить</span>
+          </button>
+          <button type="button" class="btn btn--primary" id="list-apply">
+            <span class="btn-icon" id="apply-icon" aria-hidden="true"><svg class="icon"><use href="#i-refresh"/></svg></span>
+            <span id="apply-label">Сохранить и применить</span>
+          </button>
+          <p class="hint" id="apply-hint">Ctrl+S — сохранить. Применение обновляет списки и перезапускает mihomo.</p>
+        </div>
+
+        <p class="note" id="lists-note">
+          <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+          <span><code>geo.txt</code> и <code>ru-direct.txt</code> генерируются таймером обновления — правьте только custom-списки и <code>dpi.txt</code>, иначе изменения перезапишутся.</span>
+        </p>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="h-config">
+      <div class="section-head">
+        <h2 id="h-config">Конфигурация</h2>
+        <p class="section-meta">/etc/routeweave/.env</p>
+      </div>
+      <div class="config-grid">
+        <dl class="kv" id="config-list">
+          <div class="kv-row"><dt>IP сервера</dt><dd>—</dd></div>
+        </dl>
+
+        <div class="side-cards">
+          <div class="mini-card">
+            <h3 class="mini-title">
+              <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+              Zashboard
+            </h3>
+            <p class="mini-text">Соединения, трафик и логи mihomo в реальном времени.</p>
+            <a class="btn btn--ghost" href="/ui/" target="_blank" rel="noopener noreferrer">
+              <span>Открыть /ui/</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg>
+            </a>
+          </div>
+
+          <div class="mini-card" id="tg-card" hidden>
+            <h3 class="mini-title">
+              <svg class="icon" aria-hidden="true"><use href="#i-routes"/></svg>
+              Telegram-прокси
+            </h3>
+            <p class="mini-text">MTProto, порт <code>1443</code>. Секрет — в <code>docker logs routeweave-tgwsproxy</code>.</p>
+            <ul class="copy-list" id="tg-list"></ul>
+            <a class="btn btn--ghost btn--sm tg-open" id="tg-open" hidden>
+              <span>Добавить в Telegram</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg>
+            </a>
+            <p class="hint tg-hint" id="tg-secret-hint" hidden>Ссылка содержит секрет прокси — не публикуйте её.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <noscript>
+      <div class="banner banner--warn" role="alert">
+        <div class="banner-body">
+          <strong>Нужен JavaScript</strong>
+          <span>Панель загружает данные через API — включите JavaScript в браузере.</span>
+        </div>
+      </div>
+    </noscript>
+  </main>
+
+  <footer class="footer">
+    <span>Routeweave · локальная панель</span>
+    <span class="footer-dim">доступна только в домашней сети</span>
+  </footer>
 </div>
 
-<h2>Списки доменов</h2>
-<div class="tabs">
-  <button data-l="geo-custom" class="on">geo-custom (→ SOCKS)</button>
-  <button data-l="dpi">dpi (→ zapret)</button>
-  <button data-l="ru-custom">ru-custom (→ direct)</button>
-</div>
-<div class="hint">geo.txt и ru-direct.txt генерируются таймером routeweave-lists-update (04:15 + случайная задержка) — правьте только custom-списки и dpi.txt</div>
-<textarea id="listArea" spellcheck="false"></textarea>
-<div class="row">
-  <button id="saveList">Сохранить</button>
-  <button class="pri" id="applyList">Сохранить, обновить списки и mihomo</button>
-  <span class="hint">geo-custom/ru-custom → mihomo · dpi → zapret-nfqws</span>
-</div>
-
-<h2>Конфигурация</h2>
-<div class="kv" id="cfg"></div>
-<div class="hint" id="tgHint"></div>
-
-<div id="msg"></div>
-
-<script>
-const PROBE_NAMES = {
-  chatgpt_via_socks: "chatgpt.com через SOCKS",
-  socks_exit_ip: "SOCKS exit IP",
-  youtube_direct: "youtube (direct + zapret)",
-  tg_ws_proxy: "tg-ws-proxy :1443",
-  cf_worker: "CF Worker (BASE_DOMAIN)"
-};
-const SVC_NAMES = { mihomo: "mihomo (шлюз)", "zapret-nfqws": "zapret (DPI)", "routeweave-tgwsproxy": "tg-ws-proxy (docker, опционально)", "routeweave-firewall": "firewall", "routeweave-panel": "панель" };
-let curList = "geo-custom";
-
-function msg(t, ok=true){ const m=document.getElementById('msg'); m.textContent=t; m.style.display='block';
-  m.style.borderColor = ok ? 'var(--ok)' : 'var(--bad)'; setTimeout(()=>m.style.display='none', 4000); }
-async function api(path, opt={}){ const r = await fetch(path, opt);
-  if(!r.ok){ let t=await r.text().catch(()=>''); throw new Error(r.status+' '+t.slice(0,200)); }
-  return r.json(); }
-
-function dotCls(st){ return st==='active'||st==='running' ? 'ok' : (st==='unknown'||st==='no-docker-socket'||st==='absent' ? 'warn' : 'bad'); }
-
-function applyLabel(){
-  const b=document.getElementById('applyList');
-  b.textContent = curList==='dpi' ? 'Сохранить и перезапустить zapret' : 'Сохранить, обновить списки и mihomo';
-}
-
-function renderServices(svcs){
-  const box=document.getElementById('svc'); box.innerHTML='';
-  for(const [k,v] of Object.entries(svcs)){
-    const d=document.createElement('div'); d.className='card';
-    d.innerHTML=`<div class="name"><span class="dot ${dotCls(v)}"></span>${SVC_NAMES[k]||k}</div>
-      <div class="st">systemctl/docker: ${v}</div>`;
-    const b=document.createElement('button'); b.textContent='Перезапустить';
-    b.onclick=async()=>{ b.disabled=true; try{ const r=await api('/api/restart/'+(k==='routeweave-tgwsproxy'?'tgwsproxy':(k==='mihomo'?'mihomo':(k==='zapret-nfqws'?'zapret':'panel'))),{method:'POST'}); msg(r.ok?'Перезапущено':'Ошибка: '+r.detail, r.ok);}catch(e){msg(e.message,false);} b.disabled=false; loadStatus(); };
-    d.appendChild(b); box.appendChild(d);
-  }
-}
-
-function renderProbes(data){
-  document.getElementById('probeTs').textContent = data.ts ? ('последний прогон: '+data.ts) : 'пробы ещё не запускались';
-  const t=document.getElementById('probeTable');
-  t.innerHTML='<tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr>';
-  const res=(data&&data.results)||{};
-  for(const [k,v] of Object.entries(res)){
-    const cls = v.skipped ? 'b-skip' : (v.ok?'b-ok':'b-bad');
-    const label = v.skipped ? 'пропущено' : (v.ok?'OK':'FAIL');
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${PROBE_NAMES[k]||k}</td><td><span class="badge ${cls}">${label}</span></td><td class="detail">${v.detail||''}</td>`;
-    t.appendChild(tr);
-  }
-}
-
-async function loadStatus(){
-  try{
-    const s=await api('/api/status');
-    renderServices(s.services);
-    renderProbes(s.probes);
-    const c=s.config;
-    document.getElementById('cfg').innerHTML =
-      `<b>IP сервера</b><span>${c.server_ip||'—'}</span>
-       <b>SOCKS</b><span>${c.socks}</span>
-       <b>BASE_DOMAIN</b><span>${c.base_domain}</span>
-       <b>WG-подсеть (WDTT)</b><span>${c.wg_subnet}</span>
-       <b>QUIC DROP</b><span>${c.quic_drop}</span>
-       <b>Telegram (tgws)</b><span>${c.tgws_enabled?'включён':'выключен'}</span>
-       <b>mihomo API</b><span>${s.mihomo_api}</span>`;
-    const tgBox=document.getElementById('tgHint');
-    if(c.tgws_enabled){
-      const ip=c.server_ip, wg=c.wg_subnet? c.wg_subnet.split('/')[0].replace(/\.0$/,'.1'):'';
-      tgBox.style.display='block';
-      tgBox.innerHTML =
-        `Telegram → Настройки → Продвинутые → Прокси (MTProto, порт 1443, секрет из <code>docker logs routeweave-tgwsproxy</code>): `+
-        `дом — <code>${ip||'LAN_IP'}:1443</code>, WDTT — <code>${wg||'WG_IP'}:1443</code>, Tailscale — <code>tailscale-имя-сервера:1443</code>`;
-    }else{
-      tgBox.innerHTML=''; tgBox.style.display='none';
-    }
-  }catch(e){ msg('Не удалось получить статус: '+e.message, false); }
-}
-
-async function loadList(){
-  try{ const r=await api('/api/lists/'+curList); document.getElementById('listArea').value=r.content; }
-  catch(e){ msg(e.message,false); }
-}
-
-document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
-  document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('on'));
-  b.classList.add('on'); curList=b.dataset.l; applyLabel(); loadList();
-});
-document.getElementById('saveList').onclick=async()=>{
-  try{ await api('/api/lists/'+curList,{method:'PUT',body:document.getElementById('listArea').value}); msg('Сохранено. Примените кнопкой ниже.'); }
-  catch(e){ msg(e.message,false); }
-};
-document.getElementById('applyList').onclick=async(e)=>{
-  const btn=e.target; btn.disabled=true;
-  try{
-    await api('/api/lists/'+curList,{method:'PUT',body:document.getElementById('listArea').value});
-    const r=await api('/api/lists/'+curList+'/apply',{method:'POST'});
-    const detail=String(r.detail||'').slice(0,300);
-    msg(r.ok ? (curList==='dpi' ? 'Сохранено, списки обновлены, zapret перезапущен' : 'Сохранено, списки обновлены, mihomo перезагружен') : ('Ошибка: '+detail), r.ok);
-    loadStatus();
-  }catch(err){ msg(err.message,false); }
-  btn.disabled=false;
-};
-document.getElementById('runProbe').onclick=async(e)=>{
-  const btn=e.target; btn.disabled=true; btn.textContent='Идут пробы…';
-  try{ const r=await api('/api/probe',{method:'POST'}); renderProbes(r); }catch(err){ msg(err.message,false); }
-  btn.disabled=false; btn.textContent='Запустить пробы';
-};
-loadStatus(); loadList(); applyLabel();
-setInterval(loadStatus, 20000);
-</script>
+<div class="toasts" id="toasts" role="region" aria-label="Уведомления" aria-live="polite"></div>
+<div class="sr-only" id="a11y-status" role="status" aria-live="polite"></div>
 </body>
 </html>
