@@ -172,7 +172,8 @@ mihomo» запускает апдейтер (для `dpi` — перезапу�
 выполняется в фоне, прогресс отдаёт `GET /api/jobs/apply`. Подсказка в панели
 напоминает, что `geo.txt` и `ru-direct.txt` генерируются таймером, поэтому
 править нужно custom-списки и `dpi.txt`. Zashboard открывается
-по `http://SERVER_IP:9090/ui/`.
+по `http://SERVER_IP:9090/ui/` и работает под отдельной CSP, разрешающей
+запросы к API mihomo на другом порту.
 
 При заданном `TG_SECRET` панель показывает готовую ссылку
 `tg://proxy?server=<TG_LINK_IP|SERVER_IP>&port=1443&secret=<TG_SECRET>`.

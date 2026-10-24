@@ -57,9 +57,12 @@ Routeweave — домашний шлюз, который по своей при�
   Компенсация — пустой `CapabilityBoundingSet`, `ProtectSystem=strict`,
   `ProtectHome`, `PrivateTmp`, `RestrictAddressFamilies` и sudo-allowlist.
 - Изменяющие запросы защищены от CSRF: проверяются `Origin`, `Referer` и
-  `Sec-Fetch-Site`. Ответы отдаются с CSP без inline-скриптов и стилей и
-  security-заголовками; статика вынесена в `app.css`/`app.js`, `innerHTML`
-  не используется.
+  `Sec-Fetch-Site`. Ответы отдаются с security-заголовками; статика вынесена
+  в `app.css`/`app.js`, `innerHTML` не используется. Панель отдаётся со
+  строгой CSP без inline-скриптов и стилей. Для `/ui` (zashboard) действует
+  отдельная CSP: это сторонняя SPA, которой нужен доступ к API mihomo на
+  другом порту и inline-стили. `script-src` в обоих случаях остаётся
+  `'self'`, то есть inline-скрипты запрещены везде.
 - Списки доменов пишутся атомарно (временный файл + `rename`), домены
   валидируются, размер загрузки ограничен.
 

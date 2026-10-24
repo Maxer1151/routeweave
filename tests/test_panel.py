@@ -263,6 +263,36 @@ def test_security_headers_on_index_and_404(panel):
     assert missing.headers["cache-control"] == "no-store"
 
 
+def test_ui_csp_allows_mihomo_api(panel):
+    """zashboard на /ui ходит в API mihomo на другой порт и в WS."""
+    response = panel.client.get("/ui/", auth=AUTH)
+    assert response.status_code in (200, 404)
+    csp = response.headers["content-security-policy"]
+    assert "connect-src 'self' http: https: ws: wss:" in csp
+    assert "style-src 'self' 'unsafe-inline'" in csp
+    assert "script-src 'self' 'unsafe-inline'" not in csp
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_panel_csp_stays_strict(panel):
+    response = panel.client.get("/", auth=AUTH)
+    assert response.status_code == 200
+    csp = response.headers["content-security-policy"]
+    assert "connect-src 'self'" in csp
+    assert "http:" not in csp
+    assert "'unsafe-inline'" not in csp
+
+
+def test_uixyz_gets_panel_csp(panel):
+    """Похожий на /ui путь не должен получать ослабленную CSP."""
+    response = panel.client.get("/uixyz", auth=AUTH)
+    assert response.status_code in (200, 404)
+    csp = response.headers["content-security-policy"]
+    assert "connect-src 'self'" in csp
+    assert "http:" not in csp
+    assert "'unsafe-inline'" not in csp
+
+
 def test_index_and_assets_have_no_inline_code(panel):
     html = panel.client.get("/", auth=AUTH).text
     assert "<style" not in html

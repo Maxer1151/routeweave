@@ -64,11 +64,20 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
-    "Content-Security-Policy": (
-        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-        "connect-src 'self'; base-uri 'none'; form-action 'self'"
-    ),
 }
+
+# CSP панели: строгий, без inline.
+PANEL_CSP = (
+    "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+    "connect-src 'self'; base-uri 'none'; form-action 'self'"
+)
+# CSP zashboard: третья сторона, ходит в API mihomo на другой порт и в WS.
+# script-src остаётся строгим ('self'): inline-скрипты по-прежнему запрещены.
+UI_CSP = (
+    "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; connect-src 'self' http: https: ws: wss:; "
+    "base-uri 'none'; form-action 'self'"
+)
 
 PROBES_LAST: dict = {"ts": None, "results": {}}
 
@@ -368,6 +377,11 @@ def _check_csrf(request: Request) -> str | None:
 app = FastAPI(title="Routeweave panel", docs_url=None, redoc_url=None, openapi_url=None)
 
 
+def _is_ui_path(path: str) -> bool:
+    """True для /ui и /ui/..., но не для /uixyz."""
+    return path == "/ui" or path.startswith("/ui/")
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
     if not _check_auth(request):
@@ -388,6 +402,9 @@ async def guard(request: Request, call_next):
                 response = JSONResponse({"detail": "Внутренняя ошибка панели"}, status_code=500)
     for name, value in SECURITY_HEADERS.items():
         response.headers[name] = value
+    response.headers["Content-Security-Policy"] = (
+        UI_CSP if _is_ui_path(request.url.path) else PANEL_CSP
+    )
     return response
 
 
