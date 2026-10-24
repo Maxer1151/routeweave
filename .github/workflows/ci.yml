@@ -51,8 +51,13 @@ jobs:
   # netns (ip netns add) требует SYS_ADMIN, а iptables внутри namespace —
   # NET_ADMIN. Без этих capability тесты молча уйдут в skip, поэтому ниже
   # отдельный шаг проверяет, что хотя бы часть тестов реально прошла.
+  # В container-job шаги по умолчанию идут через sh (dash), а в шаге
+  # pytest используется set -o pipefail — поэтому принудительно bash.
   firewall:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     container:
       image: ubuntu:24.04
       options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN

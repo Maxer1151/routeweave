@@ -88,7 +88,9 @@ done
 # Единый временный каталог на весь прогон (никаких фиксированных /tmp/...).
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/routeweave-install.XXXXXX")"
 WDTT_TMP=""
-# shellcheck disable=SC2329  # вызывается через trap cleanup EXIT
+# cleanup вызывается через trap cleanup EXIT. SC2317 — прежнее имя SC2329
+# в shellcheck 0.9.x (в CI ставится 0.9.0, локально 0.11.0), нужны оба кода.
+# shellcheck disable=SC2329,SC2317
 cleanup() {
   [ -z "${WORK_DIR:-}" ] || rm -rf "$WORK_DIR"
   [ -z "${WDTT_TMP:-}" ] || rm -rf "$WDTT_TMP"
@@ -120,29 +122,31 @@ env_line() { # env_line <KEY> <value> -> KEY="value"
 
 # Валидаторы вызываются по имени из ask_valid ("$__validator"), поэтому для
 # линтера они выглядят неиспользуемыми — это ложное срабатывание SC2329.
-# shellcheck disable=SC2329
+# SC2317 — прежнее имя SC2329 в shellcheck 0.9.x (в CI ставится 0.9.0,
+# локально 0.11.0), поэтому отключаем оба кода.
+# shellcheck disable=SC2329,SC2317
 valid_iface() { # имя сетевого интерфейса
   [[ ${1-} =~ ^[a-zA-Z0-9_.:-]+$ ]]
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 valid_ipv4() {
   python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$1" 2>/dev/null
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 valid_port() {
   local p=${1-}
   [[ $p =~ ^[0-9]{1,5}$ ]] || return 1
   (( 10#$p >= 1 && 10#$p <= 65535 ))
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 valid_user() {
   [[ ${1-} =~ ^[A-Za-z0-9._-]{1,32}$ ]]
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 valid_socks() { # пусто допустимо; иначе scheme://host:port
   [ -z "${1-}" ] && return 0
   python3 -c '
@@ -161,7 +165,7 @@ sys.exit(0 if port and 1 <= port <= 65535 else 1)
 ' "$1" 2>/dev/null
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2329,SC2317
 valid_cidr() {
   python3 -c 'import ipaddress,sys; ipaddress.IPv4Network(sys.argv[1], strict=False)' "$1" 2>/dev/null
 }
@@ -332,7 +336,9 @@ install_wdtt() {
     ok "WDTT-Plus уже установлен — обновление не требуется"
     wdtt_ensure_ip_rule
     systemctl restart routeweave-firewall >/dev/null 2>&1 || true
-    [ -x "$WDTT_DIR/install.sh" ] && bash "$WDTT_DIR/install.sh" status || true
+    if [ -x "$WDTT_DIR/install.sh" ]; then
+      bash "$WDTT_DIR/install.sh" status || true
+    fi
     return 0
   fi
   if [ -e /usr/local/bin/wdtt-server ] || [ -e /etc/wdtt ]; then
