@@ -37,7 +37,10 @@ if fetch https://raw.githubusercontent.com/Internet-Helper/Unblock-for-Russia/ma
   else log "SKIP geo: $n < 50"; fi
 else log "SKIP geo: fetch"; fi
 if [ "$R$G" = "00" ]; then log "Изменений нет"; exit 0; fi
-S=$(sed -n 's/^MIHOMO_SECRET=//p' "$E" | tail -1); rc=0
-for p in geo-domains ru-domains; do c=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Authorization: Bearer $S" "http://127.0.0.1:9090/providers/rules/$p" || true); log "reload $p -> ${c:-ERR}"; [ "$c" = 204 ] || [ "$c" = 200 ] || rc=1; done
+S=${MIHOMO_SECRET:-}   # .env уже прочитан выше (set -a); sed оставлял кавычки и ломал Bearer
+rc=0
+AUTH=()
+[ -n "$S" ] && AUTH=(-H "Authorization: Bearer $S")
+for p in geo-domains ru-domains; do c=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "${AUTH[@]}" "http://127.0.0.1:9090/providers/rules/$p" || true); log "reload $p -> ${c:-ERR}"; [ "$c" = 204 ] || [ "$c" = 200 ] || rc=1; done
 [ "$rc" = 0 ] || { log "API reload failed -> restart mihomo"; systemctl restart mihomo || true; }
 log "Готово"
