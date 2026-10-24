@@ -1,3 +1,22 @@
+# Routeweave: zapret (nfqws, DPI-desync).
+#
+# Почему ExecStart — отдельный скрипт, а не `/bin/sh -c '...'`:
+#   раньше аргументы склеивались шеллом прямо из переменных zapret.conf
+#   (EXTRA/AUTOTTL_ARG/TTL_ARG/DESYNC/...). Любой `;`, `$(...)`, обратная
+#   кавычка или `>` в конфиге исполнялись от root при следующем рестарте
+#   сервиса — то есть правка/подмена zapret.conf давала root-инъекцию.
+#   Теперь шелл для сборки командной строки не используется: лаунчер
+#   /etc/routeweave/nfqws-launch.sh проверяет значения по whitelist символов,
+#   собирает argv массивом и делает exec nfqws. Порядок аргументов сохранён
+#   как в прежнем ExecStart (qnum, desync, fooling, autottl, ttl, extra,
+#   hostlist) — nfqws принимает опции в любом порядке, но менять привычный
+#   вывод `ps`/логов без нужды не хочется.
+# zapret.conf читают fw-nfq.sh и nfqws-launch.sh сами; systemd его как
+# EnvironmentFile не разбирает (в нём могут быть строки, не являющиеся KEY=VALUE).
+#
+# ExecStartPre/ExecStopPost: NFQUEUE-правило живёт вне nfqws, поэтому
+# поднимается до старта и снимается после остановки. Оба вызова идемпотентны.
+
 [Unit]
 Description=Routeweave zapret (nfqws DPI desync)
 After=network-online.target
@@ -5,9 +24,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=/etc/routeweave/zapret.conf
 ExecStartPre=/etc/routeweave/fw-nfq.sh start
-ExecStart=/bin/sh -c 'exec /opt/zapret/bin/nfqws --qnum=${QNUM} --dpi-desync=${DESYNC} --dpi-desync-fooling=${FOOLING} ${AUTOTTL_ARG} ${TTL_ARG} ${EXTRA} --hostlist=${HOSTLIST}'
+ExecStart=/etc/routeweave/nfqws-launch.sh
 ExecStopPost=/etc/routeweave/fw-nfq.sh stop
 Restart=on-failure
 RestartSec=3

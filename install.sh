@@ -8,6 +8,7 @@
 #    - WDTT-Plus (VPN-сервер для Android, amd64) — INSTALL_WDTT=yes
 #  Запуск: sudo ./install.sh            (интерактивно)
 #          sudo ./install.sh --defaults (без вопросов — только ядро)
+#          ./install.sh --help          (справка, root не нужен)
 # ============================================================
 set -Eeuo pipefail
 
@@ -15,6 +16,10 @@ APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ETC=/etc/routeweave
 OPT_PANEL=/opt/routeweave-panel
 ZAPRET_DIR=/opt/zapret
+BACKUP_DIR="$ETC/backup"
+SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
+TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
+TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
 MIHOMO_FALLBACK_VER="v1.19.13"
 
 C_G='\033[0;32m'; C_Y='\033[1;33m'; C_R='\033[0;31m'; C_B='\033[1;34m'; C_N='\033[0m'
@@ -23,21 +28,279 @@ ok()    { echo -e "${C_G}[+]${C_N} $*"; }
 warn()  { echo -e "${C_Y}[!]${C_N} $*"; }
 die()   { echo -e "${C_R}[x]${C_N} $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "Запустите от root: sudo ./install.sh"
+usage() {
+  cat <<'EOF'
+Routeweave — установщик шлюза (mihomo + zapret + веб-панель).
+
+Использование:
+  sudo ./install.sh [--defaults]
+  ./install.sh --help
+
+Опции:
+  -h, --help    показать эту справку и выйти (root не нужен)
+  --defaults    не задавать вопросов: взять значения по умолчанию
+                (ядро; INSTALL_WDTT=no, INSTALL_TGWS=no)
+
+Переменные окружения времени установки (НЕ из /etc/routeweave/.env):
+  INSTALL_WDTT=yes|no     поставить WDTT-Plus (VPN для Android, только amd64)
+  INSTALL_TGWS=yes|no     поставить tg-ws-proxy (Telegram MTProto, нужен Docker)
+  ZAPRET_REF=<ref>        ветка/тег zapret при клонировании и обновлении
+                          (по умолчанию master)
+  MIHOMO_SHA256=<hex>     ожидаемая sha256 архива mihomo, если апстрим не
+                          публикует <url>.sha256
+  ZASHBOARD_SHA256=<hex>  то же для dist.zip дашборда zashboard
+
+Что делает установщик:
+  1. ставит пакеты, создаёт системного пользователя routeweave и минимальный
+     sudoers (/etc/sudoers.d/routeweave-panel, 0640 root:root);
+  2. пишет /etc/routeweave/.env (0640 root:routeweave) со значениями в кавычках;
+  3. скачивает mihomo (сверяя sha256, если апстрим его публикует), собирает
+     zapret из исходников (/opt/zapret, ветка ZAPRET_REF);
+  4. освобождает порт 53 (systemd-resolved), настраивает DNS и firewall (ufw,
+     если активен), не затирая ручные правки /etc/routeweave/zapret.conf;
+  5. ставит systemd-юниты, helper-скрипты в /usr/local/sbin и FastAPI-панель
+     в venv (/opt/routeweave-panel);
+  6. при желании — zashboard, tg-ws-proxy (docker) и WDTT-Plus.
+
+Пароли (генерируются один раз, если их нет в существующем .env):
+  PANEL_PASS     — пароль входа в веб-панель (пишется в .env);
+  MIHOMO_SECRET  — Bearer-секрет API mihomo/zashboard;
+  TG_SECRET      — секрет MTProto-прокси (только при INSTALL_TGWS=yes).
+Сгенерированный PANEL_PASS печатается в итоговой сводке; остальные секреты
+остаются только в .env.
+
+После установки: панель http://<SERVER_IP>:<PANEL_PORT>, логин PANEL_USER.
+EOF
+}
 
 DEFAULTS=0
-[ "${1:-}" = "--defaults" ] && DEFAULTS=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --defaults) DEFAULTS=1 ;;
+    *) echo "Неизвестный аргумент: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ "$(id -u)" -eq 0 ] || die "Запустите от root: sudo ./install.sh"
+
+# Единый временный каталог на весь прогон (никаких фиксированных /tmp/...).
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/routeweave-install.XXXXXX")"
+WDTT_TMP=""
+# shellcheck disable=SC2329  # вызывается через trap cleanup EXIT
+cleanup() {
+  [ -z "${WORK_DIR:-}" ] || rm -rf "$WORK_DIR"
+  [ -z "${WDTT_TMP:-}" ] || rm -rf "$WDTT_TMP"
+}
+trap cleanup EXIT
+
+# >>> pure-functions >>>
+# Чистые функции без побочных эффектов на систему: их можно вынести в
+# песочницу и проверить отдельно (см. tests / отчёт).
+
+esc() { # экранирование значения для двойных кавычек в .env: \ и "
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+esc_sed() { # экранирование для replacement в sed (s|...|...|)
+  local s=${1-}
+  s=${s//\\/\\\\}
+  s=${s//&/\\&}
+  s=${s//|/\\|}
+  printf '%s' "$s"
+}
+
+env_line() { # env_line <KEY> <value> -> KEY="value"
+  printf '%s="%s"\n' "$1" "$(esc "${2-}")"
+}
+
+# Валидаторы вызываются по имени из ask_valid ("$__validator"), поэтому для
+# линтера они выглядят неиспользуемыми — это ложное срабатывание SC2329.
+# shellcheck disable=SC2329
+valid_iface() { # имя сетевого интерфейса
+  [[ ${1-} =~ ^[a-zA-Z0-9_.:-]+$ ]]
+}
+
+# shellcheck disable=SC2329
+valid_ipv4() {
+  python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2329
+valid_port() {
+  local p=${1-}
+  [[ $p =~ ^[0-9]{1,5}$ ]] || return 1
+  (( 10#$p >= 1 && 10#$p <= 65535 ))
+}
+
+# shellcheck disable=SC2329
+valid_user() {
+  [[ ${1-} =~ ^[A-Za-z0-9._-]{1,32}$ ]]
+}
+
+# shellcheck disable=SC2329
+valid_socks() { # пусто допустимо; иначе scheme://host:port
+  [ -z "${1-}" ] && return 0
+  python3 -c '
+import sys
+from urllib.parse import urlsplit
+try:
+    p = urlsplit(sys.argv[1])
+    port = p.port
+except ValueError:
+    sys.exit(1)
+if p.scheme not in ("socks5", "socks5h", "socks", "http", "https"):
+    sys.exit(1)
+if not p.hostname:
+    sys.exit(1)
+sys.exit(0 if port and 1 <= port <= 65535 else 1)
+' "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2329
+valid_cidr() {
+  python3 -c 'import ipaddress,sys; ipaddress.IPv4Network(sys.argv[1], strict=False)' "$1" 2>/dev/null
+}
+
+normalize_yn() { # yes/no (регистронезависимо); rc=1 если мусор
+  case "${1,,}" in
+    yes|y|да|1|true)  printf 'yes' ;;
+    no|n|нет|0|false) printf 'no' ;;
+    *) return 1 ;;
+  esac
+}
+
+gen_hex() { # gen_hex <байт> -> hex-строка длиной 2*<байт>
+  local n=${1:-16}
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$n" 2>/dev/null && return 0
+  fi
+  head -c "$n" /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-$((n * 2))
+}
+
+backup_file() { # backup_file <файл> -> <файл>.bak-<UTC timestamp>, rc=0 всегда
+  local f=$1 b
+  [ -f "$f" ] || return 0
+  b="$f.bak-$(date -u +%Y%m%d-%H%M%S)"
+  cp -a "$f" "$b"
+  warn "бэкап: $b"
+}
+
+preflight() { # preflight <каталог репозитория> — всё, что установщик копирует
+  # Ранняя проверка целостности: лучше упасть до изменения системы, чем
+  # посреди установки (под set -e отсутствующий файл роняет шаг без объяснений).
+  local root=$1 missing="" f
+  for f in \
+    templates/zapret.conf.tpl \
+    templates/render_mihomo.py \
+    templates/nfqws-launch.sh \
+    templates/routeweave-update-lists.sh \
+    templates/routeweave-tgws-restart.sh \
+    templates/routeweave-tgws-state.sh \
+    templates/fw-base.sh \
+    templates/fw-nfq.sh \
+    templates/mihomo.service \
+    templates/routeweave-firewall.service \
+    templates/zapret-nfqws.service \
+    templates/routeweave-panel.service \
+    templates/routeweave-lists-update.service \
+    templates/routeweave-lists-update.timer \
+    panel/app.py \
+    panel/requirements.txt \
+    panel/static/index.html \
+    panel/static/app.css \
+    panel/static/app.js
+  do
+    [ -f "$root/$f" ] || missing="$missing $f"
+  done
+  [ -d "$root/lists" ] || missing="$missing lists/"
+  [ -z "$missing" ] \
+    || die "В каталоге установщика нет обязательных файлов:$missing. Проверьте целостность репозитория (git status; git checkout -- .) и повторите."
+  ok "preflight: обязательные файлы установщика на месте"
+}
+
+merge_zapret_conf() { # merge_zapret_conf <шаблон> <цель> [iface]
+  # Создаёт zapret.conf из шаблона, если файла нет. Если файл есть — сохраняет
+  # ручные правки (DESYNC/FOOLING/...) и обновляет только строку WAN_IFACE=.
+  local tpl=$1 target=$2 iface=${3:-${LAN_IFACE:-}} rendered cur
+  [ -f "$tpl" ] || die "не найден шаблон zapret: $tpl"
+  if [ -z "$iface" ]; then
+    # Нельзя затирать рабочий WAN_IFACE пустым значением.
+    warn "zapret.conf: LAN_IFACE не определён — WAN_IFACE не изменяю"
+    return 0
+  fi
+
+  rendered=$(mktemp "${TMPDIR:-/tmp}/routeweave-zapret.XXXXXX")
+  sed "s|{{WAN_IFACE}}|$(esc_sed "$iface")|g" "$tpl" > "$rendered"
+
+  if [ ! -f "$target" ]; then
+    install -m 0600 "$rendered" "$target"
+    rm -f "$rendered"
+    ok "zapret.conf создан из шаблона (WAN_IFACE=$iface)"
+    return 0
+  fi
+
+  if cmp -s "$rendered" "$target"; then
+    rm -f "$rendered"
+    info "zapret.conf уже соответствует шаблону (WAN_IFACE=$iface)"
+    return 0
+  fi
+
+  backup_file "$target"
+
+  if grep -q '^WAN_IFACE=' "$target"; then
+    cur=$(sed -n 's/^WAN_IFACE=//p' "$target" | head -n1)
+    if [ "$cur" != "$iface" ]; then
+      sed -i "s|^WAN_IFACE=.*|WAN_IFACE=$(esc_sed "$iface")|" "$target"
+      ok "zapret.conf: WAN_IFACE=$cur -> $iface (остальные настройки сохранены)"
+    else
+      info "zapret.conf: WAN_IFACE уже $iface — файл не изменён"
+    fi
+  else
+    printf 'WAN_IFACE=%s\n' "$iface" >> "$target"
+    ok "zapret.conf: добавлена строка WAN_IFACE=$iface"
+  fi
+
+  chmod 0600 "$target"
+  rm -f "$rendered"
+}
+# <<< pure-functions <<<
+
+preflight "$APP_DIR"
 
 ask() { # ask <переменная> <вопрос> <дефолт>
   local __var=$1 __q=$2 __def=${3:-} __ans
   if [ "$DEFAULTS" = 1 ] || [ ! -t 0 ]; then
-    printf -v "$__var" '%s' "$__def"; return
+    printf -v "$__var" '%s' "$__def"
+    return 0
   fi
   read -r -p "$__q [$__def]: " __ans || die "прервано"
   printf -v "$__var" '%s' "${__ans:-$__def}"
 }
 
-gen_hex() { openssl rand -hex "${1:-16}" 2>/dev/null || head -c 64 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-$((32)); }
+ask_valid() { # ask_valid <переменная> <вопрос> <дефолт> <валидатор> [подсказка]
+  local __var=$1 __q=$2 __def=${3:-} __validator=$4 __hint=${5:-} __ans
+  if [ "$DEFAULTS" = 1 ] || [ ! -t 0 ]; then
+    if ! "$__validator" "$__def"; then
+      die "Неинтерактивный режим: значение «$__def» для «$__q» недопустимо.${__hint:+ $__hint.} Запустите установщик интерактивно."
+    fi
+    printf -v "$__var" '%s' "$__def"
+    return 0
+  fi
+  while :; do
+    read -r -p "$__q [$__def]: " __ans || die "прервано"
+    __ans=${__ans:-$__def}
+    if "$__validator" "$__ans"; then
+      printf -v "$__var" '%s' "$__ans"
+      return 0
+    fi
+    warn "Недопустимое значение «$__ans»${__hint:+ — $__hint}"
+  done
+}
 
 # ---------- WDTT-Plus (сервер для Android) ----------
 WDTT_REPO="Ivan4537/WDTT-Plus"
@@ -51,9 +314,6 @@ WDTT_SUBNET="10.66.66.0/24"
 WDTT_MASTER_PASS=""
 WDTT_INITIAL_CONFIG=""
 WDTT_STATUS="не устанавливался"
-WDTT_TMP=""
-cleanup_wdtt_tmp() { [ -z "${WDTT_TMP:-}" ] || rm -rf "$WDTT_TMP"; }
-trap cleanup_wdtt_tmp EXIT
 
 wdtt_fail() { warn "WDTT-Plus: $*"; WDTT_STATUS="ошибка"; return 1; }
 
@@ -79,7 +339,8 @@ install_wdtt() {
     return 1
   fi
 
-  WDTT_TMP=$(mktemp -d /tmp/routeweave-wdtt.XXXXXX) || { wdtt_fail "не удалось создать временный каталог"; return 1; }
+  WDTT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/routeweave-wdtt.XXXXXX") \
+    || { wdtt_fail "не удалось создать временный каталог"; return 1; }
 
   if [ ! -x "$WDTT_DIR/install.sh" ] || [ ! -x "$WDTT_DIR/wdtt-server" ]; then
     local asset tag name url src binver
@@ -109,13 +370,18 @@ for item in data.get("assets", []):
     esac
     url="https://github.com/$WDTT_REPO/releases/download/$tag/$name"
     info "Загрузка WDTT-Plus ($tag)..."
-    curl -fsSL --max-time 180 -o "$WDTT_TMP/$name" "$url" || { wdtt_fail "не удалось скачать $url"; return 1; }
-    curl -fsSL --max-time 60 -o "$WDTT_TMP/$name.sha256" "$url.sha256" || { wdtt_fail "не удалось скачать контрольную сумму"; return 1; }
-    ( cd "$WDTT_TMP" && sha256sum -c "$name.sha256" >/dev/null ) || { wdtt_fail "sha256 архива не совпал"; return 1; }
-    tar -xzf "$WDTT_TMP/$name" -C "$WDTT_TMP" || { wdtt_fail "не удалось распаковать архив"; return 1; }
+    curl -fsSL --retry 2 --max-time 180 -o "$WDTT_TMP/$name" "$url" \
+      || { wdtt_fail "не удалось скачать $url"; return 1; }
+    curl -fsSL --retry 2 --max-time 60 -o "$WDTT_TMP/$name.sha256" "$url.sha256" \
+      || { wdtt_fail "не удалось скачать контрольную сумму"; return 1; }
+    ( cd "$WDTT_TMP" && sha256sum -c "$name.sha256" >/dev/null ) \
+      || { wdtt_fail "sha256 архива не совпал"; return 1; }
+    tar -xzf "$WDTT_TMP/$name" -C "$WDTT_TMP" \
+      || { wdtt_fail "не удалось распаковать архив"; return 1; }
     src=$(find "$WDTT_TMP" -mindepth 1 -maxdepth 1 -type d -name 'WDTT-Plus-server-*' | head -n1)
     [ -n "$src" ] || { wdtt_fail "в архиве нет каталога WDTT-Plus-server-*"; return 1; }
-    ( cd "$src" && sha256sum -c SHA256SUMS >/dev/null ) || { wdtt_fail "внутренние sha256 не совпали"; return 1; }
+    ( cd "$src" && sha256sum -c SHA256SUMS >/dev/null ) \
+      || { wdtt_fail "внутренние sha256 не совпали"; return 1; }
     binver=$("$src/wdtt-server" --version 2>/dev/null | head -n1 || true)
     [ -n "$binver" ] || { wdtt_fail "wdtt-server не сообщил версию"; return 1; }
     ok "WDTT-Plus: сервер v$binver, установщик $(bash "$src/install.sh" --version)"
@@ -127,6 +393,7 @@ for item in data.get("assets", []):
 
   local passfile="$WDTT_TMP/wdtt-pass" sha
   ( umask 077; gen_hex 16 > "$passfile" )
+  # shellcheck disable=SC2034  # главный пароль уходит в конфиг WDTT, в .env не пишется
   WDTT_MASTER_PASS=$(cat "$passfile")
   WDTT_INITIAL_CONFIG=/root/wdtt-initial.json
   if [ -e "$WDTT_INITIAL_CONFIG" ]; then
@@ -189,7 +456,16 @@ if [ "$WDTT_SUPPORTED" != 1 ]; then
   warn "WDTT-Plus поддерживается только на amd64 — установка WDTT будет пропущена"
 fi
 
-command -v curl >/dev/null || { apt-get update -qq; apt-get install -y -qq curl ca-certificates; }
+# python3 нужен уже для валидации ввода, ip/ss/curl — для определения сети.
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 \
+   || ! command -v ip >/dev/null 2>&1; then
+  info "Установка базовых утилит (curl, python3, iproute2)..."
+  apt-get update -qq
+  apt-get install -y -qq curl ca-certificates python3 iproute2
+fi
+
+install -d -m 0755 "$ETC"
+install -d -m 0700 "$BACKUP_DIR"
 
 # При повторной установке берём сетевые параметры из существующего .env:
 # иначе ip route get уходит в TUN mihomo (dev Meta) вместо физического NIC.
@@ -214,28 +490,76 @@ elif [ -d /etc/wdtt ] || ip link show wdtt0 >/dev/null 2>&1; then
   info "Обнаружен сервер WDTT (wdtt0) — подсеть 10.66.66.0/24"
 fi
 
-# ---------- 1. Параметры ----------
+# ---------- 1. Пользователь routeweave и sudoers ----------
+ensure_routeweave_user() {
+  groupadd -r routeweave 2>/dev/null || true
+  if ! id -u routeweave >/dev/null 2>&1; then
+    useradd --system --gid routeweave --no-create-home --shell /usr/sbin/nologin routeweave
+  fi
+}
+
+write_panel_sudoers() {
+  local systemctl_bin visudo_bin tmp
+  systemctl_bin=$(command -v systemctl || true)
+  [ -n "$systemctl_bin" ] \
+    || die "systemctl не найден — без него панель не сможет управлять сервисами"
+  visudo_bin=$(command -v visudo || true)
+  [ -n "$visudo_bin" ] || die "visudo не найден (пакет sudo) — не могу проверить sudoers"
+
+  tmp="$WORK_DIR/sudoers.routeweave-panel"
+  cat > "$tmp" <<EOF
+# Routeweave: минимальные права веб-панели. Файл генерируется install.sh.
+# Пользователь routeweave может только перезапускать перечисленные юниты и
+# запускать три helper-скрипта; is-active проверяется без root.
+routeweave ALL=(root) NOPASSWD: $systemctl_bin restart mihomo, $systemctl_bin restart zapret-nfqws, $systemctl_bin restart routeweave-panel, $systemctl_bin start routeweave-lists-update.service
+routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh
+EOF
+  chmod 0640 "$tmp"
+  "$visudo_bin" -cf "$tmp" >/dev/null \
+    || die "сгенерированный sudoers не прошёл проверку visudo — права панели не выданы"
+  install -m 0640 -o root -g root "$tmp" "$SUDOERS_PANEL"
+  ok "sudoers: $SUDOERS_PANEL (0640 root:root, без wildcard)"
+}
+
+info "Пользователь routeweave и sudoers..."
+ensure_routeweave_user
+ok "пользователь routeweave готов (системный, без home и shell)"
+write_panel_sudoers
+
+# ---------- 2. Параметры ----------
 echo
 info "Параметры установки (Enter = значение по умолчанию)"
-ask LAN_IFACE     "LAN-интерфейс сервера"            "$DETECTED_IFACE"
-ask SERVER_IP     "IP сервера в локалке"             "$DETECTED_IP"
-ask SOCKS_URL     "Socks/https-прокси для гео (можно пусто)" ""
-ask BASE_DOMAIN   "Домен для CF Worker (поддомен dpdns.org, можно пусто)" ""
-ask WG_SUBNET     "Подсеть WireGuard (клиенты WDTT)" "$WG_SUBNET_DEFAULT"
-ask PANEL_PORT    "Порт веб-панели"                  "8080"
-PANEL_USER_DEFAULT="admin"
-ask PANEL_USER    "Логин панели"                     "$PANEL_USER_DEFAULT"
-ask QUIC_DROP     "Резать QUIC (UDP/443)? yes/no"    "yes"
+ask_valid LAN_IFACE  "LAN-интерфейс сервера" "$DETECTED_IFACE" valid_iface \
+  "ожидается имя интерфейса: буквы, цифры, точка, двоеточие, дефис, подчёркивание"
+ask_valid SERVER_IP  "IP сервера в локалке"  "$DETECTED_IP" valid_ipv4 \
+  "ожидается IPv4, например 192.168.1.10"
+ask_valid SOCKS_URL  "Socks/https-прокси для гео (можно пусто)" "${SOCKS_URL:-}" valid_socks \
+  "формат socks5h://host:port (допустимы socks5, socks, http, https)"
+ask BASE_DOMAIN     "Домен для CF Worker (поддомен dpdns.org, можно пусто)" "${BASE_DOMAIN:-}"
+ask_valid WG_SUBNET  "Подсеть WireGuard (клиенты WDTT)" "$WG_SUBNET_DEFAULT" valid_cidr \
+  "ожидается IPv4-подсеть, например 10.66.66.0/24"
+ask_valid PANEL_PORT "Порт веб-панели" "${PANEL_PORT:-8080}" valid_port \
+  "целое число 1..65535"
+ask_valid PANEL_USER "Логин панели" "${PANEL_USER:-admin}" valid_user \
+  "1-32 символа: латиница, цифры, точка, дефис, подчёркивание"
+ask QUIC_DROP       "Резать QUIC (UDP/443)? yes/no" "${QUIC_DROP:-yes}"
+
+# QUIC_DROP: мусор не должен ломать конфиг — трактуем как yes с предупреждением.
+if ! QUIC_NORM=$(normalize_yn "$QUIC_DROP"); then
+  warn "QUIC_DROP: нераспознанное значение «$QUIC_DROP» — использую yes"
+  QUIC_NORM=yes
+fi
+QUIC_DROP="$QUIC_NORM"
 
 # WDTT-Plus: спрашиваем только на amd64. Переменная объявлена заранее
 # (дефолт no), чтобы set -u не падал; по умолчанию ставим только ядро.
 INSTALL_WDTT="${INSTALL_WDTT:-no}"
 if [ "$WDTT_SUPPORTED" = 1 ]; then
   ask INSTALL_WDTT "Установить сервер WDTT-Plus (VPN для Android)? yes/no" "${INSTALL_WDTT:-no}"
-  case "${INSTALL_WDTT,,}" in
-    yes|y|да|1) INSTALL_WDTT=yes ;;
-    *) INSTALL_WDTT=no ;;
-  esac
+  if ! INSTALL_WDTT=$(normalize_yn "$INSTALL_WDTT"); then
+    warn "INSTALL_WDTT: нераспознанное значение — считаю no"
+    INSTALL_WDTT=no
+  fi
 else
   INSTALL_WDTT=no
 fi
@@ -243,10 +567,21 @@ fi
 # tg-ws-proxy-rs (Telegram MTProto) — только по явному согласию: требует Docker.
 INSTALL_TGWS="${INSTALL_TGWS:-no}"
 ask INSTALL_TGWS "Установить tg-ws-proxy (Telegram MTProto, нужен Docker)? yes/no" "${INSTALL_TGWS:-no}"
-case "${INSTALL_TGWS,,}" in yes|y|да|1) INSTALL_TGWS=yes ;; *) INSTALL_TGWS=no ;; esac
+if ! INSTALL_TGWS=$(normalize_yn "$INSTALL_TGWS"); then
+  warn "INSTALL_TGWS: нераспознанное значение — считаю no"
+  INSTALL_TGWS=no
+fi
 
-PANEL_PASS="${PANEL_PASS:-$(gen_hex 12)}"
-MIHOMO_SECRET="${MIHOMO_SECRET:-$(gen_hex 16)}"
+PANEL_PASS_GENERATED=0
+PANEL_PASS="${PANEL_PASS:-}"
+if [ -z "$PANEL_PASS" ]; then
+  PANEL_PASS=$(gen_hex 12)
+  PANEL_PASS_GENERATED=1
+fi
+MIHOMO_SECRET="${MIHOMO_SECRET:-}"
+if [ -z "$MIHOMO_SECRET" ]; then
+  MIHOMO_SECRET=$(gen_hex 16)
+fi
 TG_SECRET="${TG_SECRET:-}"
 if [ "$INSTALL_TGWS" = "yes" ] && [ -z "$TG_SECRET" ]; then
   TG_SECRET=$(gen_hex 16)
@@ -254,44 +589,86 @@ fi
 
 ok "Параметры приняты"
 
-# ---------- 2. Пакеты ----------
-info "Установка пакетов (build tools, python3-venv)..."
+# ---------- 3. Пакеты ----------
+info "Установка пакетов (build tools, python3-venv, sudo)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
   curl git build-essential \
   libnetfilter-queue-dev libmnl-dev zlib1g-dev libcap-dev \
-  iptables nftables iproute2 openssl unzip jq wireguard-tools \
+  iptables nftables iproute2 openssl unzip jq wireguard-tools sudo \
   python3 python3-venv python3-yaml ca-certificates >/dev/null || \
   apt-get install -y curl git build-essential libnetfilter-queue-dev libmnl-dev zlib1g-dev libcap-dev \
-  iptables nftables iproute2 openssl unzip jq wireguard-tools python3 python3-venv python3-yaml
+  iptables nftables iproute2 openssl unzip jq wireguard-tools sudo \
+  python3 python3-venv python3-yaml
 
 ok "Пакеты установлены"
+command -v visudo >/dev/null || die "visudo всё ещё недоступен — установите пакет sudo и повторите"
 
-# ---------- 3. Порт 53 (systemd-resolved) ----------
-if ss -lun 2>/dev/null | grep -q ':53 '; then
-  if systemctl is-active --quiet systemd-resolved; then
+# ---------- 4. Порт 53 (systemd-resolved) ----------
+port53_busy() {
+  ss -lun 2>/dev/null | grep -q ':53 ' || ss -ltn 2>/dev/null | grep -q ':53 '
+}
+
+if port53_busy; then
+  if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
     info "Освобождаю порт 53 (systemd-resolved stub)..."
+    # Бэкап исходного resolv.conf — один раз, повторные запуски не перезаписывают.
+    if [ ! -e "$BACKUP_DIR/resolv.conf.orig" ] && [ -e /etc/resolv.conf ]; then
+      cp -aL /etc/resolv.conf "$BACKUP_DIR/resolv.conf.orig"
+    fi
     mkdir -p /etc/systemd/resolved.conf.d
+    if [ -f /etc/systemd/resolved.conf.d/routeweave.conf ] \
+       && [ ! -e "$BACKUP_DIR/resolved-routeweave.conf.orig" ]; then
+      cp -a /etc/systemd/resolved.conf.d/routeweave.conf \
+        "$BACKUP_DIR/resolved-routeweave.conf.orig"
+    fi
     cat > /etc/systemd/resolved.conf.d/routeweave.conf <<'EOF'
 [Resolve]
 DNSStubListener=no
 EOF
     systemctl restart systemd-resolved
-    rm -f /etc/resolv.conf
-    printf 'nameserver 77.88.8.8\nnameserver 77.88.8.1\n' > /etc/resolv.conf
+    # Атомарная замена: временный файл в /etc + mv (никаких rm -f + запись).
+    RESOLV_TMP=$(mktemp /etc/.resolv.conf.XXXXXX)
+    printf 'nameserver 77.88.8.8\nnameserver 77.88.8.1\n' > "$RESOLV_TMP"
+    chmod 0644 "$RESOLV_TMP"
+    mv -f "$RESOLV_TMP" /etc/resolv.conf
     ok "Порт 53 свободен (системный DNS теперь 77.88.8.8, после старта mihomo — он сам)"
   else
-    warn "Порт 53 занят неизвестным сервисом — mihomo не сможет слушать DNS!"
-    ss -lunp | grep ':53 ' || true
+    warn "Порт 53 занят (UDP/TCP) неизвестным сервисом — mihomo не сможет слушать DNS!"
+    { ss -lunp 2>/dev/null; ss -ltnp 2>/dev/null; } | grep ':53 ' || true
   fi
 fi
 
-# ---------- 4. Бинарник mihomo ----------
+# ---------- 5. Бинарник mihomo ----------
 MIHOMO_INSTALLED_VER=""
 if command -v mihomo >/dev/null 2>&1; then
   MIHOMO_INSTALLED_VER=$(mihomo -v 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 fi
+
+fetch_sha() { # fetch_sha <url> [запасная сумма] -> sha256 (может быть пусто)
+  local url=$1 fallback=${2:-} got=""
+  got=$(curl -fsSL --max-time 20 "$url.sha256" 2>/dev/null | head -n1 | awk '{print $1}') || got=""
+  got=${got:0:60}
+  if [ -n "$got" ] && [ -z "${got//[0-9a-fA-F]/}" ]; then
+    printf '%s' "$got"
+    return 0
+  fi
+  printf '%s' "$fallback"
+}
+
+verify_sha() { # verify_sha <файл> <сумма> <метка>
+  local file=$1 sum=$2 label=$3 actual
+  if [ -z "$sum" ] || [ "${#sum}" -lt 32 ]; then
+    warn "$label: контрольная сумма недоступна — целостность НЕ проверена"
+    return 0
+  fi
+  actual=$(sha256sum "$file" | awk '{print $1}')
+  case "$actual" in
+    "$sum"*) ok "$label: sha256 подтверждена (${sum:0:12}…)" ;;
+    *) die "$label: sha256 не совпала (ожидалось ${sum:0:12}…, получено ${actual:0:12}…) — файл повреждён или подменён" ;;
+  esac
+}
 
 VER=""
 VER=$(curl -fsSL --max-time 15 https://api.github.com/repos/MetaCubeX/mihomo/releases/latest 2>/dev/null \
@@ -311,64 +688,71 @@ if [ -n "$VER" ] && [ "$VER" = "$MIHOMO_INSTALLED_VER" ]; then
 elif [ -n "$VER" ]; then
   info "Загрузка mihomo $VER ($MIHOMO_ARCH / $MIHOMO_ASSET_ARCH)..."
   URL="https://github.com/MetaCubeX/mihomo/releases/download/${VER}/mihomo-linux-${MIHOMO_ASSET_ARCH}-${VER}.gz"
-  curl -fsSL --max-time 120 -o /tmp/mihomo.gz "$URL" || die "Не удалось скачать mihomo ($URL). Проверьте связь с github."
-  gunzip -f /tmp/mihomo.gz
-  install -m 0755 /tmp/mihomo /usr/local/bin/mihomo
-  rm -f /tmp/mihomo
-  mihomo -v >/dev/null 2>&1 || die "mihomo $VER установлен, но не запускается — проверьте /usr/local/bin/mihomo"
+  curl -fsSL --retry 2 --max-time 180 -o "$WORK_DIR/mihomo.gz" "$URL" \
+    || die "Не удалось скачать mihomo ($URL). Проверьте связь с github."
+  verify_sha "$WORK_DIR/mihomo.gz" "$(fetch_sha "$URL" "${MIHOMO_SHA256:-}")" "mihomo $VER"
+  gunzip -c "$WORK_DIR/mihomo.gz" > "$WORK_DIR/mihomo" \
+    || die "Не удалось распаковать архив mihomo ($URL)"
+  install -m 0755 "$WORK_DIR/mihomo" /usr/local/bin/mihomo
+  mihomo -v >/dev/null 2>&1 \
+    || die "mihomo $VER установлен, но не запускается — проверьте /usr/local/bin/mihomo"
   ok "mihomo $VER установлен: $(mihomo -v | head -n1)"
 fi
 
-# ---------- 5. Конфигурация /etc/routeweave ----------
+# ---------- 6. Конфигурация /etc/routeweave ----------
 info "Создание ${ETC}..."
-mkdir -p "$ETC/lists"
+install -d -m 0755 "$ETC/lists"
 cp -n "$APP_DIR"/lists/*.txt "$ETC/lists/" 2>/dev/null || true
 
+TG_CF_WORKER_DOMAIN="${TG_CF_WORKER_DOMAIN:-$BASE_DOMAIN}"
+TG_LINK_IP="${TG_LINK_IP:-}"
+FAKEIP_EXTRA="${FAKEIP_EXTRA:-}"
+
 if [ ! -f "$ETC/.env" ]; then
-  cat > "$ETC/.env" <<EOF
-LAN_IFACE=$LAN_IFACE
-SERVER_IP=$SERVER_IP
-SOCKS_URL=$SOCKS_URL
-BASE_DOMAIN=$BASE_DOMAIN
-# Домен CF Worker для tg-ws-proxy (опционально; обычно совпадает с BASE_DOMAIN)
-TG_CF_WORKER_DOMAIN=$BASE_DOMAIN
-# IP/хост для tg://-ссылки (пусто = SERVER_IP)
-TG_LINK_IP=
-WG_SUBNET=$WG_SUBNET
-PANEL_PORT=$PANEL_PORT
-PANEL_USER=$PANEL_USER
-PANEL_PASS=$PANEL_PASS
-MIHOMO_SECRET=$MIHOMO_SECRET
-TG_SECRET=$TG_SECRET
-QUIC_DROP=$QUIC_DROP
-FAKEIP_EXTRA=
-EOF
-  chmod 600 "$ETC/.env"
-  ok ".env создан (правки: nano $ETC/.env)"
+  {
+    echo "# Routeweave: сгенерировано install.sh. Значения в двойных кавычках."
+    echo "# Права 0640 root:routeweave; PANEL_PASS обязателен для запуска панели."
+    env_line LAN_IFACE "$LAN_IFACE"
+    env_line SERVER_IP "$SERVER_IP"
+    env_line SOCKS_URL "$SOCKS_URL"
+    env_line BASE_DOMAIN "$BASE_DOMAIN"
+    echo "# Домен CF Worker для tg-ws-proxy (опционально; обычно совпадает с BASE_DOMAIN)"
+    env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+    echo "# IP/хост для tg://-ссылки (пусто = SERVER_IP)"
+    env_line TG_LINK_IP "$TG_LINK_IP"
+    env_line WG_SUBNET "$WG_SUBNET"
+    env_line PANEL_PORT "$PANEL_PORT"
+    env_line PANEL_USER "$PANEL_USER"
+    env_line PANEL_PASS "$PANEL_PASS"
+    env_line MIHOMO_SECRET "$MIHOMO_SECRET"
+    env_line TG_SECRET "$TG_SECRET"
+    env_line QUIC_DROP "$QUIC_DROP"
+    env_line FAKEIP_EXTRA "$FAKEIP_EXTRA"
+  } > "$WORK_DIR/env.new"
+  install -m 0640 -o root -g routeweave "$WORK_DIR/env.new" "$ETC/.env"
+  ok ".env создан: $ETC/.env (0640 root:routeweave)"
 else
-  chmod 600 "$ETC/.env"
-  warn "$ETC/.env уже существует — сохранён"
-  # Секреты могли не записаться (ручное создание/старая версия): дописываем
-  # отсутствующие, значения в вывод не попадают.
+  warn "$ETC/.env уже существует — не перезаписываю"
   ENV_SECRETS_UPDATED=0
   for key in PANEL_PASS MIHOMO_SECRET; do
     cur=$(sed -n "s/^${key}=//p" "$ETC/.env" | head -n1)
+    cur=${cur%\"}
+    cur=${cur#\"}
     if [ -n "$cur" ]; then
       continue
     fi
     if [ "$key" = "PANEL_PASS" ]; then
-      val="${PANEL_PASS:-}"
-      [ -n "$val" ] || val=$(gen_hex 12)
+      val="$PANEL_PASS"
+      [ -n "$val" ] || { val=$(gen_hex 12); PANEL_PASS=$val; PANEL_PASS_GENERATED=1; }
     else
-      val="${MIHOMO_SECRET:-}"
-      [ -n "$val" ] || val=$(gen_hex 16)
+      val="$MIHOMO_SECRET"
+      [ -n "$val" ] || { val=$(gen_hex 16); MIHOMO_SECRET=$val; }
     fi
-    printf -v "$key" '%s' "$val"
     if grep -q "^${key}=" "$ETC/.env"; then
-      sed -i "s|^${key}=.*|${key}=${val}|" "$ETC/.env"
+      sed -i "s|^${key}=.*|$(env_line "$key" "$val")|" "$ETC/.env"
     else
-      if [ -n "$(tail -c1 "$ETC/.env")" ]; then printf '\n' >> "$ETC/.env"; fi
-      printf '%s=%s\n' "$key" "$val" >> "$ETC/.env"
+      [ -z "$(tail -c1 "$ETC/.env")" ] || printf '\n' >> "$ETC/.env"
+      env_line "$key" "$val" >> "$ETC/.env"
     fi
     ENV_SECRETS_UPDATED=1
   done
@@ -377,25 +761,91 @@ else
   fi
 fi
 
+chown root:routeweave "$ETC/.env"
+chmod 0640 "$ETC/.env"
+
+# Панель работает от routeweave: ей нужны .env (чтение) и каталог списков (запись).
+chown -R routeweave:routeweave "$ETC/lists"
+chmod 0755 "$ETC/lists"
+find "$ETC/lists" -maxdepth 1 -type f -exec chmod 0644 {} +
+
+# .env.tgws — отдельный файл для docker compose (без секретов панели/mihomo).
+if [ "$INSTALL_TGWS" = "yes" ]; then
+  {
+    env_line TG_SECRET "$TG_SECRET"
+    env_line BASE_DOMAIN "$BASE_DOMAIN"
+    env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+  } > "$WORK_DIR/env.tgws"
+  install -m 0640 -o root -g root "$WORK_DIR/env.tgws" "$ETC/.env.tgws"
+  ok "$ETC/.env.tgws создан (0640 root:root)"
+fi
+
 # fw-скрипты и конфиг zapret
 install -m 0755 "$APP_DIR/templates/fw-base.sh" "$ETC/fw-base.sh"
 install -m 0755 "$APP_DIR/templates/fw-nfq.sh"  "$ETC/fw-nfq.sh"
-sed "s/{{WAN_IFACE}}/$LAN_IFACE/" "$APP_DIR/templates/zapret.conf.tpl" > "$ETC/zapret.conf"
-chmod 600 "$ETC/zapret.conf"
 
-# render config.yaml
-set -a; . "$ETC/.env"; set +a
-python3 "$APP_DIR/templates/render_mihomo.py" "$ETC/.env" "$ETC/config.yaml"
-chmod 600 "$ETC/config.yaml"
-ok "config.yaml сгенерирован"
+# .env — источник истины для config.yaml и LAN_IFACE; из LAN_IFACE ниже
+# рендерится WAN_IFACE= в zapret.conf (это одно и то же — WAN-интерфейс шлюза).
+set -a
+# shellcheck disable=SC1091
+. "$ETC/.env"
+set +a
 
-# ---------- 6. zapret (сборка из исходников) ----------
+# Старый/рукописный .env может не содержать LAN_IFACE — иначе в zapret.conf
+# попал бы пустой WAN_IFACE=. Подстраховываемся автодетектом (как в fw-nfq.sh).
+if [ -z "${LAN_IFACE:-}" ]; then
+  LAN_IFACE=$(ip route get 1.1.1.1 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}') || true
+  [ -n "${LAN_IFACE:-}" ] \
+    || die "LAN_IFACE не задан в $ETC/.env и не определён автоматически — добавьте LAN_IFACE=\"eth0\" и повторите"
+  warn "LAN_IFACE отсутствовал в .env — использую автодетект: $LAN_IFACE"
+fi
+
+merge_zapret_conf "$APP_DIR/templates/zapret.conf.tpl" "$ETC/zapret.conf"
+
+# config.yaml: рендер во временный файл, сравнение, бэкап, атомарная установка.
+info "Рендер config.yaml..."
+if ! python3 "$APP_DIR/templates/render_mihomo.py" "$ETC/.env" "$WORK_DIR/config.yaml" >/dev/null; then
+  die "render_mihomo.py завершился ошибкой — проверьте $ETC/.env"
+fi
+chmod 0600 "$WORK_DIR/config.yaml"
+if [ -f "$ETC/config.yaml" ] && cmp -s "$WORK_DIR/config.yaml" "$ETC/config.yaml"; then
+  info "config.yaml не изменился"
+else
+  if [ -f "$ETC/config.yaml" ]; then
+    backup_file "$ETC/config.yaml"
+  fi
+  install -m 0600 "$WORK_DIR/config.yaml" "$ETC/config.yaml"
+  ok "config.yaml сгенерирован (0600 root)"
+fi
+
+# ---------- 7. zapret (сборка из исходников) ----------
+ZAPRET_REF="${ZAPRET_REF:-master}"
+if [ ! -d "$ZAPRET_DIR" ]; then
+  info "Клонирование zapret ($ZAPRET_REF)..."
+  git clone --depth 1 --branch "$ZAPRET_REF" https://github.com/bol-van/zapret "$ZAPRET_DIR" \
+    || die "Не удалось склонировать zapret (ветка $ZAPRET_REF)"
+elif [ -d "$ZAPRET_DIR/.git" ]; then
+  if git -C "$ZAPRET_DIR" fetch --depth 1 origin "$ZAPRET_REF" 2>/dev/null \
+     && git -C "$ZAPRET_DIR" checkout -q FETCH_HEAD; then
+    ok "zapret обновлён до $ZAPRET_REF"
+  else
+    warn "не удалось обновить zapret до $ZAPRET_REF — продолжаю с текущим кодом"
+  fi
+else
+  warn "$ZAPRET_DIR существует, но это не git-репозиторий — обновление пропущено"
+fi
+
+if [ -d "$ZAPRET_DIR/.git" ]; then
+  git -C "$ZAPRET_DIR" rev-parse HEAD > "$ETC/zapret.commit" 2>/dev/null || true
+  chmod 0644 "$ETC/zapret.commit"
+fi
+
 if [ -x "$ZAPRET_DIR/bin/nfqws" ]; then
   ok "zapret уже собран: $ZAPRET_DIR/bin/nfqws"
 else
   info "Сборка zapret (2-5 минут)..."
-  [ -d "$ZAPRET_DIR" ] || git clone --depth 1 https://github.com/bol-van/zapret "$ZAPRET_DIR" \
-    || die "Не удалось склонировать zapret"
+  [ -d "$ZAPRET_DIR" ] || die "каталог $ZAPRET_DIR отсутствует — сборка невозможна"
   for d in tpws nfq ip2net mdig; do
     make -C "$ZAPRET_DIR/$d" >/dev/null || die "Сборка zapret/$d не удалась (см. вывод выше)"
   done
@@ -405,39 +855,56 @@ else
   ok "zapret собран: $ZAPRET_DIR/bin/nfqws"
 fi
 
-# ---------- 7. systemd-юниты ----------
+install -m 0755 "$APP_DIR/templates/nfqws-launch.sh" "$ETC/nfqws-launch.sh"
+
+# ---------- 8. systemd-юниты и helper-скрипты ----------
 info "Установка systemd-юнитов..."
 install -m 0644 "$APP_DIR/templates/mihomo.service"                  /etc/systemd/system/mihomo.service
 install -m 0644 "$APP_DIR/templates/routeweave-firewall.service"     /etc/systemd/system/routeweave-firewall.service
 install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"            /etc/systemd/system/zapret-nfqws.service
 install -m 0644 "$APP_DIR/templates/routeweave-panel.service"        /etc/systemd/system/routeweave-panel.service
-install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.service" /etc/systemd/system/routeweave-lists-update.service
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/systemd/system/routeweave-lists-update.timer
 
-# ---------- 8. Панель (venv + статика zashboard) ----------
+install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
+install -m 0755 "$APP_DIR/templates/routeweave-tgws-restart.sh"      "$TGWS_RESTART"
+install -m 0755 "$APP_DIR/templates/routeweave-tgws-state.sh"        "$TGWS_STATE"
+ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state}.sh"
+
+# ---------- 9. Панель (venv + статика zashboard) ----------
 info "Установка веб-панели..."
-mkdir -p "$OPT_PANEL/static"
-cp "$APP_DIR/panel/app.py" "$OPT_PANEL/app.py"
-cp -r "$APP_DIR/panel/static/." "$OPT_PANEL/static/"
+install -d -m 0755 "$OPT_PANEL" "$OPT_PANEL/static"
+install -m 0644 "$APP_DIR/panel/app.py" "$OPT_PANEL/app.py"
+for f in index.html app.css app.js; do
+  install -m 0644 "$APP_DIR/panel/static/$f" "$OPT_PANEL/static/$f"
+done
 python3 -m venv "$OPT_PANEL/venv"
 "$OPT_PANEL/venv/bin/pip" install -q --upgrade pip
 "$OPT_PANEL/venv/bin/pip" install -q -r "$APP_DIR/panel/requirements.txt"
+chown -R root:root "$OPT_PANEL"
+find "$OPT_PANEL" -type d -exec chmod 0755 {} +
+ok "панель установлена: $OPT_PANEL (root:root, каталоги 0755)"
 
 info "Загрузка zashboard..."
 ZASH_URL="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
-if curl -fsSL --max-time 120 -o /tmp/zash.zip "$ZASH_URL"; then
-  rm -rf "$ETC/zashboard"; mkdir -p "$ETC/zashboard"
-  unzip -qo /tmp/zash.zip -d /tmp/zash
+if curl -fsSL --retry 2 --max-time 120 -o "$WORK_DIR/dist.zip" "$ZASH_URL"; then
+  verify_sha "$WORK_DIR/dist.zip" "$(fetch_sha "$ZASH_URL" "${ZASHBOARD_SHA256:-}")" "zashboard"
+  rm -rf "$ETC/zashboard"
+  install -d -m 0755 "$ETC/zashboard"
+  unzip -q -o "$WORK_DIR/dist.zip" -d "$WORK_DIR/zash" \
+    || die "не удалось распаковать $ZASH_URL"
   # в архиве папка dist/
-  cp -r /tmp/zash/dist/. "$ETC/zashboard/" 2>/dev/null || cp -r /tmp/zash/. "$ETC/zashboard/"
-  rm -rf /tmp/zash /tmp/zash.zip
+  if [ -d "$WORK_DIR/zash/dist" ]; then
+    cp -a "$WORK_DIR/zash/dist/." "$ETC/zashboard/"
+  else
+    cp -a "$WORK_DIR/zash/." "$ETC/zashboard/"
+  fi
   ok "zashboard: http://$SERVER_IP:9090/ui/"
 else
-  warn "zashboard не скачался — дашборд будет недоступен (панель продолжит работать)"
+  warn "zashboard не скачался ($ZASH_URL) — дашборд будет недоступен (панель продолжит работать)"
 fi
 
-# ---------- 9. tg-ws-proxy-rs (docker) ----------
+# ---------- 10. tg-ws-proxy-rs (docker) ----------
 if [ "$INSTALL_TGWS" = "yes" ]; then
   info "Запуск tg-ws-proxy-rs (docker)..."
   command -v docker >/dev/null 2>&1 || die "tg-ws-proxy требует Docker Engine и compose v2. Установите Docker (https://docs.docker.com/engine/install/) и повторите, либо запустите без INSTALL_TGWS=yes."
@@ -449,21 +916,29 @@ else
   info "tg-ws-proxy: пропущен (INSTALL_TGWS=no)"
 fi
 
-# ---------- 10. Firewall / ufw ----------
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+# ---------- 11. Firewall / ufw ----------
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   info "ufw активен — добавляю разрешения для локалки..."
   ufw route allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
-  UFW_PORTS="53 8080 9090"
-  if [ "$INSTALL_TGWS" = "yes" ]; then UFW_PORTS="$UFW_PORTS 1443"; fi
-  for p in $UFW_PORTS; do ufw allow from "$WG_SUBNET" to any port "$p" >/dev/null 2>&1 || true; done
+
   LAN_CIDR=$(ip -4 addr show "$LAN_IFACE" | awk '/inet /{print $2; exit}')
-  if [ -n "$LAN_CIDR" ]; then
-    for p in $UFW_PORTS; do ufw allow from "$LAN_CIDR" to any port "$p" >/dev/null 2>&1 || true; done
+  PORTS_TCP="53 7890 $PANEL_PORT 9090"
+  if [ "$INSTALL_TGWS" = "yes" ]; then
+    PORTS_TCP="$PORTS_TCP 1443"
   fi
-  ok "ufw: правила добавлены"
+
+  # Один и тот же набор портов — для WDTT-подсети и для LAN-подсети.
+  for src in "$WG_SUBNET" "$LAN_CIDR"; do
+    [ -n "$src" ] || continue
+    for p in $PORTS_TCP; do
+      ufw allow from "$src" to any port "$p" proto tcp >/dev/null 2>&1 || true
+    done
+    ufw allow from "$src" to any port 53 proto udp >/dev/null 2>&1 || true
+  done
+  ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53)"
 fi
 
-# ---------- 11. Запуск ----------
+# ---------- 12. Запуск ----------
 info "Запуск сервисов..."
 systemctl daemon-reload
 systemctl enable --now routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
@@ -482,7 +957,7 @@ info "Первый прогон обновления списков..."
 systemctl start routeweave-lists-update.service \
   || warn "обновление списков завершилось ошибкой — journalctl -u routeweave-lists-update -n 50"
 
-# ---------- 12. WDTT-Plus (VPN-сервер для Android) ----------
+# ---------- 13. WDTT-Plus (VPN-сервер для Android) ----------
 if [ "$INSTALL_WDTT" = "yes" ]; then
   info "Шаг WDTT-Plus..."
   install_wdtt || FAIL=1
@@ -499,9 +974,15 @@ fi
 
 echo
 echo -e "${C_G}================ Установка завершена ================${C_N}"
-echo -e "Панель:        ${C_B}http://$SERVER_IP:$PANEL_PORT${C_N}  (логин: $PANEL_USER, пароль: в $ETC/.env → PANEL_PASS)"
+echo -e "Панель:        ${C_B}http://$SERVER_IP:$PANEL_PORT${C_N}  (логин: $PANEL_USER)"
+if [ "$PANEL_PASS_GENERATED" = 1 ]; then
+  echo -e "Пароль панели: ${C_Y}$PANEL_PASS${C_N}  (сохранён в $ETC/.env → PANEL_PASS)"
+else
+  echo -e "Пароль панели: см. $ETC/.env → PANEL_PASS"
+fi
 echo -e "Zashboard:     ${C_B}http://$SERVER_IP:9090/ui/${C_N}  (backend: http://$SERVER_IP:9090, секрет: $ETC/.env → MIHOMO_SECRET)"
-echo -e "Конфиг:        $ETC/.env (chmod 600)"
+echo -e "Конфиг:        $ETC/.env (0640 root:routeweave)"
+echo -e "Sudoers:       $SUDOERS_PANEL (панель работает от пользователя routeweave)"
 if [ "$INSTALL_TGWS" = "yes" ]; then
   echo -e "TG MTProto:    секрет — ${C_B}docker logs routeweave-tgwsproxy${C_N}"
 fi

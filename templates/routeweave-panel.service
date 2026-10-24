@@ -1,15 +1,57 @@
+# Routeweave: веб-панель (FastAPI/uvicorn) от непривилегированного пользователя.
+#
+# Почему User=routeweave, пустой CapabilityBoundingSet и не root:
+#   панели root не нужен. Все привилегированные действия (restart mihomo /
+#   zapret-nfqws / routeweave-panel, обновление списков, tg-ws-proxy) она
+#   делает через `sudo -n` строго по allowlist из
+#   /etc/sudoers.d/routeweave-panel — там перечислены конкретные команды, без
+#   wildcard. Если панель скомпрометируют (RCE в веб-морде), атакующий
+#   получит только эти команды, а не root. Пустой CapabilityBoundingSet
+#   гарантирует, что даже при ошибке в юните процесс не унаследует ни одной
+#   capability: ядро отдаст их пустой набор.
+#
+# Почему NoNewPrivileges здесь НЕ включается:
+#   NoNewPrivileges=yes запрещает повышение привилегий через execve setuid-
+#   бинарников, а /usr/bin/sudo именно setuid-root. С этим флагом панель
+#   получила бы от sudo «The "no new privileges" flag is set, which prevents
+#   sudo from running as root», и кнопки перезапуска/обновления сломались бы.
+#   Эквивалентная защита достигнута иначе: пустой CapabilityBoundingSet,
+#   ProtectSystem=strict, ProtectHome, PrivateTmp, RestrictAddressFamilies и
+#   sudo-allowlist без wildcard.
+#
+# Почему ProtectSystem=strict и ReadWritePaths только списки/run:
+#   панель не должна писать в /etc, /opt, /usr — это делает установщик от
+#   root. Единственное, что ей реально нужно на запись: каталог списков
+#   (/etc/routeweave/lists — правка/загрузка dpi.txt) и /run (рантайм-файлы,
+#   например /run/routeweave). ProtectSystem=strict делает всю остальную ФС
+#   read-only, ReadWritePaths открывает ровно эти два пути.
+#
+# PANEL_PORT берётся из EnvironmentFile и подставляет его systemd на этапе
+# exec (спецификаторы ${VAR} в ExecStart раскрывает менеджер сервисов, а не
+# шелл — поэтому здесь нет /bin/sh -c и нет риска инъекции из .env).
+
 [Unit]
-Description=Routeweave web panel
-After=network-online.target mihomo.service
+Description=Routeweave panel (FastAPI)
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=routeweave
+Group=routeweave
 EnvironmentFile=/etc/routeweave/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/opt/routeweave-panel
-ExecStart=/bin/sh -c 'exec /opt/routeweave-panel/venv/bin/uvicorn app:app --host 0.0.0.0 --port "${PANEL_PORT}"'
+ExecStart=/opt/routeweave-panel/venv/bin/uvicorn app:app --host 0.0.0.0 --port ${PANEL_PORT}
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/routeweave/lists /run
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

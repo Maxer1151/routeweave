@@ -1,5 +1,11 @@
 # Routeweave: опциональный компонент tg-ws-proxy (только при INSTALL_TGWS=yes).
 # Требует Docker Engine + compose v2. Ядро шлюза работает без этого файла.
+#
+# env_file — отдельный /etc/routeweave/.env.tgws, а не общий /etc/routeweave/.env:
+# контейнеру нужны только TG_SECRET, BASE_DOMAIN и TG_CF_WORKER_DOMAIN. Секреты
+# панели (PANEL_PASS) и mihomo (MIHOMO_SECRET) ему не нужны; чем меньше
+# секретов попадает в `docker inspect`/окружение контейнера, тем лучше.
+# .env.tgws создаёт install.sh (0640 root:root).
 name: routeweave
 
 services:
@@ -10,4 +16,4 @@ services:
     ports:
       - "1443:1443"
     env_file:
-      - /etc/routeweave/.env
+      - /etc/routeweave/.env.tgws
