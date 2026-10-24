@@ -1,48 +1,270 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Routeweave panel</title>
+<meta name="color-scheme" content="dark light">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Локальная панель шлюза Routeweave: состояние сервисов, пробы путей, списки доменов и конфигурация.">
+<title>Routeweave — панель шлюза</title>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/app.js" defer></script>
 </head>
 <body>
-<h1>Routeweave</h1>
-<div class="sub">Локальная панель шлюза · <a href="/ui/" target="_blank" rel="noopener">Zashboard (соединения/трафик)</a></div>
+<a class="skip-link" href="#main">Перейти к содержимому</a>
 
-<h2>Сервисы</h2>
-<div class="grid" id="svc"></div>
+<svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></symbol>
+  <symbol id="i-routes" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"/><circle cx="18" cy="5" r="3"/><path d="M6 16V9a4 4 0 0 1 4-4h4"/><path d="M15 12l3 3 3-3" transform="translate(-3 -2)"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+  <symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M2 2l20 20"/><path d="M9 18.5a3 3 0 0 1 6 0"/><path d="M5.5 14.5a9 9 0 0 1 3-2"/><path d="M2 9a15 15 0 0 1 4.5-2.5"/><path d="M15.5 5.5A15 15 0 0 1 22 9"/><path d="M14 12.5a5 5 0 0 1 2.5 1"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-logo" viewBox="0 0 32 32"><path d="M6 22c6 0 8-12 14-12" stroke-width="3"/><path d="M6 10c6 0 8 12 14 12" stroke-width="3"/><circle cx="24.5" cy="8.5" r="2.5" fill="currentColor" stroke="none"/><circle cx="24.5" cy="23.5" r="2.5" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-spinner" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9" /></symbol>
+</svg>
 
-<h2>Пробы путей</h2>
-<div class="row"><button type="button" class="pri" id="runProbe">Запустить пробы</button><span class="hint" id="probeTs"></span></div>
-<div class="mt10">
-<table>
-<thead><tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr></thead>
-<tbody id="probeBody"></tbody>
-</table>
-<div class="hint">chatgpt — через mihomo→SOCKS · youtube — прямой путь + zapret · tg — локальный tg-ws-proxy:1443 (опционально) · worker — ваш CF Worker</div>
+<div class="page">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg class="icon icon-lg"><use href="#i-logo"/></svg></span>
+      <span class="brand-text">
+        <span class="brand-name">Routeweave</span>
+        <span class="brand-sub">панель шлюза</span>
+      </span>
+    </div>
+    <div class="topbar-tools">
+      <span class="pill pill--mono" id="gw-ip" hidden></span>
+      <span class="updated" id="updated-at" aria-live="off">—</span>
+      <button type="button" class="icon-btn" id="theme-toggle" aria-label="Переключить тему">
+        <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-moon" id="theme-icon"/></svg>
+      </button>
+      <button type="button" class="btn btn--ghost" id="refresh-btn" aria-label="Обновить данные">
+        <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-refresh"/></svg>
+        <span>Обновить</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner banner--auth" id="auth-banner" role="alert" hidden>
+    <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+    <div class="banner-body">
+      <strong>Требуется авторизация</strong>
+      <span>Обновите страницу и введите логин и пароль из <code>/etc/routeweave/.env</code>.</span>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" id="auth-reload">Обновить страницу</button>
+  </div>
+
+  <div class="banner banner--warn" id="net-banner" role="alert" hidden>
+    <svg class="icon" aria-hidden="true"><use href="#i-wifi-off"/></svg>
+    <div class="banner-body">
+      <strong>Нет связи с панелью</strong>
+      <span>Последние данные могли устареть. Панель перезапускается или недоступна в сети.</span>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" id="net-retry">Повторить</button>
+  </div>
+
+  <main id="main">
+
+    <section class="hero" id="hero" aria-labelledby="hero-title" data-tone="pending">
+      <div class="hero-status">
+        <span class="hero-icon" id="hero-icon" aria-hidden="true"><svg class="icon icon-xl"><use href="#i-spinner"/></svg></span>
+        <div class="hero-body">
+          <p class="eyebrow">Состояние шлюза</p>
+          <h1 class="hero-title" id="hero-title">Проверяем состояние…</h1>
+          <p class="hero-desc" id="hero-desc">Получаем данные от панели — это займёт пару секунд.</p>
+        </div>
+      </div>
+      <dl class="hero-facts">
+        <div class="fact">
+          <dt>Сервисы</dt>
+          <dd id="fact-services">—</dd>
+        </div>
+        <div class="fact">
+          <dt>Пробы</dt>
+          <dd id="fact-probes">—</dd>
+        </div>
+        <div class="fact">
+          <dt>mihomo API</dt>
+          <dd id="fact-api">—</dd>
+        </div>
+        <div class="fact">
+          <dt>Обновлено</dt>
+          <dd id="fact-updated">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="section" aria-labelledby="h-services">
+      <div class="section-head">
+        <h2 id="h-services">Сервисы</h2>
+        <p class="section-meta" id="services-meta">systemd и docker</p>
+      </div>
+      <div class="services" id="services"></div>
+    </section>
+
+    <section class="section" aria-labelledby="h-probes">
+      <div class="section-head">
+        <h2 id="h-probes">Пробы путей</h2>
+        <div class="section-tools">
+          <span class="section-meta" id="probes-ts">пробы ещё не запускались</span>
+          <button type="button" class="btn btn--primary" id="probe-run">
+            <span class="btn-icon" id="probe-run-icon" aria-hidden="true"><svg class="icon"><use href="#i-play"/></svg></span>
+            <span id="probe-run-label">Запустить пробы</span>
+          </button>
+        </div>
+      </div>
+      <p class="section-hint">ChatGPT — через SOCKS, YouTube — напрямую с desync, Telegram — локальный прокси :1443, Worker — ваш домен на Cloudflare.</p>
+      <div class="table-wrap">
+        <table class="probe-table" id="probe-table">
+          <caption class="sr-only">Результаты проб путей</caption>
+          <thead>
+            <tr>
+              <th scope="col">Проверка</th>
+              <th scope="col">Результат</th>
+              <th scope="col">Детали</th>
+            </tr>
+          </thead>
+          <tbody id="probe-body">
+            <tr><td colspan="3" class="empty">Загружаем результаты…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="h-lists">
+      <div class="section-head">
+        <h2 id="h-lists">Списки доменов</h2>
+        <p class="section-meta" id="lists-path">/etc/routeweave/lists/</p>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Списки доменов">
+        <button type="button" class="tab" role="tab" id="tab-geo-custom" aria-controls="list-panel" aria-selected="true" tabindex="0" data-list="geo-custom">
+          geo-custom
+          <span class="tab-note">→ SOCKS</span>
+          <span class="tab-dirty" id="dirty-geo-custom" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+        <button type="button" class="tab" role="tab" id="tab-dpi" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="dpi">
+          dpi
+          <span class="tab-note">→ zapret</span>
+          <span class="tab-dirty" id="dirty-dpi" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+        <button type="button" class="tab" role="tab" id="tab-ru-custom" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="ru-custom">
+          ru-custom
+          <span class="tab-note">→ direct</span>
+          <span class="tab-dirty" id="dirty-ru-custom" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
+      </div>
+
+      <div class="editor-card" id="list-panel" role="tabpanel" aria-labelledby="tab-geo-custom" tabindex="0">
+        <div class="editor-head">
+          <div class="editor-title">
+            <code class="file-name" id="list-file">geo-custom.txt</code>
+            <span class="pill" id="list-route">→ SOCKS</span>
+            <span class="pill pill--dirty" id="list-dirty" hidden>не сохранено</span>
+          </div>
+          <p class="editor-desc" id="list-desc">Домены, которые идут через внешний SOCKS/HTTP-прокси.</p>
+        </div>
+
+        <label class="sr-only" for="list-editor">Содержимое списка доменов</label>
+        <textarea id="list-editor" class="editor" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-describedby="list-counts editor-state"></textarea>
+
+        <div class="editor-foot">
+          <p class="counts" id="list-counts">Строк: — · Символов: —</p>
+          <p class="editor-state" id="editor-state" role="status"></p>
+        </div>
+
+        <div class="editor-actions">
+          <button type="button" class="btn" id="list-save">
+            <svg class="icon" aria-hidden="true"><use href="#i-save"/></svg>
+            <span>Сохранить</span>
+          </button>
+          <button type="button" class="btn btn--primary" id="list-apply">
+            <span class="btn-icon" id="apply-icon" aria-hidden="true"><svg class="icon"><use href="#i-refresh"/></svg></span>
+            <span id="apply-label">Сохранить и применить</span>
+          </button>
+          <p class="hint" id="apply-hint">Ctrl+S — сохранить. Применение обновляет списки и перезапускает mihomo.</p>
+        </div>
+
+        <p class="note" id="lists-note">
+          <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+          <span><code>geo.txt</code> и <code>ru-direct.txt</code> генерируются таймером обновления — правьте только custom-списки и <code>dpi.txt</code>, иначе изменения перезапишутся.</span>
+        </p>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="h-config">
+      <div class="section-head">
+        <h2 id="h-config">Конфигурация</h2>
+        <p class="section-meta">/etc/routeweave/.env</p>
+      </div>
+      <div class="config-grid">
+        <dl class="kv" id="config-list">
+          <div class="kv-row"><dt>IP сервера</dt><dd>—</dd></div>
+        </dl>
+
+        <div class="side-cards">
+          <div class="mini-card">
+            <h3 class="mini-title">
+              <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+              Zashboard
+            </h3>
+            <p class="mini-text">Соединения, трафик и логи mihomo в реальном времени.</p>
+            <a class="btn btn--ghost" href="/ui/" target="_blank" rel="noopener noreferrer">
+              <span>Открыть /ui/</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg>
+            </a>
+          </div>
+
+          <div class="mini-card" id="tg-card" hidden>
+            <h3 class="mini-title">
+              <svg class="icon" aria-hidden="true"><use href="#i-routes"/></svg>
+              Telegram-прокси
+            </h3>
+            <p class="mini-text">MTProto, порт <code>1443</code>. Секрет — в <code>docker logs routeweave-tgwsproxy</code>.</p>
+            <ul class="copy-list" id="tg-list"></ul>
+            <a class="btn btn--ghost btn--sm tg-open" id="tg-open" hidden>
+              <span>Добавить в Telegram</span>
+              <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg>
+            </a>
+            <p class="hint tg-hint" id="tg-secret-hint" hidden>Ссылка содержит секрет прокси — не публикуйте её.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <noscript>
+      <div class="banner banner--warn" role="alert">
+        <div class="banner-body">
+          <strong>Нужен JavaScript</strong>
+          <span>Панель загружает данные через API — включите JavaScript в браузере.</span>
+        </div>
+      </div>
+    </noscript>
+  </main>
+
+  <footer class="footer">
+    <span>Routeweave · локальная панель</span>
+    <span class="footer-dim">доступна только в домашней сети</span>
+  </footer>
 </div>
 
-<h2>Списки доменов</h2>
-<div class="tabs">
-<button type="button" data-list="geo-custom" class="on">geo-custom (→ SOCKS)</button>
-<button type="button" data-list="dpi">dpi (→ zapret)</button>
-<button type="button" data-list="ru-custom">ru-custom (→ direct)</button>
-</div>
-<div class="hint">geo.txt и ru-direct.txt генерируются таймером routeweave-lists-update (04:15 + случайная задержка) — правьте только custom-списки и dpi.txt</div>
-<textarea id="listArea" spellcheck="false"></textarea>
-<div class="row">
-<button type="button" id="saveList">Сохранить</button>
-<button type="button" class="pri" id="applyList">Сохранить, обновить списки и mihomo</button>
-<span class="hint" id="listState"></span>
-<span class="hint" id="applyState"></span>
-</div>
-
-<h2>Конфигурация</h2>
-<div class="kv" id="cfg"></div>
-<div class="hint hidden" id="tgHint"></div>
-
-<div id="msg" role="status" aria-live="polite"></div>
+<div class="toasts" id="toasts" role="region" aria-label="Уведомления" aria-live="polite"></div>
+<div class="sr-only" id="a11y-status" role="status" aria-live="polite"></div>
 </body>
 </html>
