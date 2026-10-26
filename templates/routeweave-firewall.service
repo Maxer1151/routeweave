@@ -10,6 +10,25 @@ ExecStart=/etc/routeweave/fw-base.sh start
 ExecStart=/etc/routeweave/fw-wan.sh start
 ExecStop=/etc/routeweave/fw-wan.sh stop
 ExecStop=/etc/routeweave/fw-base.sh stop
+# Hardening (L-09). ProtectSystem=full (а не strict): /etc остаётся
+# read-only, но /run доступен для lock-файла fw-wan.sh. EnvironmentFile
+# /etc/routeweave/.env не ломается: ProtectSystem влияет на запись, не на
+# чтение.
+# ProtectKernelTunables НЕ ставится: fw-base.sh делает
+# `sysctl -w net.ipv4.ip_forward=1`, а этот запрет закрыл бы /proc/sys.
+# NoNewPrivileges безопасен: capabilities приходят из AmbientCapabilities,
+# sudo/setuid здесь не используются (RestrictSUIDSGID их и так блокирует).
+# CAP_NET_ADMIN — iptables/ip rule, CAP_NET_RAW — raw-сокеты, CAP_NET_BIND_SERVICE
+# — привилегированные порты в правилах.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

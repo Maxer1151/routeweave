@@ -19,6 +19,23 @@ Restart=on-failure
 RestartSec=3
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+# Hardening (L-09). Зачем именно так, чтобы не «оптимизировать» обратно:
+#   - ProtectSystem=strict делает /usr, /boot, /etc read-only; mihomo читает
+#     конфиг из /etc/routeweave и пишет туда кэш/geo-файлы, поэтому этот
+#     каталог и /run (lock-файл fw-wan.sh) открыты через ReadWritePaths;
+#   - NoNewPrivileges здесь НЕ ставится: mihomo получает capabilities через
+#     AmbientCapabilities, а с NoNewPrivileges ambient-набор сбрасывается при
+#     exec и TUN/iptables перестают работать;
+#   - PrivateDevices НЕ ставится: mihomo обязан открыть /dev/net/tun;
+#   - AF_NETLINK нужен для netlink (ip rule/route), AF_UNIX — для локального
+#     API/логов, AF_INET/AF_INET6 — для проксирования.
+ProtectSystem=strict
+ReadWritePaths=/etc/routeweave /run
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

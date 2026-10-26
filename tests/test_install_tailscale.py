@@ -279,12 +279,22 @@ def test_install_header_lists_tailscale():
 
 def test_env_example_has_tailscale_settings_without_secrets():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
-    header = "\n".join(text.splitlines()[:20])
-    assert "INSTALL_TAILSCALE" in header
-    assert 'TS_IFACE="tailscale0"' in text
-    assert 'TS_SUBNET="100.64.0.0/10"' in text
+    lines = text.splitlines()
+    # Шапка — всё до первой активной строки. Install-time переменные там
+    # перечислены комментарием, активных INSTALL_* строк быть не должно.
+    header_end = next(
+        i for i, line in enumerate(lines)
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    header = "\n".join(lines[:header_end])
+    assert re.search(r"^#.*\bINSTALL_TAILSCALE\b", header, re.MULTILINE)
+    assert not re.search(r"^\s*INSTALL_TAILSCALE\s*=", text, re.MULTILINE)
 
-    for line in text.splitlines():
+    # Формат файла — KEY='value': значения именно в одинарных кавычках.
+    assert "TS_IFACE='tailscale0'" in text
+    assert "TS_SUBNET='100.64.0.0/10'" in text
+
+    for line in lines:
         assert not re.match(r"\s*TS_AUTHKEY(_FILE)?\s*=", line), line
     # Комментарий о том, что ключи здесь не хранятся, должен остаться.
     assert "TS_AUTHKEY" in text

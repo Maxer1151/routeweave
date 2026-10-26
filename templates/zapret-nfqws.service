@@ -29,6 +29,24 @@ ExecStart=/etc/routeweave/nfqws-launch.sh
 ExecStopPost=/etc/routeweave/fw-nfq.sh stop
 Restart=on-failure
 RestartSec=3
+# Hardening (L-09). NoNewPrivileges=yes здесь безопасен: nfqws и fw-nfq.sh
+# получают ровно перечисленные capabilities через AmbientCapabilities, а
+# CAP_NET_ADMIN нужен для iptables/NFQUEUE, CAP_NET_RAW — для raw-сокетов,
+# CAP_NET_BIND_SERVICE — на случай привилегированного порта. Шире набор не
+# делать: sudo/setuid этому юниту не нужны (RestrictSUIDSGID блокирует их).
+# ProtectSystem=strict оставляет запись только в /etc/routeweave (конфиг) и
+# /run (lock-файл и hostlist fw-nfq.sh); PrivateDevices не ставим — nfqws
+# работает через netlink/netfilter, а не /dev/net/tun.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/routeweave /run
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

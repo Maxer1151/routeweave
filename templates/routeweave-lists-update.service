@@ -8,3 +8,22 @@ Type=oneshot
 ExecStart=/usr/local/sbin/routeweave-update-lists.sh
 Nice=10
 IOSchedulingClass=idle
+# Hardening (L-09). ProtectSystem=strict делает ФС read-only; updater пишет
+# только staging и итоговые списки, поэтому открыты ровно эти два пути.
+# mv выполняется внутри ReadWritePaths (/etc/routeweave/.staging ->
+# /etc/routeweave/lists) — strict этому не мешает.
+# CAP_CHOWN нужен на `chown root:root` при атомарной записи списков (put),
+# CAP_DAC_OVERRIDE/CAP_FOWNER — заменить файл, даже если он чужой/read-only.
+# AF_INET/AF_INET6 — загрузка по https, AF_UNIX — nss/локальные сокеты.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/routeweave/lists /etc/routeweave/.staging
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

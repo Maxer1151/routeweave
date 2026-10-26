@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-#  Routeweave — установщик для Ubuntu 20.04+/Debian 12+
+#  Routeweave — установщик для Ubuntu 22.04+/Debian 12+ (Python 3.10+)
 #  Ядро: mihomo (прозрачный шлюз) + zapret (nfqws) + списки доменов +
 #        веб-панель (FastAPI) + firewall (iptables/ufw)
 #  Опционально:
@@ -15,6 +15,11 @@ set -Eeuo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ETC=/etc/routeweave
+# Маркер владения: какие пути поставил Routeweave, а какие были до него.
+# Формат и семантика — контракт с uninstall.sh (см. owned_state там):
+#   <абсолютный путь>\trouteweave|preexisting
+OWNED="$ETC/owned"
+ENV_FILE="$ETC/.env"
 OPT_PANEL=/opt/routeweave-panel
 ZAPRET_DIR=/opt/zapret
 BACKUP_DIR="$ETC/backup"
@@ -22,11 +27,33 @@ SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
 TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
 TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
 TAILSCALE_STATE=/usr/local/sbin/routeweave-tailscale-state.sh
-MIHOMO_FALLBACK_VER="v1.19.13"
+# ---------- Закреплённые версии и контрольные суммы (supply-chain) ----------
+# Версии и sha256 зафиксированы в git-истории Routeweave и сверяются с
+# загруженными артефактами. Обновление — осознанная правка этих констант с
+# пересчётом суммы, а не «взять последний релиз с GitHub»: mutable-источники
+# (последний релиз, GitHub API) в установщике больше не используются.
+MIHOMO_PINNED_VER="v1.19.13"
+MIHOMO_SHA256_AMD64_COMPAT="e7a2bb3680cfbc58f9c382e46ca1863eb6093743da2ba86a81588bb552b8002a"
+MIHOMO_SHA256_AMD64="c85a912c1374c88f602df6b5d8a9b7ce0771828fb66e5bd0bca9179518db90d8"
+MIHOMO_SHA256_ARM64="7aa8651738202741467d83b9ce51638ab7f01eef352472d2fba17e71dd5cce9a"
+ZASHBOARD_VER="v3.29.1"
+ZASHBOARD_SHA256_PINNED="4f16cce229e223bd07b5a3daccfbfb8bf349d7335572d412959284ab6c9bab50"
+WDTT_PINNED_TAG="v20"
+WDTT_PINNED_NAME="WDTT-Plus-server-v20-installer-0.20.3-linux-amd64.tar.gz"
+WDTT_SHA256="466aa573e9b97160964d06ccfb04a3f99a19f5f0b760b6491b0fe0ab97e040e8"
+ZAPRET_PINNED_COMMIT="c4d0b1990129dce2b28095277173ee0d7702d304"
+# 1 = --allow-unverified (или ALLOW_UNVERIFIED=1/yes): пропускать проверку
+# sha256 архивов. Проверку коммита zapret флаг НЕ отключает.
+ALLOW_UNVERIFIED="${ALLOW_UNVERIFIED:-0}"
+case "$ALLOW_UNVERIFIED" in
+  yes|true|1) ALLOW_UNVERIFIED=1 ;;
+  *) ALLOW_UNVERIFIED=0 ;;
+esac
 TS_STATUS="не устанавливался"
 TS_REPO_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
 TS_REPO_LIST=/etc/apt/sources.list.d/tailscale.list
 FAIL=0
+PORT53_BLOCKED=0
 
 C_G='\033[0;32m'; C_Y='\033[1;33m'; C_R='\033[0;31m'; C_B='\033[1;34m'; C_N='\033[0m'
 info()  { echo -e "${C_B}[i]${C_N} $*"; }
@@ -46,6 +73,9 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
   -h, --help    показать эту справку и выйти (root не нужен)
   --defaults    не задавать вопросов: взять значения по умолчанию
                 (ядро; INSTALL_WDTT=no, INSTALL_TGWS=no, INSTALL_TAILSCALE=no)
+  --allow-unverified
+                не проверять sha256 скачанных архивов (ОПАСНО: только для
+                отладки; коммит zapret проверяется всегда)
 
 Переменные окружения времени установки (НЕ из /etc/routeweave/.env):
   INSTALL_WDTT=yes|no     поставить WDTT-Plus (VPN для Android, только amd64)
@@ -55,11 +85,11 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
                           только Ubuntu/Debian)
   TS_AUTHKEY_FILE=<path>  auth key Tailscale в файле (предпочтительно)
   TS_AUTHKEY=<key>        auth key строкой (только на время установки)
-  ZAPRET_REF=<ref>        ветка/тег zapret при клонировании и обновлении
-                          (по умолчанию master)
-  MIHOMO_SHA256=<hex>     ожидаемая sha256 архива mihomo, если апстрим не
-                          публикует <url>.sha256
-  ZASHBOARD_SHA256=<hex>  то же для dist.zip дашборда zashboard
+  ZAPRET_REF=<ref>        ветка/тег/коммит zapret (по умолчанию закреплённый
+                          коммит из install.sh; чужой коммит — осознанный
+                          override, HEAD сверяется с ZAPRET_REF)
+  ALLOW_UNVERIFIED=yes    тестовый обход проверки sha256 (эквивалент
+                          --allow-unverified; не для боевой установки)
   TG_PINNED_UPSTREAM=<tiers>
                           порядок апстримов tg-ws-proxy через запятую
                           (ws, cfworker, cfproxy, mtproto, tcp); по умолчанию
@@ -68,9 +98,10 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
 Что делает установщик:
   1. ставит пакеты, создаёт системного пользователя routeweave и минимальный
      sudoers (/etc/sudoers.d/routeweave-panel, 0640 root:root);
-  2. пишет /etc/routeweave/.env (0640 root:routeweave) со значениями в кавычках;
-  3. скачивает mihomo (сверяя sha256, если апстрим его публикует), собирает
-     zapret из исходников (/opt/zapret, ветка ZAPRET_REF);
+  2. пишет /etc/routeweave/.env (0640 root:routeweave) со значениями в
+     одинарных кавычках; файл читается как данные, а не исполняется shell'ом;
+  3. скачивает mihomo, сверяя закреплённую в install.sh sha256, собирает
+     zapret из исходников (/opt/zapret, закреплённый коммит ZAPRET_REF);
   4. освобождает порт 53 (systemd-resolved), настраивает DNS и firewall (ufw,
      если активен), не затирая ручные правки /etc/routeweave/zapret.conf;
   5. ставит systemd-юниты, helper-скрипты в /usr/local/sbin и FastAPI-панель
@@ -93,12 +124,59 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --defaults) DEFAULTS=1 ;;
+    --allow-unverified) ALLOW_UNVERIFIED=1 ;;
     *) echo "Неизвестный аргумент: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
 done
 
+if [ "$ALLOW_UNVERIFIED" = 1 ]; then
+  warn "ВНИМАНИЕ: --allow-unverified/ALLOW_UNVERIFIED=1 — sha256 скачанных архивов не проверяется. Используйте только для отладки."
+fi
+
 [ "$(id -u)" -eq 0 ] || die "Запустите от root: sudo ./install.sh"
+
+# ---------- Требования платформы (до любых изменений системы) ----------
+# Python 3.10+ нужен панели и render_mihomo.py; он есть в Ubuntu 22.04+ и
+# Debian 12+. На Ubuntu 20.04 (Python 3.8) панель после установки не
+# стартует, поэтому лучше упасть сразу и с понятным текстом.
+REQ_TEXT="Routeweave требует Ubuntu 22.04+ или Debian 12+ (Python 3.10+)"
+[ -r /etc/os-release ] || die "$REQ_TEXT: не удалось прочитать /etc/os-release"
+# shellcheck disable=SC1091
+. /etc/os-release
+OS_ID="${ID:-}"
+OS_VER="${VERSION_ID:-}"
+os_major="${OS_VER%%.*}"
+os_major="${os_major//[!0-9]/}"
+os_major="${os_major:-0}"
+os_minor="0"
+if [[ $OS_VER == *.* ]]; then
+  os_minor="${OS_VER#*.}"
+  os_minor="${os_minor%%.*}"
+  os_minor="${os_minor//[!0-9]/}"
+  os_minor="${os_minor:-0}"
+fi
+case "$OS_ID" in
+  ubuntu)
+    (( 10#$os_major > 22 || (10#$os_major == 22 && 10#$os_minor >= 4) )) \
+      || die "$REQ_TEXT: обнаружено ${PRETTY_NAME:-$OS_ID $OS_VER}"
+    ;;
+  debian)
+    (( 10#$os_major >= 12 )) \
+      || die "$REQ_TEXT: обнаружено ${PRETTY_NAME:-$OS_ID $OS_VER}"
+    ;;
+  *)
+    die "$REQ_TEXT: обнаружено ${PRETTY_NAME:-$OS_ID $OS_VER}"
+    ;;
+esac
+ok "Платформа: ${PRETTY_NAME:-$OS_ID}"
+
+# Если python3 уже есть — версия обязана быть >= 3.10. Если его нет, его
+# поставит блок базовых пакетов ниже, там проверка повторяется.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' \
+    || die "$REQ_TEXT: найден $(python3 -V 2>&1)"
+fi
 
 # Единый временный каталог на весь прогон (никаких фиксированных /tmp/...).
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/routeweave-install.XXXXXX")"
@@ -116,13 +194,6 @@ trap cleanup EXIT
 # Чистые функции без побочных эффектов на систему: их можно вынести в
 # песочницу и проверить отдельно (см. tests / отчёт).
 
-esc() { # экранирование значения для двойных кавычек в .env: \ и "
-  local s=${1-}
-  s=${s//\\/\\\\}
-  s=${s//\"/\\\"}
-  printf '%s' "$s"
-}
-
 esc_sed() { # экранирование для replacement в sed (s|...|...|)
   local s=${1-}
   s=${s//\\/\\\\}
@@ -131,8 +202,59 @@ esc_sed() { # экранирование для replacement в sed (s|...|...|)
   printf '%s' "$s"
 }
 
-env_line() { # env_line <KEY> <value> -> KEY="value"
-  printf '%s="%s"\n' "$1" "$(esc "${2-}")"
+env_line() { # env_line <KEY> <value> -> KEY='value' (одинарные кавычки)
+  # .env — данные, а не shell-скрипт: install.sh читает его через env_get,
+  # но файл остаётся корректным shell-файлом для fw-*.sh и env_file в
+  # docker compose. В одинарных кавычках $, backtick, " и \ остаются
+  # литералами; единственный спецсимвол — ', его пишем как '\''.
+  local key=${1-} val=${2-}
+  [[ $key =~ ^[A-Z_][A-Z0-9_]*$ ]] \
+    || die "env_line: недопустимое имя переменной: «$key»"
+  # Переводы строк в .env запрещены: одна запись — одна строка файла.
+  # Нулевой байт в bash-переменной невозможен, поэтому проверяем \n и \r.
+  case "$val" in
+    *$'\n'*|*$'\r'*)
+      die "env_line: значение $key содержит перевод строки — в .env это недопустимо"
+      ;;
+  esac
+  val=${val//\'/"'\\''"}
+  printf "%s='%s'\n" "$key" "$val"
+}
+
+env_get() { # env_get <KEY> [default] — значение из .env без исполнения shell
+  # Построчный разбор: ^KEY=..., затем снимаются одинарные/двойные кавычки.
+  # Для одинарных разворачивается '\'' -> ', для двойных — \" и \\.
+  # Отсутствующий ключ/файл даёт default (поэтому rc всегда 0 — удобно под
+  # set -e в присваиваниях вида VAR=$(env_get KEY "")).
+  local key=${1-} def=${2-} file=${ENV_FILE:-/etc/routeweave/.env}
+  local line val sq dq bs
+  [ -n "$key" ] || { printf '%s' "$def"; return 0; }
+  line=""
+  if [ -r "$file" ]; then
+    line=$(grep -m1 -E "^${key}=" "$file" 2>/dev/null || true)
+  fi
+  if [ -z "$line" ]; then
+    printf '%s' "$def"
+    return 0
+  fi
+  val=${line#*=}
+  sq="'"
+  dq='"'
+  bs="\\"
+  if [ "${#val}" -ge 2 ]; then
+    case "$val" in
+      "$sq"*"$sq")
+        val=${val:1:${#val}-2}
+        val=${val//"$sq$bs$sq$sq"/$sq}
+        ;;
+      "$dq"*"$dq")
+        val=${val:1:${#val}-2}
+        val=${val//"$bs$dq"/$dq}
+        val=${val//"$bs$bs"/$bs}
+        ;;
+    esac
+  fi
+  printf '%s' "$val"
 }
 
 # Валидаторы вызываются по имени из ask_valid ("$__validator"), поэтому для
@@ -162,8 +284,19 @@ valid_user() {
 }
 
 # shellcheck disable=SC2329,SC2317
-valid_socks() { # пусто допустимо; иначе scheme://host:port
-  [ -z "${1-}" ] && return 0
+valid_socks() { # пусто допустимо; иначе scheme://[userinfo@]host:port
+  local u=${1-}
+  [ -z "$u" ] && return 0
+  # TLS к самому прокси не поддерживается: https:// молча стал бы обычным
+  # http, поэтому отклоняем сразу и с понятным текстом.
+  if [[ ${u,,} == https://* ]]; then
+    printf 'https:// не поддерживается: TLS к прокси нет, укажите http://host:port\n' >&2
+    return 1
+  fi
+  # Allowlist символов URL (схема, userinfo, хост, порт). Отсекает пробелы,
+  # кавычки, обратный слэш, ; | & < > ( ) { } $ ` и переводы строк: строка
+  # попадает в .env и в config.yaml, shell-кода в ней быть не должно.
+  [[ $u =~ ^[A-Za-z0-9._~%+:@/-]+$ ]] || return 1
   python3 -c '
 import sys
 from urllib.parse import urlsplit
@@ -172,12 +305,102 @@ try:
     port = p.port
 except ValueError:
     sys.exit(1)
-if p.scheme not in ("socks5", "socks5h", "socks", "http", "https"):
+if p.scheme.lower() not in ("socks5", "socks5h", "socks", "http"):
     sys.exit(1)
 if not p.hostname:
     sys.exit(1)
 sys.exit(0 if port and 1 <= port <= 65535 else 1)
-' "$1" 2>/dev/null
+' "$u" 2>/dev/null
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_base_domain() { # пусто допустимо; иначе строчное DNS-имя (RFC 1123)
+  local d=${1-} label IFS=.
+  [ -z "$d" ] && return 0
+  [ "${#d}" -le 253 ] || return 1
+  [[ $d =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || return 1
+  case "$d" in *..*) return 1 ;; esac
+  for label in $d; do
+    [ -n "$label" ] || return 1
+    [ "${#label}" -le 63 ] || return 1
+    case "$label" in -*|*-) return 1 ;; esac
+  done
+  return 0
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_tg_link_host() { # пусто | IPv4 | DNS-имя; никаких shell-символов
+  local h=${1-} label IFS=.
+  [ -z "$h" ] && return 0
+  [[ $h =~ ^[A-Za-z0-9.:-]+$ ]] || return 1
+  if valid_ipv4 "$h" 2>/dev/null; then return 0; fi
+  # IPv6 в tg://-ссылке не поддерживается, а «999.1.1.1» не должно проходить
+  # как DNS-имя: строка только из цифр и точек обязана быть валидным IPv4.
+  case "$h" in *:*) return 1 ;; esac
+  [[ $h =~ ^[0-9.]+$ ]] && return 1
+  [ "${#h}" -le 253 ] || return 1
+  for label in $h; do
+    [ -n "$label" ] || return 1
+    [ "${#label}" -le 63 ] || return 1
+    [[ $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+  return 0
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_mtu() { # 576..9000
+  local m=${1-}
+  [[ $m =~ ^[0-9]{1,4}$ ]] || return 1
+  (( 10#$m >= 576 && 10#$m <= 9000 ))
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_rate_limit() { [[ ${1-} =~ ^[0-9]+/[0-9]+$ ]]; }
+
+# shellcheck disable=SC2329,SC2317
+valid_hosts_list() { [[ ${1-} =~ ^[A-Za-z0-9.,:_-]+$ ]]; }
+
+# shellcheck disable=SC2329,SC2317
+valid_wan_mark() { # 0x... и не пересекается с зарезервированными битами
+  local m=${1-} val
+  [[ $m =~ ^0x[0-9a-fA-F]{1,8}$ ]] || return 1
+  # 16# понимает hex в обоих регистрах; префикс 0x уже проверен регуляркой.
+  val=$((16#${m#0x}))
+  if (( val == 0 )); then
+    printf 'WAN_INGRESS_MARK=%s запрещён: с нулевой меткой fwmark не работает; используйте 0x200000\n' "$m" >&2
+    return 1
+  fi
+  # 0x40000 — tailscale subnet-route, 0x80000 — zapret, 0x100000 — NAT-режим
+  # exit node. Любое пересечение битов (а не только точное совпадение) ломает
+  # чужие правила: пакет уйдёт не в ту таблицу маршрутизации.
+  if (( val & 0x1C0000 )); then
+    printf 'WAN_INGRESS_MARK=%s пересекается с зарезервированной меткой (0x40000 tailscale, 0x80000 zapret, 0x100000 NAT); используйте 0x200000\n' "$m" >&2
+    return 1
+  fi
+  return 0
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_rule_prio() { [[ ${1-} =~ ^[0-9]+$ ]]; }
+
+# shellcheck disable=SC2329,SC2317
+valid_wan_ports() {
+  [[ ${1-} =~ ^[0-9]+/(tcp|udp)(,[0-9]+/(tcp|udp))*$ ]]
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_api_url() { # MIHOMO_API: http(s)://host:port
+  [[ ${1-} =~ ^https?://[A-Za-z0-9._~%+:@/\[\]-]+$ ]]
+}
+
+default_mihomo_api() { # <mihomo_bind> <server_ip> -> http://host:9090
+  # external-controller mihomo слушает MIHOMO_BIND (render_mihomo.py); пустой
+  # bind — это SERVER_IP. 0.0.0.0 — wildcard: панель не должна ходить на него,
+  # поэтому заменяем на loopback (иначе запрос уйдёт в никуда/на чужой адрес).
+  local bind=${1-} server_ip=${2-} host
+  host=${bind:-$server_ip}
+  [ "$host" = "0.0.0.0" ] && host=127.0.0.1
+  printf 'http://%s:9090' "$host"
 }
 
 # shellcheck disable=SC2329,SC2317
@@ -191,6 +414,20 @@ normalize_yn() { # yes/no (регистронезависимо); rc=1 если 
     no|n|нет|0|false) printf 'no' ;;
     *) return 1 ;;
   esac
+}
+
+# shellcheck disable=SC2329,SC2317
+valid_yn() { normalize_yn "${1-}" >/dev/null 2>&1; }
+
+require_valid() { # require_valid <KEY> <value> <validator> [подсказка]
+  local key=$1 val=${2-} validator=$3 hint=${4:-}
+  "$validator" "$val" \
+    || die "$key: недопустимое значение «$val».${hint:+ $hint}"
+}
+
+require_valid_optional() { # как require_valid, но пустое значение допустимо
+  [ -n "${2-}" ] || return 0
+  require_valid "$@"
 }
 
 # tgws_pinned_upstream <cf_worker_domain> — порядок тиров tg-ws-proxy
@@ -239,39 +476,115 @@ backup_file() { # backup_file <файл> -> <файл>.bak-<UTC timestamp>, rc=0
   warn "бэкап: $b"
 }
 
+owned_lookup() { # owned_lookup <path> -> routeweave|preexisting|пусто
+  # Первая запись главнее: повторный install не должен менять preexisting на
+  # routeweave (иначе uninstall удалит чужой файл). Пустые строки и #-комментарии
+  # игнорируются — так же, как в uninstall.sh (owned_state).
+  local p=${1-} state=""
+  [ -n "$p" ] || return 0
+  [ -r "$OWNED" ] || return 0
+  state=$(awk -F '\t' -v p="$p" '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    $1 == p { print $2; exit }
+  ' "$OWNED" 2>/dev/null || true)
+  case "$state" in
+    routeweave|preexisting) printf '%s' "$state" ;;
+  esac
+}
+
+# shellcheck disable=SC2329,SC2317
+mark_owned() { # mark_owned <path> <routeweave|preexisting> — первая запись главнее
+  local p=${1-} state=${2-}
+  [ -n "$p" ] || return 1
+  case "$state" in routeweave|preexisting) ;; *) return 1 ;; esac
+  [ -n "$(owned_lookup "$p")" ] && return 0
+  printf '%s\t%s\n' "$p" "$state" >> "$OWNED"
+}
+
+claim_path() { # claim_path <path> -> state; фиксирует владение, если его ещё нет
+  local p=${1-} state
+  [ -n "$p" ] || return 1
+  state=$(owned_lookup "$p")
+  if [ -n "$state" ]; then
+    printf '%s' "$state"
+    return 0
+  fi
+  if [ -e "$p" ]; then state=preexisting; else state=routeweave; fi
+  printf '%s\t%s\n' "$p" "$state" >> "$OWNED"
+  printf '%s' "$state"
+}
+
+warn_world_writable() { # <путь>: warn, если файл/каталог доступен на запись «остальным»
+  # chmod o+w (последняя цифра 2,3,6,7) в checkout означает, что любой
+  # локальный пользователь может подменить файл между preflight и install.
+  # Это предупреждение, а не отказ: нестандартные, но безопасные сценарии
+  # (например, root-owned файлы в групповом каталоге) не должны ломаться.
+  local p=${1-} mode=""
+  [ -e "$p" ] || return 0
+  mode=$(stat -c %a "$p" 2>/dev/null || true)
+  case "$mode" in
+    *[2367])
+      warn "checkout доступен на запись другим пользователям: $p (режим $mode) — запускайте установщик из root-owned каталога"
+      ;;
+  esac
+}
+
 preflight() { # preflight <каталог репозитория> — всё, что установщик копирует
   # Ранняя проверка целостности: лучше упасть до изменения системы, чем
   # посреди установки (под set -e отсутствующий файл роняет шаг без объяснений).
-  local root=$1 missing="" f
-  for f in \
-    templates/zapret.conf.tpl \
-    templates/render_mihomo.py \
-    templates/nfqws-launch.sh \
-    templates/routeweave-update-lists.sh \
-    templates/routeweave-tgws-restart.sh \
-    templates/routeweave-tgws-state.sh \
-    templates/routeweave-tailscale-state.sh \
-    templates/fw-base.sh \
-    templates/fw-wan.sh \
-    templates/fw-tailscale.sh \
-    templates/fw-nfq.sh \
-    templates/mihomo.service \
-    templates/routeweave-firewall.service \
-    templates/zapret-nfqws.service \
-    templates/routeweave-panel.service \
-    templates/routeweave-lists-update.service \
-    templates/routeweave-lists-update.timer \
-    panel/app.py \
-    panel/requirements.txt \
-    panel/static/index.html \
-    panel/static/app.css \
+  # Симлинк вместо обычного файла — тоже отказ: install копирует содержимое
+  # цели, то есть подменённый файл вне репозитория.
+  local root=$1 missing="" f files
+  files=(
+    templates/zapret.conf.tpl
+    templates/render_mihomo.py
+    templates/nfqws-launch.sh
+    templates/routeweave-update-lists.sh
+    templates/routeweave-tgws-restart.sh
+    templates/routeweave-tgws-state.sh
+    templates/routeweave-tailscale-state.sh
+    templates/fw-base.sh
+    templates/fw-wan.sh
+    templates/fw-tailscale.sh
+    templates/fw-nfq.sh
+    templates/mihomo.service
+    templates/routeweave-firewall.service
+    templates/zapret-nfqws.service
+    templates/routeweave-panel.service
+    templates/routeweave-lists-update.service
+    templates/routeweave-lists-update.timer
+    panel/app.py
+    panel/requirements.txt
+    panel/static/index.html
+    panel/static/app.css
     panel/static/app.js
-  do
+  )
+  # INSTALL_TGWS разбирается ниже (интерактивно), но значение из окружения
+  # уже доступно; без него preflight вызывается на ядре.
+  if [ "$(normalize_yn "${INSTALL_TGWS:-no}" 2>/dev/null || printf 'no')" = yes ]; then
+    files+=(docker-compose.yml)
+  fi
+  for f in "${files[@]}"; do
+    if [ -L "$root/$f" ]; then
+      die "$f — символическая ссылка; установщик копирует только обычные файлы"
+    fi
     [ -f "$root/$f" ] || missing="$missing $f"
+    warn_world_writable "$root/$f"
   done
+  if [ -L "$root/lists" ]; then
+    die "lists — символическая ссылка; установщик копирует списки только из обычного каталога"
+  fi
   [ -d "$root/lists" ] || missing="$missing lists/"
+  warn_world_writable "$root/lists"
+  # Симлинки внутри lists тоже недопустимы: cp -n последовал бы за ними.
+  if [ -d "$root/lists" ] \
+     && [ -n "$(find "$root/lists" -maxdepth 1 -type l -print -quit 2>/dev/null)" ]; then
+    die "lists/: внутри есть символические ссылки; установщик копирует только обычные файлы"
+  fi
   [ -z "$missing" ] \
     || die "В каталоге установщика нет обязательных файлов:$missing. Проверьте целостность репозитория (git status; git checkout -- .) и повторите."
+  warn_world_writable "$root"
   ok "preflight: обязательные файлы установщика на месте"
 }
 
@@ -356,8 +669,6 @@ ask_valid() { # ask_valid <переменная> <вопрос> <дефолт> <
 
 # ---------- WDTT-Plus (сервер для Android) ----------
 WDTT_REPO="Ivan4537/WDTT-Plus"
-WDTT_FALLBACK_TAG="v20"
-WDTT_FALLBACK_NAME="WDTT-Plus-server-v20-installer-0.20.3-linux-amd64.tar.gz"
 WDTT_DIR=/opt/wdtt-installer
 WDTT_DTLS_PORT="${WDTT_DTLS_PORT:-56000}"
 WDTT_WG_PORT="${WDTT_WG_PORT:-56001}"
@@ -397,27 +708,10 @@ install_wdtt() {
     || { wdtt_fail "не удалось создать временный каталог"; return 1; }
 
   if [ ! -x "$WDTT_DIR/install.sh" ] || [ ! -x "$WDTT_DIR/wdtt-server" ]; then
-    local asset tag name url src binver
-    asset=$(curl -fsSL --max-time 20 "https://api.github.com/repos/$WDTT_REPO/releases/latest" 2>/dev/null | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-for item in data.get("assets", []):
-    n = item.get("name", "")
-    if n.startswith("WDTT-Plus-server-") and n.endswith("-linux-amd64.tar.gz"):
-        print(data.get("tag_name", ""))
-        print(n)
-        break
-' 2>/dev/null) || true
-    tag=$(printf '%s\n' "$asset" | sed -n '1p')
-    name=$(printf '%s\n' "$asset" | sed -n '2p')
-    if [ -z "$tag" ] || [ -z "$name" ]; then
-      warn "GitHub API недоступен — использую закреплённый выпуск $WDTT_FALLBACK_TAG"
-      tag="$WDTT_FALLBACK_TAG"
-      name="$WDTT_FALLBACK_NAME"
-    fi
+    local tag name url src binver actual published
+    # Версия и имя ассета закреплены: никаких «последний релиз»/GitHub API.
+    tag="$WDTT_PINNED_TAG"
+    name="$WDTT_PINNED_NAME"
     case "$name" in
       WDTT-Plus-server-*-linux-amd64.tar.gz) ;;
       *) wdtt_fail "неожиданное имя ассета: $name"; return 1 ;;
@@ -426,23 +720,63 @@ for item in data.get("assets", []):
     info "Загрузка WDTT-Plus ($tag)..."
     curl -fsSL --retry 2 --max-time 180 -o "$WDTT_TMP/$name" "$url" \
       || { wdtt_fail "не удалось скачать $url"; return 1; }
-    curl -fsSL --retry 2 --max-time 60 -o "$WDTT_TMP/$name.sha256" "$url.sha256" \
-      || { wdtt_fail "не удалось скачать контрольную сумму"; return 1; }
-    ( cd "$WDTT_TMP" && sha256sum -c "$name.sha256" >/dev/null ) \
-      || { wdtt_fail "sha256 архива не совпал"; return 1; }
+    # Источник истины — зашитая WDTT_SHA256. Опубликованный рядом .sha256
+    # только дополнительный сигнал: его отсутствие проверку не отменяет,
+    # а расхождение с зашитой суммой отклоняет архив.
+    if [ -z "$WDTT_SHA256" ] || [ "${#WDTT_SHA256}" -ne 64 ] \
+       || [ -n "${WDTT_SHA256//[0-9a-f]/}" ]; then
+      wdtt_fail "контрольная сумма архива не задана/некорректна — сторонний install.sh не запускаю"
+      return 1
+    fi
+    if curl -fsSL --retry 2 --max-time 60 -o "$WDTT_TMP/$name.sha256" "$url.sha256" 2>/dev/null; then
+      published=$(awk '{print $1; exit}' "$WDTT_TMP/$name.sha256")
+      if [[ $published =~ ^[0-9a-f]{64}$ ]] && [ "$published" != "$WDTT_SHA256" ]; then
+        wdtt_fail "опубликованная .sha256 расходится с зашитой — архив отклонён"
+        return 1
+      fi
+    else
+      info "WDTT-Plus: .sha256 рядом с релизом отсутствует — сверяю только зашитую сумму"
+    fi
+    actual=$(sha256sum "$WDTT_TMP/$name" | awk '{print $1}')
+    actual=${actual,,}
+    if [ "$actual" != "$WDTT_SHA256" ]; then
+      wdtt_fail "sha256 архива не совпал с зашитой (ожидалось ${WDTT_SHA256:0:12}…, получено ${actual:0:12}…) — архив отклонён"
+      return 1
+    fi
+    ok "WDTT-Plus: sha256 архива подтверждена (${WDTT_SHA256:0:12}…)"
     tar -xzf "$WDTT_TMP/$name" -C "$WDTT_TMP" \
       || { wdtt_fail "не удалось распаковать архив"; return 1; }
+    # Архив из интернета: симлинки и setuid-биты в нём недопустимы, а
+    # запускаемые файлы обязаны быть обычными (не ссылками на чужой путь).
+    if [ -n "$(find "$WDTT_TMP" -type l -print -quit)" ]; then
+      wdtt_fail "в архиве есть символьные ссылки — архив отклонён"
+      return 1
+    fi
+    if [ -n "$(find "$WDTT_TMP" -perm -4000 -print -quit)" ]; then
+      wdtt_fail "в архиве есть setuid-файлы — архив отклонён"
+      return 1
+    fi
     src=$(find "$WDTT_TMP" -mindepth 1 -maxdepth 1 -type d -name 'WDTT-Plus-server-*' | head -n1)
     [ -n "$src" ] || { wdtt_fail "в архиве нет каталога WDTT-Plus-server-*"; return 1; }
-    ( cd "$src" && sha256sum -c SHA256SUMS >/dev/null ) \
-      || { wdtt_fail "внутренние sha256 не совпали"; return 1; }
+    for f in install.sh wdtt-server; do
+      if [ ! -f "$src/$f" ] || [ -L "$src/$f" ]; then
+        wdtt_fail "$f в архиве — не обычный файл, архив отклонён"
+        return 1
+      fi
+    done
+    if [ -f "$src/SHA256SUMS" ]; then
+      ( cd "$src" && sha256sum -c SHA256SUMS >/dev/null ) \
+        || { wdtt_fail "внутренние sha256 не совпали"; return 1; }
+    fi
     binver=$("$src/wdtt-server" --version 2>/dev/null | head -n1 || true)
     [ -n "$binver" ] || { wdtt_fail "wdtt-server не сообщил версию"; return 1; }
     ok "WDTT-Plus: сервер v$binver, установщик $(bash "$src/install.sh" --version)"
     install -d -m 0755 "$WDTT_DIR"
     install -m 0755 "$src/install.sh" "$WDTT_DIR/install.sh"
     install -m 0755 "$src/wdtt-server" "$WDTT_DIR/wdtt-server"
-    install -m 0644 "$src/SHA256SUMS" "$WDTT_DIR/SHA256SUMS"
+    if [ -f "$src/SHA256SUMS" ]; then
+      install -m 0644 "$src/SHA256SUMS" "$WDTT_DIR/SHA256SUMS"
+    fi
   fi
 
   local passfile="$WDTT_TMP/wdtt-pass" sha
@@ -461,6 +795,10 @@ for item in data.get("assets", []):
     --dtls-port "$WDTT_DTLS_PORT" --wg-port "$WDTT_WG_PORT" --client-port "$WDTT_CLIENT_PORT" \
     --dns 1.1.1.1 --max-passwords 50 --yes \
     || { wdtt_fail "init-config завершился ошибкой"; return 1; }
+  # Главный пароль лежит внутри конфига: до передачи установщику файл должен
+  # быть 0600, иначе он окажется читаемым в /root с дефолтной маской.
+  chmod 0600 "$WDTT_INITIAL_CONFIG" \
+    || { wdtt_fail "не удалось выставить 0600 на $WDTT_INITIAL_CONFIG"; return 1; }
   rm -f "$passfile"
 
   sha=$(sha256sum "$WDTT_DIR/wdtt-server" | awk '{print $1}')
@@ -520,13 +858,51 @@ fi
 
 install -d -m 0755 "$ETC"
 install -d -m 0700 "$BACKUP_DIR"
+# Маркер владения — контракт с uninstall.sh: без него uninstall не знает,
+# какие пути ставил Routeweave, а какие были до него (и сохраняет чужие).
+touch "$OWNED"
+chmod 0644 "$OWNED"
 
-# При повторной установке берём сетевые параметры из существующего .env:
-# иначе ip route get уходит в TUN mihomo (dev Meta) вместо физического NIC.
-if [ -f "$ETC/.env" ]; then
-  # shellcheck disable=SC1091
-  . "$ETC/.env"
-fi
+# При повторной установке берём параметры из существующего .env: иначе
+# ip route get уходит в TUN mihomo (dev Meta) вместо физического NIC.
+# ВАЖНО: .env НЕ исполняется как shell (никаких `.`/source/eval) — он
+# принадлежит root, но пишется данными, и source давал бы root RCE через
+# $(...)/backtick в значении. Читаем построчно через env_get и явно
+# присваиваем только известные ключи; в окружение ничего не экспортируем.
+LAN_IFACE=$(env_get LAN_IFACE "${LAN_IFACE:-}")
+SERVER_IP=$(env_get SERVER_IP "${SERVER_IP:-}")
+SOCKS_URL=$(env_get SOCKS_URL "${SOCKS_URL:-}")
+BASE_DOMAIN=$(env_get BASE_DOMAIN "${BASE_DOMAIN:-}")
+TG_CF_WORKER_DOMAIN=$(env_get TG_CF_WORKER_DOMAIN "${TG_CF_WORKER_DOMAIN:-}")
+TG_LINK_IP=$(env_get TG_LINK_IP "${TG_LINK_IP:-}")
+WG_SUBNET=$(env_get WG_SUBNET "${WG_SUBNET:-}")
+PANEL_PORT=$(env_get PANEL_PORT "${PANEL_PORT:-}")
+PANEL_USER=$(env_get PANEL_USER "${PANEL_USER:-}")
+PANEL_PASS=$(env_get PANEL_PASS "${PANEL_PASS:-}")
+MIHOMO_SECRET=$(env_get MIHOMO_SECRET "${MIHOMO_SECRET:-}")
+TG_SECRET=$(env_get TG_SECRET "${TG_SECRET:-}")
+QUIC_DROP=$(env_get QUIC_DROP "${QUIC_DROP:-}")
+FAKEIP_EXTRA=$(env_get FAKEIP_EXTRA "${FAKEIP_EXTRA:-}")
+PANEL_BIND=$(env_get PANEL_BIND "${PANEL_BIND:-}")
+MIHOMO_API=$(env_get MIHOMO_API "${MIHOMO_API:-}")
+SSH_PORT=$(env_get SSH_PORT "${SSH_PORT:-}")
+PANEL_ALLOWED_HOSTS=$(env_get PANEL_ALLOWED_HOSTS "${PANEL_ALLOWED_HOSTS:-}")
+MIHOMO_BIND=$(env_get MIHOMO_BIND "${MIHOMO_BIND:-}")
+DNS_BIND=$(env_get DNS_BIND "${DNS_BIND:-}")
+MIHOMO_TUN_MTU=$(env_get MIHOMO_TUN_MTU "${MIHOMO_TUN_MTU:-}")
+MIHOMO_ALLOW_LAN=$(env_get MIHOMO_ALLOW_LAN "${MIHOMO_ALLOW_LAN:-}")
+PANEL_RATE_LIMIT=$(env_get PANEL_RATE_LIMIT "${PANEL_RATE_LIMIT:-}")
+WAN_INGRESS=$(env_get WAN_INGRESS "${WAN_INGRESS:-}")
+WAN_INGRESS_MARK=$(env_get WAN_INGRESS_MARK "${WAN_INGRESS_MARK:-}")
+WAN_INGRESS_RULE_PRIO=$(env_get WAN_INGRESS_RULE_PRIO "${WAN_INGRESS_RULE_PRIO:-}")
+WAN_PORTS=$(env_get WAN_PORTS "${WAN_PORTS:-}")
+# TS_IFACE/TS_SUBNET установщик не пишет, но ufw-блок ниже их использует:
+# читаем, чтобы ручные правки в .env продолжали работать.
+TS_IFACE=$(env_get TS_IFACE "${TS_IFACE:-}")
+TS_SUBNET=$(env_get TS_SUBNET "${TS_SUBNET:-}")
+# Пин апстримов — единственный ключ .env, у которого приоритет у окружения
+# установщика (так написано в --help): файл читаем только если env пуст.
+TG_PINNED_UPSTREAM="${TG_PINNED_UPSTREAM:-$(env_get TG_PINNED_UPSTREAM '')}"
 
 # Auth key Tailscale приходит только из окружения времени установки;
 # в /etc/routeweave/.env он не пишется.
@@ -563,7 +939,18 @@ write_panel_sudoers() {
   [ -n "$systemctl_bin" ] \
     || die "systemctl не найден — без него панель не сможет управлять сервисами"
   visudo_bin=$(command -v visudo || true)
-  [ -n "$visudo_bin" ] || die "visudo не найден (пакет sudo) — не могу проверить sudoers"
+  if [ -z "$visudo_bin" ]; then
+    # На минимальных образах sudo может не быть, а основной блок пакетов
+    # идёт ниже: без visudo проверка sudoers невозможна.
+    info "visudo не найден — устанавливаю пакет sudo..."
+    apt-get update -qq \
+      || die "не удалось выполнить apt-get update для установки пакета sudo"
+    apt-get install -y -qq sudo >/dev/null \
+      || die "не удалось установить пакет sudo (visudo нужен для проверки sudoers)"
+    visudo_bin=$(command -v visudo || true)
+  fi
+  [ -n "$visudo_bin" ] \
+    || die "visudo не найден даже после установки пакета sudo — проверьте apt и повторите"
 
   tmp="$WORK_DIR/sudoers.routeweave-panel"
   cat > "$tmp" <<EOF
@@ -592,9 +979,10 @@ ask_valid LAN_IFACE  "LAN-интерфейс сервера" "$DETECTED_IFACE" v
   "ожидается имя интерфейса: буквы, цифры, точка, двоеточие, дефис, подчёркивание"
 ask_valid SERVER_IP  "IP сервера в локалке"  "$DETECTED_IP" valid_ipv4 \
   "ожидается IPv4, например 192.168.1.10"
-ask_valid SOCKS_URL  "Socks/https-прокси для гео (можно пусто)" "${SOCKS_URL:-}" valid_socks \
-  "формат socks5h://host:port (допустимы socks5, socks, http, https)"
-ask BASE_DOMAIN     "Домен для CF Worker (поддомен dpdns.org, можно пусто)" "${BASE_DOMAIN:-}"
+ask_valid SOCKS_URL  "Socks/http-прокси для гео (можно пусто)" "${SOCKS_URL:-}" valid_socks \
+  "формат socks5h://[user:pass@]host:port (допустимы socks5, socks5h, socks, http; https не поддерживается — TLS к прокси нет)"
+ask_valid BASE_DOMAIN "Домен для CF Worker (поддомен dpdns.org, можно пусто)" "${BASE_DOMAIN:-}" valid_base_domain \
+  "строчные латинские буквы, цифры, точки и дефис; каждая метка 1..63 символа"
 ask_valid WG_SUBNET  "Подсеть WireGuard (клиенты WDTT)" "$WG_SUBNET_DEFAULT" valid_cidr \
   "ожидается IPv4-подсеть, например 10.66.66.0/24"
 ask_valid PANEL_PORT "Порт веб-панели" "${PANEL_PORT:-8080}" valid_port \
@@ -655,6 +1043,47 @@ if [ "$INSTALL_TGWS" = "yes" ] && [ -z "$TG_SECRET" ]; then
   TG_SECRET=$(gen_hex 16)
 fi
 
+# ---------- Новые ключи .env: дефолты и строгая валидация ----------
+# Значения по умолчанию выводятся из SERVER_IP и MIHOMO_BIND (они уже выбраны).
+PANEL_BIND="${PANEL_BIND:-$SERVER_IP}"
+# MIHOMO_API должен смотреть туда, куда mihomo реально слушает
+# external-controller: на MIHOMO_BIND, а не всегда на SERVER_IP.
+if [ -z "$MIHOMO_API" ]; then
+  MIHOMO_API=$(default_mihomo_api "$MIHOMO_BIND" "$SERVER_IP")
+fi
+SSH_PORT="${SSH_PORT:-22}"
+require_valid PANEL_BIND "$PANEL_BIND" valid_ipv4 "ожидается IPv4"
+require_valid MIHOMO_API "$MIHOMO_API" valid_api_url "ожидается http(s)://host:port"
+require_valid SSH_PORT "$SSH_PORT" valid_port "целое число 1..65535"
+
+# Необязательные ключи пишутся в .env только если заданы (в .env или в
+# окружении установщика). Здесь — строгий allowlist: в значении не должно
+# быть ничего, кроме символов, которые переживёт разбор панелью/fw-скриптами.
+require_valid_optional TG_LINK_IP "$TG_LINK_IP" valid_tg_link_host \
+  "ожидается IPv4 или DNS-имя (без \$, backtick и пробелов)"
+require_valid_optional PANEL_ALLOWED_HOSTS "$PANEL_ALLOWED_HOSTS" valid_hosts_list \
+  "список через запятую: буквы, цифры, точка, запятая, двоеточие, _, -"
+require_valid_optional MIHOMO_BIND "$MIHOMO_BIND" valid_ipv4 "ожидается IPv4"
+require_valid_optional DNS_BIND "$DNS_BIND" valid_ipv4 "ожидается IPv4"
+require_valid_optional MIHOMO_TUN_MTU "$MIHOMO_TUN_MTU" valid_mtu "576..9000"
+require_valid_optional PANEL_RATE_LIMIT "$PANEL_RATE_LIMIT" valid_rate_limit \
+  "ожидается «N/M», например 60/60"
+require_valid_optional WAN_INGRESS_MARK "$WAN_INGRESS_MARK" valid_wan_mark \
+  "ожидается метка вида 0x200000 (0x40000/0x80000/0x100000 зарезервированы)"
+require_valid_optional WAN_INGRESS_RULE_PRIO "$WAN_INGRESS_RULE_PRIO" valid_rule_prio \
+  "ожидается целое число"
+require_valid_optional WAN_PORTS "$WAN_PORTS" valid_wan_ports \
+  "ожидается «порт/tcp|udp» через запятую, например 1443/tcp,51820/udp"
+
+# yes/no нормализуем к строчному виду (как QUIC_DROP выше).
+for __yn in MIHOMO_ALLOW_LAN WAN_INGRESS; do
+  [ -n "${!__yn}" ] || continue
+  __norm=$(normalize_yn "${!__yn}") \
+    || die "$__yn: ожидается yes или no, получено «${!__yn}»"
+  printf -v "$__yn" '%s' "$__norm"
+done
+unset __yn __norm
+
 ok "Параметры приняты"
 
 # ---------- 3. Пакеты ----------
@@ -672,6 +1101,10 @@ apt-get install -y -qq \
 
 ok "Пакеты установлены"
 command -v visudo >/dev/null || die "visudo всё ещё недоступен — установите пакет sudo и повторите"
+# Повторная проверка Python: на минимальном образе python3 мог отсутствовать
+# до этого блока (тогда ранняя проверка его пропустила).
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' \
+  || die "$REQ_TEXT: найден $(python3 -V 2>&1)"
 
 # ---------- 4. Порт 53 (systemd-resolved) ----------
 # Drop-in помечается маркером: install/uninstall отличают свой файл от чужого.
@@ -753,60 +1186,61 @@ case "$(port53_owner)" in
   other)
     warn "Порт 53 занят (UDP/TCP) неизвестным сервисом — mihomo не сможет слушать DNS!"
     { ss -lunp 2>/dev/null; ss -ltnp 2>/dev/null; } | grep ':53 ' || true
+    # Это не «мелочь в логе»: без 53 не работает DNS через шлюз. Освобождение
+    # порта автоматически здесь не делаем (чужой сервис), но установка должна
+    # завершиться с ненулевым кодом и явной строкой в итоговой сводке.
+    PORT53_BLOCKED=1
+    FAIL=1
     ;;
 esac
 
 # ---------- 5. Бинарник mihomo ----------
+# Владение фиксируем ДО установки/перезаписи: если mihomo уже был (чужая
+# установка или прежний Routeweave без маркера), uninstall его не удалит.
+MIHOMO_BIN=/usr/local/bin/mihomo
+claim_path "$MIHOMO_BIN" >/dev/null
 MIHOMO_INSTALLED_VER=""
 if command -v mihomo >/dev/null 2>&1; then
   MIHOMO_INSTALLED_VER=$(mihomo -v 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 fi
 
-fetch_sha() { # fetch_sha <url> [запасная сумма] -> sha256 (может быть пусто)
-  local url=$1 fallback=${2:-} got=""
-  got=$(curl -fsSL --max-time 20 "$url.sha256" 2>/dev/null | head -n1 | awk '{print $1}') || got=""
-  got=${got:0:60}
-  if [ -n "$got" ] && [ -z "${got//[0-9a-fA-F]/}" ]; then
-    printf '%s' "$got"
-    return 0
+verify_sha() { # verify_sha <файл> <сумма> <метка> — fail-closed
+  # Принимается только ровно 64 hex-символа в нижнем регистре: любая другая
+  # строка (пусто, обрезанная, uppercase, мусор) — отказ от установки.
+  # Исключение — явный --allow-unverified: громкое предупреждение и продолжение.
+  local file=$1 sum=${2-} label=$3 actual
+  if [[ ! $sum =~ ^[0-9a-f]{64}$ ]]; then
+    if [ "${ALLOW_UNVERIFIED:-0}" = "1" ]; then
+      warn "$label: контрольная сумма не задана/некорректна (ALLOW_UNVERIFIED) — целостность НЕ проверена!"
+      return 0
+    fi
+    die "$label: контрольная сумма не задана/некорректна — установка остановлена (обойти можно только явным --allow-unverified)"
   fi
-  printf '%s' "$fallback"
+  actual=$(sha256sum "$file" 2>/dev/null | awk '{print $1}' || true)
+  actual=${actual,,}
+  [ "$actual" = "$sum" ] \
+    || die "$label: sha256 не совпала (ожидалось ${sum:0:12}…, получено ${actual:0:12}…) — файл повреждён или подменён"
+  ok "$label: sha256 подтверждена (${sum:0:12}…)"
 }
 
-verify_sha() { # verify_sha <файл> <сумма> <метка>
-  local file=$1 sum=$2 label=$3 actual
-  if [ -z "$sum" ] || [ "${#sum}" -lt 32 ]; then
-    warn "$label: контрольная сумма недоступна — целостность НЕ проверена"
-    return 0
-  fi
-  actual=$(sha256sum "$file" | awk '{print $1}')
-  case "$actual" in
-    "$sum"*) ok "$label: sha256 подтверждена (${sum:0:12}…)" ;;
-    *) die "$label: sha256 не совпала (ожидалось ${sum:0:12}…, получено ${actual:0:12}…) — файл повреждён или подменён" ;;
-  esac
-}
+# Версия mihomo всегда закреплена, сумма выбирается по имени ассета.
+# Последний релиз и MIHOMO_SHA256 из окружения больше не используются.
+case "$MIHOMO_ASSET_ARCH" in
+  amd64-compatible) MIHOMO_SHA256_PIN="$MIHOMO_SHA256_AMD64_COMPAT" ;;
+  amd64)            MIHOMO_SHA256_PIN="$MIHOMO_SHA256_AMD64" ;;
+  arm64)            MIHOMO_SHA256_PIN="$MIHOMO_SHA256_ARM64" ;;
+  *) die "mihomo: неизвестная архитектура ассета «$MIHOMO_ASSET_ARCH» — закреплённой суммы нет" ;;
+esac
 
-VER=""
-VER=$(curl -fsSL --max-time 15 https://api.github.com/repos/MetaCubeX/mihomo/releases/latest 2>/dev/null \
-      | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) || VER=""
-
-if [ -z "$VER" ]; then
-  if [ -n "$MIHOMO_INSTALLED_VER" ]; then
-    warn "GitHub API недоступен — оставляю установленный mihomo $MIHOMO_INSTALLED_VER"
-  else
-    VER="$MIHOMO_FALLBACK_VER"
-    warn "GitHub API недоступен — ставлю закреплённый выпуск $VER"
-  fi
-fi
-
-if [ -n "$VER" ] && [ "$VER" = "$MIHOMO_INSTALLED_VER" ]; then
+VER="$MIHOMO_PINNED_VER"
+if [ "$VER" = "$MIHOMO_INSTALLED_VER" ]; then
   ok "mihomo $VER уже установлен — обновление не требуется"
-elif [ -n "$VER" ]; then
+else
   info "Загрузка mihomo $VER ($MIHOMO_ARCH / $MIHOMO_ASSET_ARCH)..."
   URL="https://github.com/MetaCubeX/mihomo/releases/download/${VER}/mihomo-linux-${MIHOMO_ASSET_ARCH}-${VER}.gz"
   curl -fsSL --retry 2 --max-time 180 -o "$WORK_DIR/mihomo.gz" "$URL" \
     || die "Не удалось скачать mihomo ($URL). Проверьте связь с github."
-  verify_sha "$WORK_DIR/mihomo.gz" "$(fetch_sha "$URL" "${MIHOMO_SHA256:-}")" "mihomo $VER"
+  verify_sha "$WORK_DIR/mihomo.gz" "$MIHOMO_SHA256_PIN" "mihomo $VER"
   gunzip -c "$WORK_DIR/mihomo.gz" > "$WORK_DIR/mihomo" \
     || die "Не удалось распаковать архив mihomo ($URL)"
   install -m 0755 "$WORK_DIR/mihomo" /usr/local/bin/mihomo
@@ -818,6 +1252,14 @@ fi
 # ---------- 6. Конфигурация /etc/routeweave ----------
 info "Создание ${ETC}..."
 install -d -m 0755 "$ETC/lists"
+# Каталог staging для апдейтера списков: только root, 0700. Симлинк на этом
+# пути — подмена каталога, поэтому проверяем и падаем.
+if [ -L "$ETC/.staging" ]; then
+  die "$ETC/.staging — символическая ссылка; удалите её и повторите установку"
+fi
+install -d -m 0700 -o root -g root "$ETC/.staging"
+chown root:root "$ETC/.staging"
+chmod 0700 "$ETC/.staging"
 cp -n "$APP_DIR"/lists/*.txt "$ETC/lists/" 2>/dev/null || true
 
 TG_CF_WORKER_DOMAIN="${TG_CF_WORKER_DOMAIN:-$BASE_DOMAIN}"
@@ -827,9 +1269,96 @@ FAKEIP_EXTRA="${FAKEIP_EXTRA:-}"
 TG_PINNED_UPSTREAM=$(tgws_pinned_upstream "$TG_CF_WORKER_DOMAIN") \
   || die "TG_PINNED_UPSTREAM: ожидается список тиров через запятую: ws, cfworker, cfproxy, mtproto, tcp"
 
+# Необязательные ключи .env: пишутся только если заданы (в .env или в
+# окружении установщика). Комментарий поясняет смысл ключа.
+# shellcheck disable=SC2329,SC2317
+write_optional_env_lines() {
+  if [ -n "$PANEL_ALLOWED_HOSTS" ]; then
+    echo "# Доп. Host-заголовки панели через запятую (пусто = только SERVER_IP, localhost, 127.0.0.1, ::1)"
+    env_line PANEL_ALLOWED_HOSTS "$PANEL_ALLOWED_HOSTS"
+  fi
+  if [ -n "$MIHOMO_BIND" ]; then
+    echo "# Адрес, на котором mihomo слушает API (external-controller)"
+    env_line MIHOMO_BIND "$MIHOMO_BIND"
+  fi
+  if [ -n "$DNS_BIND" ]; then
+    echo "# Адрес DNS-листенера mihomo"
+    env_line DNS_BIND "$DNS_BIND"
+  fi
+  if [ -n "$MIHOMO_TUN_MTU" ]; then
+    echo "# MTU TUN-интерфейса mihomo (576..9000)"
+    env_line MIHOMO_TUN_MTU "$MIHOMO_TUN_MTU"
+  fi
+  if [ -n "$MIHOMO_ALLOW_LAN" ]; then
+    echo "# Разрешить DNS/API mihomo из LAN (yes/no)"
+    env_line MIHOMO_ALLOW_LAN "$MIHOMO_ALLOW_LAN"
+  fi
+  if [ -n "$PANEL_RATE_LIMIT" ]; then
+    echo "# Лимит запросов панели в формате N/M (например 60/60)"
+    env_line PANEL_RATE_LIMIT "$PANEL_RATE_LIMIT"
+  fi
+  if [ -n "$WAN_INGRESS" ]; then
+    echo "# Доступ из WAN к опубликованным портам (yes/no)"
+    env_line WAN_INGRESS "$WAN_INGRESS"
+  fi
+  if [ -n "$WAN_INGRESS_MARK" ]; then
+    echo "# Метка connmark для WAN_INGRESS (например 0x200000)"
+    env_line WAN_INGRESS_MARK "$WAN_INGRESS_MARK"
+  fi
+  if [ -n "$WAN_INGRESS_RULE_PRIO" ]; then
+    echo "# Приоритет ip rule для помеченных пакетов WAN_INGRESS"
+    env_line WAN_INGRESS_RULE_PRIO "$WAN_INGRESS_RULE_PRIO"
+  fi
+  if [ -n "$WAN_PORTS" ]; then
+    echo "# Порты, опубликованные в WAN (порт/tcp|udp через запятую)"
+    env_line WAN_PORTS "$WAN_PORTS"
+  fi
+  return 0
+}
+
+ENV_BACKUP=""
+env_backup_once() { # один резервный .env на прогон (0600 root:root)
+  if [ -n "$ENV_BACKUP" ]; then return 0; fi
+  [ -f "$ETC/.env" ] || return 0
+  ENV_BACKUP="$ETC/.env.bak.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$ETC/.env" "$ENV_BACKUP" \
+    || die "не удалось создать бэкап $ENV_BACKUP — .env не изменён"
+  chown root:root "$ENV_BACKUP"
+  chmod 0600 "$ENV_BACKUP"
+  info "бэкап .env: $ENV_BACKUP"
+}
+
+env_upsert() { # env_upsert <файл> <KEY> <value> — заменить ^KEY= или дописать
+  # Значение проходит через env_line (одинарные кавычки), поэтому в файл не
+  # попадает shell-код. Порядок строк сохраняется, дубликаты ключа схлопываются.
+  local file=$1 key=$2 line tmp l replaced=0
+  line=$(env_line "$key" "${3-}")
+  tmp=$(mktemp "$WORK_DIR/env.upsert.XXXXXX")
+  if [ -f "$file" ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      case "$l" in
+        "${key}="*)
+          if [ "$replaced" = 0 ]; then
+            printf '%s\n' "$line"
+            replaced=1
+          fi
+          ;;
+        *) printf '%s\n' "$l" ;;
+      esac
+    done < "$file" > "$tmp"
+  fi
+  if [ "$replaced" = 0 ]; then
+    printf '%s\n' "$line" >> "$tmp"
+  fi
+  # cat, а не mv: сохраняем inode/владельца/права .env.
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
 if [ ! -f "$ETC/.env" ]; then
   {
-    echo "# Routeweave: сгенерировано install.sh. Значения в двойных кавычках."
+    echo "# Routeweave: сгенерировано install.sh. Значения в ОДИНАРНЫХ кавычках;"
+    echo "# файл читается построчно (env_get) и НЕ исполняется как shell."
     echo "# Права 0640 root:routeweave; PANEL_PASS обязателен для запуска панели."
     env_line LAN_IFACE "$LAN_IFACE"
     env_line SERVER_IP "$SERVER_IP"
@@ -851,37 +1380,38 @@ if [ ! -f "$ETC/.env" ]; then
     env_line TG_SECRET "$TG_SECRET"
     env_line QUIC_DROP "$QUIC_DROP"
     env_line FAKEIP_EXTRA "$FAKEIP_EXTRA"
+    echo "# Адрес, который слушает панель (по умолчанию SERVER_IP; 127.0.0.1 — только localhost)"
+    env_line PANEL_BIND "$PANEL_BIND"
+    echo "# API mihomo, к которому ходит панель"
+    env_line MIHOMO_API "$MIHOMO_API"
+    echo "# Порт SSH хоста (подсказки панели и правила firewall)"
+    env_line SSH_PORT "$SSH_PORT"
+    write_optional_env_lines
   } > "$WORK_DIR/env.new"
   install -m 0640 -o root -g routeweave "$WORK_DIR/env.new" "$ETC/.env"
   ok ".env создан: $ETC/.env (0640 root:routeweave)"
 else
-  warn "$ETC/.env уже существует — не перезаписываю"
-  ENV_SECRETS_UPDATED=0
-  for key in PANEL_PASS MIHOMO_SECRET; do
-    cur=$(sed -n "s/^${key}=//p" "$ETC/.env" | head -n1)
-    cur=${cur%\"}
-    cur=${cur#\"}
-    if [ -n "$cur" ]; then
-      continue
-    fi
-    if [ "$key" = "PANEL_PASS" ]; then
-      val="$PANEL_PASS"
-      [ -n "$val" ] || { val=$(gen_hex 12); PANEL_PASS=$val; PANEL_PASS_GENERATED=1; }
-    else
-      val="$MIHOMO_SECRET"
-      [ -n "$val" ] || { val=$(gen_hex 16); MIHOMO_SECRET=$val; }
-    fi
-    if grep -q "^${key}=" "$ETC/.env"; then
-      sed -i "s|^${key}=.*|$(env_line "$key" "$val")|" "$ETC/.env"
-    else
-      [ -z "$(tail -c1 "$ETC/.env")" ] || printf '\n' >> "$ETC/.env"
-      env_line "$key" "$val" >> "$ETC/.env"
-    fi
-    ENV_SECRETS_UPDATED=1
+  warn "$ETC/.env уже существует — обновляю управляемые ключи"
+  # Один бэкап на прогон: если что-то пойдёт не так, .env можно вернуть.
+  env_backup_once
+  # Upsert всех управляемых ключей: строка ^KEY= заменяется на актуальное
+  # значение из этого прогона, отсутствующий ключ дописывается в конец.
+  # Так повторная установка обновляет и сеть, и новые ключи, а не только
+  # пароли; ручные ключи вне списка остаются нетронутыми.
+  for key in LAN_IFACE SERVER_IP SOCKS_URL BASE_DOMAIN TG_CF_WORKER_DOMAIN \
+             TG_LINK_IP WG_SUBNET PANEL_PORT PANEL_USER PANEL_PASS \
+             MIHOMO_SECRET TG_SECRET QUIC_DROP FAKEIP_EXTRA \
+             PANEL_BIND MIHOMO_API SSH_PORT; do
+    env_upsert "$ETC/.env" "$key" "${!key:-}"
   done
-  if [ "$ENV_SECRETS_UPDATED" = 1 ]; then
-    ok "в .env добавлены отсутствующие секреты (PANEL_PASS/MIHOMO_SECRET)"
-  fi
+  # Необязательные ключи: пишем только заданные, отсутствующие не трогаем.
+  for key in PANEL_ALLOWED_HOSTS MIHOMO_BIND DNS_BIND MIHOMO_TUN_MTU \
+             MIHOMO_ALLOW_LAN PANEL_RATE_LIMIT WAN_INGRESS WAN_INGRESS_MARK \
+             WAN_INGRESS_RULE_PRIO WAN_PORTS; do
+    [ -n "${!key:-}" ] || continue
+    env_upsert "$ETC/.env" "$key" "${!key:-}"
+  done
+  ok "в .env обновлены управляемые ключи (сеть, порты и секреты сохранены)"
   # Пин апстримов нужен и старым установкам: compose читает общий .env,
   # а устаревший пин (без домена CF Worker) лучше убрать, чем оставить.
   if [ "$INSTALL_TGWS" = "yes" ]; then
@@ -930,10 +1460,8 @@ install -m 0755 "$APP_DIR/templates/fw-nfq.sh"  "$ETC/fw-nfq.sh"
 
 # .env — источник истины для config.yaml и LAN_IFACE; из LAN_IFACE ниже
 # рендерится WAN_IFACE= в zapret.conf (это одно и то же — WAN-интерфейс шлюза).
-set -a
-# shellcheck disable=SC1091
-. "$ETC/.env"
-set +a
+# Значения уже прочитаны выше через env_get; повторный source не нужен
+# (и небезопасен: .env — данные, а не shell-скрипт).
 
 # Старый/рукописный .env может не содержать LAN_IFACE — иначе в zapret.conf
 # попал бы пустой WAN_IFACE=. Подстраховываемся автодетектом (как в fw-nfq.sh).
@@ -964,24 +1492,67 @@ else
 fi
 
 # ---------- 7. zapret (сборка из исходников) ----------
-ZAPRET_REF="${ZAPRET_REF:-master}"
+# По умолчанию — закреплённый коммит; ветка/тег допустимы только как
+# осознанный override через ZAPRET_REF. Фактический HEAD всегда сверяется
+# и пишется в /etc/routeweave/zapret.commit. --allow-unverified здесь не
+# действует: он про хеши архивов, а не про коммит исходников.
+ZAPRET_REF="${ZAPRET_REF:-$ZAPRET_PINNED_COMMIT}"
+ZAPRET_IS_COMMIT=0
+if [[ $ZAPRET_REF =~ ^[0-9a-f]{40}$ ]]; then ZAPRET_IS_COMMIT=1; fi
+
+# Владение каталогом фиксируем до клонирования/сборки. Если $ZAPRET_DIR уже
+# существует (в том числе чужой git-репозиторий), это preexisting: uninstall
+# такой каталог не удаляет.
+claim_path "$ZAPRET_DIR" >/dev/null
+
+zapret_fetch_ref() { # fetch ZAPRET_REF в $ZAPRET_DIR и checkout FETCH_HEAD
+  git -C "$ZAPRET_DIR" fetch --depth 1 origin "$ZAPRET_REF" 2>/dev/null \
+    && git -C "$ZAPRET_DIR" checkout -q FETCH_HEAD
+}
+
 if [ ! -d "$ZAPRET_DIR" ]; then
   info "Клонирование zapret ($ZAPRET_REF)..."
-  git clone --depth 1 --branch "$ZAPRET_REF" https://github.com/bol-van/zapret "$ZAPRET_DIR" \
-    || die "Не удалось склонировать zapret (ветка $ZAPRET_REF)"
+  if [ "$ZAPRET_IS_COMMIT" = 1 ]; then
+    # git clone --branch не принимает SHA: init + fetch по коммиту.
+    if git init -q "$ZAPRET_DIR" \
+       && git -C "$ZAPRET_DIR" remote add origin https://github.com/bol-van/zapret \
+       && zapret_fetch_ref; then
+      :
+    else
+      die "Не удалось склонировать zapret по закреплённому коммиту $ZAPRET_REF"
+    fi
+  else
+    git clone --depth 1 --branch "$ZAPRET_REF" https://github.com/bol-van/zapret "$ZAPRET_DIR" \
+      || die "Не удалось склонировать zapret ($ZAPRET_REF)"
+  fi
 elif [ -d "$ZAPRET_DIR/.git" ]; then
-  if git -C "$ZAPRET_DIR" fetch --depth 1 origin "$ZAPRET_REF" 2>/dev/null \
-     && git -C "$ZAPRET_DIR" checkout -q FETCH_HEAD; then
+  if zapret_fetch_ref; then
     ok "zapret обновлён до $ZAPRET_REF"
+  elif [ "$ZAPRET_IS_COMMIT" = 1 ]; then
+    die "не удалось обновить zapret до закреплённого коммита $ZAPRET_REF — сборка остановлена, старый код не используется"
   else
     warn "не удалось обновить zapret до $ZAPRET_REF — продолжаю с текущим кодом"
   fi
 else
+  if [ "$ZAPRET_IS_COMMIT" = 1 ]; then
+    die "$ZAPRET_DIR существует, но это не git-репозиторий — подтвердить закреплённый коммит $ZAPRET_REF невозможно"
+  fi
   warn "$ZAPRET_DIR существует, но это не git-репозиторий — обновление пропущено"
 fi
 
 if [ -d "$ZAPRET_DIR/.git" ]; then
-  git -C "$ZAPRET_DIR" rev-parse HEAD > "$ETC/zapret.commit" 2>/dev/null || true
+  ZAPRET_ACTUAL=$(git -C "$ZAPRET_DIR" rev-parse HEAD 2>/dev/null || true)
+  [ -n "$ZAPRET_ACTUAL" ] \
+    || die "zapret: не удалось определить HEAD в $ZAPRET_DIR — сборка остановлена"
+  if [ "$ZAPRET_IS_COMMIT" = 1 ]; then
+    [ "$ZAPRET_ACTUAL" = "$ZAPRET_REF" ] \
+      || die "zapret: HEAD $ZAPRET_ACTUAL не совпадает с закреплённым коммитом $ZAPRET_REF — сборка остановлена"
+    ok "zapret: коммит подтверждён ($ZAPRET_ACTUAL)"
+  else
+    warn "zapret: ZAPRET_REF=$ZAPRET_REF не является 40-hex коммитом — использую HEAD $ZAPRET_ACTUAL (осознанный override)"
+  fi
+  printf '%s\n' "$ZAPRET_ACTUAL" > "$ETC/zapret.commit" \
+    || die "zapret: не удалось записать $ETC/zapret.commit"
   chmod 0644 "$ETC/zapret.commit"
 fi
 
@@ -1003,6 +1574,20 @@ install -m 0755 "$APP_DIR/templates/nfqws-launch.sh" "$ETC/nfqws-launch.sh"
 
 # ---------- 8. systemd-юниты и helper-скрипты ----------
 info "Установка systemd-юнитов..."
+# Владение «спорными» юнитами фиксируем до перезаписи: mihomo и zapret могли
+# стоять в системе до Routeweave. Чужой юнит сохраняем в $BACKUP_DIR/<unit>.orig
+# (0644 root:root) — uninstall вернёт его на место. Для своих бэкап не нужен,
+# а существующий *.orig не перезаписываем.
+for unit in mihomo.service zapret-nfqws.service; do
+  unit_path="/etc/systemd/system/$unit"
+  unit_owner=$(claim_path "$unit_path")
+  if [ "$unit_owner" = preexisting ] && [ -e "$unit_path" ] \
+     && [ ! -e "$BACKUP_DIR/$unit.orig" ]; then
+    install -m 0644 -o root -g root "$unit_path" "$BACKUP_DIR/$unit.orig"
+    info "юнит $unit был чужим — копия сохранена: $BACKUP_DIR/$unit.orig"
+  fi
+done
+unset unit unit_path unit_owner
 install -m 0644 "$APP_DIR/templates/mihomo.service"                  /etc/systemd/system/mihomo.service
 install -m 0644 "$APP_DIR/templates/routeweave-firewall.service"     /etc/systemd/system/routeweave-firewall.service
 install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"            /etc/systemd/system/zapret-nfqws.service
@@ -1030,23 +1615,57 @@ chown -R root:root "$OPT_PANEL"
 find "$OPT_PANEL" -type d -exec chmod 0755 {} +
 ok "панель установлена: $OPT_PANEL (root:root, каталоги 0755)"
 
-info "Загрузка zashboard..."
-ZASH_URL="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
-if curl -fsSL --retry 2 --max-time 120 -o "$WORK_DIR/dist.zip" "$ZASH_URL"; then
-  verify_sha "$WORK_DIR/dist.zip" "$(fetch_sha "$ZASH_URL" "${ZASHBOARD_SHA256:-}")" "zashboard"
-  rm -rf "$ETC/zashboard"
-  install -d -m 0755 "$ETC/zashboard"
-  unzip -q -o "$WORK_DIR/dist.zip" -d "$WORK_DIR/zash" \
-    || die "не удалось распаковать $ZASH_URL"
-  # в архиве папка dist/
-  if [ -d "$WORK_DIR/zash/dist" ]; then
-    cp -a "$WORK_DIR/zash/dist/." "$ETC/zashboard/"
-  else
-    cp -a "$WORK_DIR/zash/." "$ETC/zashboard/"
-  fi
-  ok "zashboard: http://$SERVER_IP:9090/ui/"
+info "Загрузка zashboard $ZASHBOARD_VER..."
+# Версия закреплена; последний релиз больше не используется (mutable-источник).
+ZASH_URL="https://github.com/Zephyruso/zashboard/releases/download/$ZASHBOARD_VER/dist.zip"
+ZASH_TMP="$WORK_DIR/zash"
+ZASH_STAGE="$ETC/.zashboard.new"
+
+if [ "${ALLOW_UNVERIFIED:-0}" = "1" ] && [[ ! $ZASHBOARD_SHA256_PINNED =~ ^[0-9a-f]{64}$ ]]; then
+  # Без суммы недоверенный архив не распаковываем даже с флагом: дашборд —
+  # статика, её отсутствие хуже произвольных файлов в /etc/routeweave.
+  warn "zashboard: закреплённой суммы нет (ALLOW_UNVERIFIED) — обновление дашборда пропущено, архив не распакован"
 else
-  warn "zashboard не скачался ($ZASH_URL) — дашборд будет недоступен (панель продолжит работать)"
+  curl -fsSL --retry 2 --max-time 120 -o "$WORK_DIR/dist.zip" "$ZASH_URL" \
+    || die "zashboard: не удалось скачать $ZASH_URL — установка остановлена"
+  verify_sha "$WORK_DIR/dist.zip" "$ZASHBOARD_SHA256_PINNED" "zashboard $ZASHBOARD_VER"
+  # До распаковки: архив не должен содержать абсолютных путей и «..» —
+  # иначе unzip может писать за пределы целевого каталога.
+  if unzip -Z1 "$WORK_DIR/dist.zip" | grep -E '^/|(^|/)\.\.(/|$)' >/dev/null; then
+    die "zashboard: архив содержит абсолютные пути или «..» — распаковка отменена"
+  fi
+  rm -rf "$ZASH_TMP"
+  install -d -m 0755 "$ZASH_TMP"
+  unzip -q -o "$WORK_DIR/dist.zip" -d "$ZASH_TMP" \
+    || die "не удалось распаковать $ZASH_URL"
+  # Статика не нуждается в симлинках и setuid: такие элементы — признак
+  # подмены архива, поэтому отклоняем целиком (fail-closed).
+  if [ -n "$(find "$ZASH_TMP" -type l -print -quit)" ]; then
+    die "zashboard: в архиве есть символьные ссылки — распаковка отклонена"
+  fi
+  if [ -n "$(find "$ZASH_TMP" -perm -4000 -print -quit)" ]; then
+    die "zashboard: в архиве есть setuid-файлы — распаковка отклонена"
+  fi
+  # в архиве папка dist/
+  ZASH_SRC="$ZASH_TMP"
+  if [ -d "$ZASH_TMP/dist" ]; then ZASH_SRC="$ZASH_TMP/dist"; fi
+  rm -rf "$ZASH_STAGE"
+  install -d -m 0755 "$ZASH_STAGE"
+  # Копируем без сохранения прав/владельца/времени из архива.
+  cp -R --no-preserve=mode,ownership,timestamps,links "$ZASH_SRC/." "$ZASH_STAGE/" \
+    || die "zashboard: не удалось скопировать файлы в $ZASH_STAGE"
+  find "$ZASH_STAGE" -type d -exec chmod 0755 {} +
+  find "$ZASH_STAGE" -type f -exec chmod 0644 {} +
+  # Атомарная замена: старый каталог уводим в .bak, новый — на его место.
+  rm -rf "$ETC/zashboard.bak"
+  if [ -e "$ETC/zashboard" ] || [ -L "$ETC/zashboard" ]; then
+    mv "$ETC/zashboard" "$ETC/zashboard.bak" \
+      || die "zashboard: не удалось отодвинуть старый $ETC/zashboard"
+  fi
+  mv "$ZASH_STAGE" "$ETC/zashboard" \
+    || die "zashboard: не удалось установить $ZASH_STAGE"
+  rm -rf "$ETC/zashboard.bak"
+  ok "zashboard: http://$SERVER_IP:9090/ui/"
 fi
 
 # ---------- 10. tg-ws-proxy-rs (docker) ----------
@@ -1055,7 +1674,27 @@ if [ "$INSTALL_TGWS" = "yes" ]; then
   command -v docker >/dev/null 2>&1 || die "tg-ws-proxy требует Docker Engine и compose v2. Установите Docker (https://docs.docker.com/engine/install/) и повторите, либо запустите без INSTALL_TGWS=yes."
   docker compose version >/dev/null 2>&1 || die "docker compose v2 не найден. Установите плагин compose v2 (docker-compose-plugin) и повторите."
   systemctl enable --now docker >/dev/null 2>&1 || warn "не удалось включить docker.service — проверьте вручную"
-  ( cd "$APP_DIR" && docker compose up -d ) || die "docker compose не смог поднять tg-ws-proxy"
+  # SERVER_IP передаём только инлайном, а не `--env-file /etc/routeweave/.env`:
+  # compose нужна одна переменная подстановки, а разбирать файл с секретами и
+  # shell-специфичным экранированием '\'' ему незачем. env_file сервиса —
+  # отдельный /etc/routeweave/.env.tgws (см. docker-compose.yml).
+  ( cd "$APP_DIR" && SERVER_IP="$SERVER_IP" docker compose up -d ) \
+    || die "docker compose не смог поднять tg-ws-proxy"
+  # `up -d` возвращает 0 и тогда, когда контейнер сразу упал, а healthcheck в
+  # distroless-образе нет (см. комментарий в docker-compose.yml), поэтому до
+  # 20 с ждём State.Running=true.
+  tgws_try=0
+  tgws_running=""
+  while [ "$tgws_try" -lt 20 ]; do
+    tgws_running=$(docker inspect -f '{{.State.Running}}' routeweave-tgwsproxy 2>/dev/null || true)
+    [ "$tgws_running" = "true" ] && break
+    tgws_try=$((tgws_try + 1))
+    sleep 1
+  done
+  if [ "$tgws_running" != "true" ]; then
+    docker logs --tail=30 routeweave-tgwsproxy >&2 2>&1 || true
+    die "контейнер routeweave-tgwsproxy не запустился — см. docker logs выше"
+  fi
   ok "tg-ws-proxy-rs запущен"
 else
   info "tg-ws-proxy: пропущен (INSTALL_TGWS=no)"
@@ -1190,6 +1829,14 @@ else
 fi
 
 # ---------- 12. Firewall / ufw ----------
+# uninstall восстанавливает прежнее значение net.ipv4.ip_forward, поэтому
+# запоминаем его один раз — до того как fw-скрипты включат форвардинг.
+if [ ! -e "$ETC/ip_forward.orig" ] && [ -r /proc/sys/net/ipv4/ip_forward ]; then
+  tr -d '\n' < /proc/sys/net/ipv4/ip_forward > "$ETC/ip_forward.orig"
+  printf '\n' >> "$ETC/ip_forward.orig"
+  chmod 0644 "$ETC/ip_forward.orig"
+fi
+
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   info "ufw активен — добавляю разрешения для локалки..."
   ufw route allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
@@ -1213,6 +1860,9 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     ufw allow 41641/udp >/dev/null 2>&1 || true
     # CGNAT-спуфинг с LAN: пакет с tailnet-источником не должен приходить
     # из локальной сети. insert 1 — deny обязан стоять выше allow-правил.
+    # Повторная установка не должна плодить дубликаты: снимаем существующее
+    # правило (если есть) и вставляем заново на первое место.
+    ufw delete deny in on "$LAN_IFACE" from "$TS_CIDR" >/dev/null 2>&1 || true
     ufw insert 1 deny in on "$LAN_IFACE" from "$TS_CIDR" >/dev/null 2>&1 || true
   fi
 
@@ -1234,7 +1884,13 @@ fi
 # ---------- 13. Запуск ----------
 info "Запуск сервисов..."
 systemctl daemon-reload
-systemctl enable --now routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
+systemctl enable routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
+# restart, а не enable --now: enable --now не перечитывает код уже активного
+# юнита, поэтому после git pull + повторного install.sh security-фикс
+# применялся бы только после ручного restart. restart и запускает неактивный
+# юнит, и перечитывает код активного.
+systemctl restart routeweave-firewall >/dev/null 2>&1 || true
+systemctl restart mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
 systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
 sleep 3
@@ -1243,7 +1899,42 @@ for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lis
   st=$(systemctl is-active "$u" || true)
   if [ "$st" = "active" ]; then ok "$u: active"; else warn "$u: $st (journalctl -u $u -n 30)"; FAIL=1; fi
 done
-[ "$FAIL" = 0 ] || warn "Есть незапущенные сервисы — установка завершена, но проверьте их!"
+
+# Health-check без секретов: MIHOMO_SECRET не передаётся ни в curl -H, ни в
+# argv — проверяем только HTTP-код панели и открытость TCP-порта API.
+PANEL_CHECK_HOST="${PANEL_BIND:-$SERVER_IP}"
+[ "$PANEL_CHECK_HOST" = "0.0.0.0" ] && PANEL_CHECK_HOST=127.0.0.1
+PANEL_CHECK_URL="http://${PANEL_CHECK_HOST}:${PANEL_PORT}/"
+panel_code=""
+for _ in $(seq 1 20); do
+  panel_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$PANEL_CHECK_URL" 2>/dev/null || true)
+  case "$panel_code" in 200|401) break ;; esac
+  sleep 1
+done
+case "$panel_code" in
+  200|401)
+    ok "панель отвечает: HTTP $panel_code ($PANEL_CHECK_URL)"
+    ;;
+  *)
+    warn "панель не отвечает на $PANEL_CHECK_URL (код ${panel_code:-нет}) — journalctl -u routeweave-panel -n 30"
+    FAIL=1
+    ;;
+esac
+
+# 401 — тоже успех: панель жива и требует авторизацию.
+MIHOMO_CHECK_HOST="${MIHOMO_BIND:-$SERVER_IP}"
+[ "$MIHOMO_CHECK_HOST" = "0.0.0.0" ] && MIHOMO_CHECK_HOST=127.0.0.1
+if timeout 1 bash -c "</dev/tcp/$MIHOMO_CHECK_HOST/9090" 2>/dev/null; then
+  ok "mihomo API: TCP $MIHOMO_CHECK_HOST:9090 открыт"
+else
+  warn "mihomo API не отвечает на $MIHOMO_CHECK_HOST:9090 — journalctl -u mihomo -n 30"
+  FAIL=1
+fi
+
+if [ "$PORT53_BLOCKED" = 1 ]; then
+  warn "порт 53 занят неизвестным сервисом — mihomo не слушает DNS; освободите порт (см. ss -lunp | grep :53) и перезапустите установщик"
+fi
+[ "$FAIL" = 0 ] || warn "Есть незапущенные сервисы или проблемы — установка завершена, но проверьте их!"
 
 info "Первый прогон обновления списков..."
 systemctl start routeweave-lists-update.service \
