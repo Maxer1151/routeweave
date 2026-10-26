@@ -11,11 +11,23 @@
 Флаг --env-wins инвертирует приоритет — нужен только для отладки и разовых
 экспериментов (проверить значение, не правя файл).
 
+Адреса прослушивания и TUN:
+  * MIHOMO_BIND — адрес external-controller и bind-address (по умолчанию
+    SERVER_IP, если он пуст — 127.0.0.1). 0.0.0.0 разрешён, но с
+    предупреждением: API окажется доступен из WAN.
+  * DNS_BIND — адрес DNS-листенера (по умолчанию SERVER_IP, иначе 127.0.0.1).
+  * MIHOMO_ALLOW_LAN=yes — включить allow-lan (по умолчанию false: mixed-port
+    слушает только доверенные адреса, доступ из LAN не открывается сам).
+  * MIHOMO_TUN_MTU — MTU TUN (по умолчанию 1280, допустимо 576..9000).
+  * WAN_INGRESS=yes — auto-redirect принудительно выключается: он перехватывает
+    входящий TCP раньше маркировки WAN-трафика.
+
 Коды возврата: 0 — успех, 1 — ошибка разбора/записи, 2 — ошибка аргументов
 (argparse).
 """
 
 import argparse
+import ipaddress
 import os
 import sys
 from urllib.parse import unquote, urlsplit
@@ -26,15 +38,14 @@ import yaml
 #   * socks5h/socks -> socks5: mihomo для типа socks5 передаёт прокси имя
 #     хоста, а не IP, то есть имя резолвится на стороне прокси — это ровно
 #     семантика «h» в curl. Отдельного типа socks5h у mihomo нет.
-#   * http/https -> http: отдельного https-типа у mihomo тоже нет, TLS к
-#     самому прокси не поддерживается; https:// здесь означает «прокси,
-#     которому нужен CONNECT», и трактуется как обычный http.
+#   * http -> http: отдельного https-типа у mihomo нет, а TLS к самому прокси
+#     не поддерживается. https:// в SOCKS_URL — ошибка (см. parse_socks), а не
+#     тихий маппинг на http: иначе пользователь думал бы, что канал шифруется.
 SCHEME_TO_TYPE = {
     "socks5": "socks5",
     "socks5h": "socks5",
     "socks": "socks5",
     "http": "http",
-    "https": "http",
 }
 
 # Базовые домены fake-ip-filter: им нужен настоящий IP, а не 198.18.x.x.
@@ -49,18 +60,112 @@ BASE_FAKEIP_FILTER = [
 
 DEFAULT_ENV_FILE = "/etc/routeweave/.env"
 DEFAULT_OUT_FILE = "/etc/routeweave/config.yaml"
+# Адрес по умолчанию, если SERVER_IP не задан: слушаем только localhost,
+# а не 0.0.0.0. Иначе панель/API/DNS видны из WAN при INPUT policy ACCEPT.
+DEFAULT_BIND = "127.0.0.1"
+# MTU TUN: 1280 — минимум IPv6 и безопасное значение для инкапсуляции
+# (WireGuard/Tailscale сверху не любят 1500 без PMTU).
+DEFAULT_TUN_MTU = 1280
+TUN_MTU_MIN = 576
+TUN_MTU_MAX = 9000
 
 
 class SocksUrlError(ValueError):
     """SOCKS_URL задан, но не разбирается."""
 
 
+class EnvValueError(ValueError):
+    """Значение в .env не годится для config.yaml."""
+
+
+def _parse_env_value(raw: str) -> str:
+    """Разобрать значение .env как одно shell-слово без подстановок.
+
+    Установщик пишет ``KEY='value'`` и не исполняет файл как shell, поэтому
+    значение разбираем сами, но по shell-семантике кавычек:
+
+    * ``'...'`` — содержимое дословно до закрывающей кавычки;
+    * ``'\\''`` — закрывающая кавычка, экранированный апостроф и новая
+      кавычка, то есть один ``'`` внутри значения;
+    * ``"..."`` — кавычки снимаются, раскрываются только ``\\"`` и ``\\\\``
+      (как в panel/app.py; ``\\n`` и прочие последовательности остаются
+      текстом);
+    * вне кавычек ``\\`` экранирует следующий символ;
+    * сегменты конкатенируются: ``'a'"b"`` → ``ab``.
+
+    Подстановок ($VAR, `...`) нет — это данные, а не код. Незакрытая
+    кавычка не ошибка: возвращаем строку как есть, чтобы ручная правка .env
+    не валила рендер.
+    """
+    if not raw:
+        return ""
+
+    out = []
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+
+        if char == "'":
+            end = raw.find("'", index + 1)
+            if end == -1:
+                return raw
+            out.append(raw[index + 1:end])
+            index = end + 1
+            continue
+
+        if char == '"':
+            index += 1
+            chunk = []
+            closed = False
+            while index < length:
+                char = raw[index]
+                if char == "\\" and index + 1 < length:
+                    nxt = raw[index + 1]
+                    if nxt in ('"', "\\"):
+                        chunk.append(nxt)
+                    else:
+                        chunk.append(char)
+                        chunk.append(nxt)
+                    index += 2
+                    continue
+                if char == '"':
+                    closed = True
+                    index += 1
+                    break
+                chunk.append(char)
+                index += 1
+            if not closed:
+                return raw
+            out.append("".join(chunk))
+            continue
+
+        if char == "\\":
+            if index + 1 < length:
+                out.append(raw[index + 1])
+                index += 2
+            else:
+                out.append(char)
+                index += 1
+            continue
+
+        # Вне кавычек: накапливаем до следующей кавычки/обратного слэша.
+        start = index
+        while index < length and raw[index] not in "'\"\\":
+            index += 1
+        out.append(raw[start:index])
+
+    return "".join(out)
+
+
 def load_env(path: str) -> dict:
     """Построчный разбор KEY=VALUE (комментарии и пустые строки пропускаем).
 
-    Кавычки вокруг значения снимаем: install.sh делает `. .env`, то есть
-    читает файл как shell-скрипт, где KEY="value" и KEY=value равнозначны.
-    Без этого FAKEIP_EXTRA="a.com" дал бы домен с кавычкой внутри.
+    Файл — данные: установщик и апдейтер не делают ``source``/``eval`` .env.
+    Значение разбирается как одно shell-слово без подстановок: снимаются
+    одинарные и двойные кавычки, ``'\\''`` даёт апостроф внутри значения,
+    соседние сегменты конкатенируются. Поэтому
+    ``MIHOMO_SECRET='a'\\''b'`` — это секрет ``a'b``, а не ``a'\\''b``.
     """
     env = {}
     try:
@@ -70,10 +175,7 @@ def load_env(path: str) -> dict:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, _, v = line.partition("=")
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                env[k.strip()] = v
+                env[k.strip()] = _parse_env_value(v.strip())
     except FileNotFoundError:
         pass
     return env
@@ -90,10 +192,17 @@ def parse_socks(url: str) -> dict:
 
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
+    if scheme == "https":
+        # Отдельного https-типа у mihomo нет: TLS до прокси не поддерживается.
+        # Молчаливый маппинг на http опасен — пользователь считал бы, что
+        # канал до прокси шифруется.
+        raise SocksUrlError(
+            "TLS к SOCKS-прокси не поддерживается, используйте http:// или socks5h://"
+        )
     if scheme not in SCHEME_TO_TYPE:
         raise SocksUrlError(
             f"неподдерживаемая схема {scheme!r} "
-            "(ожидается socks5, socks5h, socks, http или https)"
+            "(ожидается socks5, socks5h, socks или http)"
         )
 
     # Опечатки в хвосте URL лучше не глотать: иначе mihomo получит не тот
@@ -184,6 +293,75 @@ def build_fakeip_filter(extra_raw: str, base_domain: str) -> list:
     return result
 
 
+def parse_flag(data: dict, key: str, *, default: bool) -> bool:
+    """Разобрать yes/no из .env; пусто — default, мусор — default + warn.
+
+    Флаги в .env пишут руками ("Yes", " true", опечатка), поэтому
+    нормализуем так же, как firewall-скрипты, и не падаем из-за одной
+    переменной: неверное значение не должно оставлять сервис полувключённым.
+    """
+    raw = (data.get(key) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("yes", "true", "1", "on"):
+        return True
+    if raw in ("no", "false", "0", "off"):
+        return False
+    print(
+        f"warn: {key}={raw!r} не yes/no, считаю "
+        f"{'yes' if default else 'no'}",
+        file=sys.stderr,
+    )
+    return default
+
+
+def resolve_bind(data: dict, key: str, what: str) -> str:
+    """Адрес прослушивания: <key> -> SERVER_IP -> 127.0.0.1.
+
+    Допускаем IPv4 и localhost: 0.0.0.0 разрешён, но с предупреждением (сервис
+    окажется доступен из WAN). Имя хоста не принимаем: mihomo ждёт IP, а
+    SERVER_IP в .env — адрес интерфейса, не DNS-имя.
+    """
+    server_ip = (data.get("SERVER_IP") or "").strip()
+    raw = (data.get(key) or "").strip() or server_ip or DEFAULT_BIND
+    if raw == "localhost":
+        return raw
+    try:
+        addr = ipaddress.IPv4Address(raw)
+    except ValueError:
+        raise EnvValueError(
+            f"{key}={raw!r} должен быть IPv4-адресом или "
+            f"localhost (например {server_ip or DEFAULT_BIND})"
+        ) from None
+    if addr.is_unspecified:
+        print(
+            f"warn: {key}={raw} — {what} будет слушать все "
+            "интерфейсы, включая WAN; ограничьте доступ firewall'ом "
+            "или укажите SERVER_IP",
+            file=sys.stderr,
+        )
+    return raw
+
+
+def parse_tun_mtu(data: dict) -> int:
+    """MIHOMO_TUN_MTU: целое 576..9000, по умолчанию 1280."""
+    raw = (data.get("MIHOMO_TUN_MTU") or "").strip()
+    if not raw:
+        return DEFAULT_TUN_MTU
+    try:
+        mtu = int(raw, 10)
+    except ValueError:
+        raise EnvValueError(
+            f"MIHOMO_TUN_MTU={raw!r} должен быть целым числом "
+            f"{TUN_MTU_MIN}..{TUN_MTU_MAX}"
+        ) from None
+    if not TUN_MTU_MIN <= mtu <= TUN_MTU_MAX:
+        raise EnvValueError(
+            f"MIHOMO_TUN_MTU={mtu} вне диапазона {TUN_MTU_MIN}..{TUN_MTU_MAX}"
+        )
+    return mtu
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="render_mihomo.py",
@@ -240,13 +418,44 @@ def main(argv=None) -> int:
         proxies.append(proxy)
         geo_target = "socks-out"
 
+    # Значения, которые нельзя «угадать»: при ошибке лучше упасть, чем
+    # сгенерировать конфиг, который mihomo не примет или который откроет
+    # сервисы в WAN.
+    try:
+        mihomo_bind = resolve_bind(
+            data, "MIHOMO_BIND", "external-controller/API mihomo"
+        )
+        dns_bind = resolve_bind(data, "DNS_BIND", "DNS mihomo")
+        tun_mtu = parse_tun_mtu(data)
+    except EnvValueError as exc:
+        print(f"ошибка: {exc}", file=sys.stderr)
+        return 1
+
+    # allow-lan по умолчанию выключен: mixed-port не должен быть доступен из
+    # LAN без явного согласия (MIHOMO_ALLOW_LAN=yes). WAN_INGRESS=yes
+    # выключает auto-redirect: он перехватывает входящий TCP раньше нашей
+    # маркировки в mangle PREROUTING и ломает доступ из WAN.
+    allow_lan = parse_flag(data, "MIHOMO_ALLOW_LAN", default=False)
+    wan_ingress = parse_flag(data, "WAN_INGRESS", default=False)
+
+    secret = (data.get("MIHOMO_SECRET") or "").strip()
+    if not secret:
+        # Установщик генерирует секрет сам; пустой секрет здесь — признак
+        # ручной правки .env. Не генерируем молча: иначе панель и mihomo
+        # разойдутся в секретах.
+        print(
+            "warn: MIHOMO_SECRET пуст — API mihomo/zashboard без пароля; "
+            "установщик генерирует секрет, проверьте /etc/routeweave/.env",
+            file=sys.stderr,
+        )
+
     config = {
         "mixed-port": 7890,
-        "external-controller": "0.0.0.0:9090",
+        "external-controller": f"{mihomo_bind}:9090",
         "external-ui": "zashboard",
-        "secret": data.get("MIHOMO_SECRET") or "",
-        "allow-lan": True,
-        "bind-address": "*",
+        "secret": secret,
+        "allow-lan": allow_lan,
+        "bind-address": mihomo_bind,
         "mode": "rule",
         "log-level": "info",
         "ipv6": False,
@@ -264,14 +473,14 @@ def main(argv=None) -> int:
             "enable": True,
             "stack": "mixed",
             "auto-route": True,
-            "auto-redirect": True,
+            "auto-redirect": not wan_ingress,
             "auto-detect-interface": True,
             "strict-route": False,
-            "mtu": 1500,
+            "mtu": tun_mtu,
         },
         "dns": {
             "enable": True,
-            "listen": "0.0.0.0:53",
+            "listen": f"{dns_bind}:53",
             "ipv6": False,
             "enhanced-mode": "fake-ip",
             "fake-ip-range": "198.18.0.1/16",
@@ -339,8 +548,15 @@ def main(argv=None) -> int:
             )
             f.write("# или через веб-панель (списки). Ручные правки будут потеряны.\n")
             yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+        # В конфиге лежит Bearer-секрет API mihomo: читать его должен только
+        # root. Install.sh делает install -m 0600, но при ручном запуске
+        # (отладка, регенерация) права надо выставить сами.
+        os.chmod(args.out, 0o600)
     except OSError as exc:
-        print(f"ошибка: не удалось записать {args.out}: {exc}", file=sys.stderr)
+        print(
+            f"ошибка: не удалось записать {args.out} или выставить права 0600: {exc}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"OK: {args.out} (geo -> {geo_target})")

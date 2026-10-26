@@ -5,7 +5,9 @@ SOCKS_URL и прочих переменных хоста), поэтому те�
 tests/conftest.py и от реального /etc/routeweave/.env.
 """
 
+import importlib.util
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -49,16 +51,88 @@ def load_ok(tmp_path, env_text="", extra_env=None, extra_args=()):
     return yaml.safe_load(out_file.read_text(encoding="utf-8"))
 
 
+def load_render_module():
+    """Импортировать скрипт как модуль: нужны load_env/_parse_env_value."""
+    spec = importlib.util.spec_from_file_location("render_mihomo_under_test", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # install.sh экранирует апостроф как '\'' — это один символ внутри.
+        ("'a'\\''b'", "a'b"),
+        # Соседние сегменты склеиваются в одно слово.
+        ("'a'\"b\"", "ab"),
+        ("plain", "plain"),
+        ("", ""),
+        # В двойных кавычках раскрываются только \" и \\.
+        ('"a\\"b"', 'a"b'),
+        ('"a\\\\b"', "a\\b"),
+        ('"a\\nb"', "a\\nb"),
+        # Вне кавычек обратный слэш экранирует любой следующий символ.
+        ("a\\ b", "a b"),
+        ("a\\'b", "a'b"),
+        # Незакрытая кавычка — не падаем, возвращаем строку как есть.
+        ("'unterminated", "'unterminated"),
+        ('"unterminated', '"unterminated'),
+    ],
+)
+def test_parse_env_value(raw, expected):
+    assert load_render_module()._parse_env_value(raw) == expected
+
+
+def test_env_single_quote_apostrophe_in_secret(tmp_path):
+    # Файл содержит ровно то, что пишет install.sh: MIHOMO_SECRET='a'\''b'
+    cfg = load_ok(tmp_path, "SOCKS_URL=\nMIHOMO_SECRET='a'\\''b'\n")
+    assert cfg["secret"] == "a'b"
+
+
+def test_env_single_quote_apostrophe_in_socks_url(tmp_path):
+    cfg = load_ok(
+        tmp_path,
+        "SOCKS_URL='socks5h://u:p'\\''q@127.0.0.1:1080'\n",
+    )
+    proxy = cfg["proxies"][0]
+    assert proxy["username"] == "u"
+    # unquote не трогает апостроф: пароль должен дойти как p'q.
+    assert proxy["password"] == "p'q"
+
+
+def test_env_single_quoted_fakeip_extra(tmp_path):
+    cfg = load_ok(tmp_path, "FAKEIP_EXTRA='+.a.example,+.b.example'\n")
+    filt = cfg["dns"]["fake-ip-filter"]
+    assert "+.a.example" in filt
+    assert "+.b.example" in filt
+
+
+def test_env_adjacent_segments_are_concatenated(tmp_path):
+    # 'a'"b" — одно слово ab, а не два значения с кавычками.
+    cfg = load_ok(tmp_path, "SOCKS_URL=\nMIHOMO_SECRET='a'\"b\"\n")
+    assert cfg["secret"] == "ab"
+
+
 def test_empty_socks_url_is_direct(tmp_path):
     cfg = load_ok(tmp_path, "SOCKS_URL=\nMIHOMO_SECRET=s3cret\n")
     assert cfg["proxies"] == []
     groups = {g["name"]: g for g in cfg["proxy-groups"]}
     assert groups["GEO"]["proxies"] == ["DIRECT"]
-    # DIRECT — штатный режим, никаких ошибок в stderr
-    proc, _ = run_render(tmp_path, "SOCKS_URL=\n")
+    # DIRECT — штатный режим, никаких предупреждений при заданном секрете.
+    proc, _ = run_render(tmp_path, "SOCKS_URL=\nMIHOMO_SECRET=s3cret\n")
     assert proc.returncode == 0
     assert proc.stderr == ""
     assert "geo -> DIRECT" in proc.stdout
+
+
+def test_empty_secret_warns_but_writes(tmp_path):
+    # Секрет генерирует установщик; пустой — предупреждение, не ошибка.
+    proc, out_file = run_render(tmp_path, "SOCKS_URL=\nMIHOMO_SECRET=\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "MIHOMO_SECRET" in proc.stderr
+    assert out_file.exists()
 
 
 def test_socks5_with_auth(tmp_path):
@@ -90,7 +164,6 @@ def test_socks5h_maps_to_socks5(tmp_path):
         ("socks5://h.example:1080", "socks5", True),
         ("socks://h.example:1080", "socks5", True),
         ("http://h.example:3128", "http", False),
-        ("https://h.example:8443", "http", False),
     ],
 )
 def test_scheme_mapping(tmp_path, url, expected_type, expected_udp):
@@ -100,6 +173,16 @@ def test_scheme_mapping(tmp_path, url, expected_type, expected_udp):
     assert proxy["udp"] is expected_udp
     assert proxy["server"] == "h.example"
     assert "username" not in proxy
+
+
+def test_https_socks_url_fails(tmp_path):
+    # TLS к самому прокси mihomo не умеет: молчаливый маппинг https -> http
+    # создавал бы ложное впечатление шифрования канала.
+    proc, out_file = run_render(tmp_path, "SOCKS_URL=https://h.example:8443\n")
+    assert proc.returncode == 1, proc.stderr
+    assert "TLS к SOCKS-прокси не поддерживается" in proc.stderr
+    assert "socks5h://" in proc.stderr
+    assert not out_file.exists(), "при ошибке конфиг писать нельзя"
 
 
 def test_scheme_is_case_insensitive(tmp_path):
@@ -231,8 +314,13 @@ def test_full_config_structure(tmp_path):
         "MIHOMO_SECRET=topsecret\n",
     )
     assert cfg["tun"]["enable"] is True
-    assert cfg["dns"]["listen"] == "0.0.0.0:53"
-    assert cfg["external-controller"] == "0.0.0.0:9090"
+    # Без SERVER_IP/MIHOMO_BIND/DNS_BIND слушаем только localhost, а не 0.0.0.0.
+    assert cfg["dns"]["listen"] == "127.0.0.1:53"
+    assert cfg["external-controller"] == "127.0.0.1:9090"
+    assert cfg["bind-address"] == "127.0.0.1"
+    assert cfg["allow-lan"] is False
+    assert cfg["tun"]["auto-redirect"] is True
+    assert cfg["tun"]["mtu"] == 1280
     assert cfg["secret"] == "topsecret"
     assert cfg["mixed-port"] == 7890
     assert cfg["mode"] == "rule"
@@ -278,6 +366,92 @@ def test_missing_env_file_is_not_fatal(tmp_path):
     assert proc.returncode == 0, proc.stderr
     cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
     assert cfg["proxies"] == []
+
+
+def test_bind_addresses_from_server_ip(tmp_path):
+    cfg = load_ok(tmp_path, "SERVER_IP=192.168.1.10\nMIHOMO_SECRET=s\n")
+    assert cfg["external-controller"] == "192.168.1.10:9090"
+    assert cfg["bind-address"] == "192.168.1.10"
+    assert cfg["dns"]["listen"] == "192.168.1.10:53"
+
+
+def test_bind_addresses_overridden_by_env(tmp_path):
+    cfg = load_ok(
+        tmp_path,
+        "SERVER_IP=192.168.1.10\nMIHOMO_BIND=127.0.0.1\nDNS_BIND=192.168.1.11\n",
+    )
+    assert cfg["external-controller"] == "127.0.0.1:9090"
+    assert cfg["bind-address"] == "127.0.0.1"
+    assert cfg["dns"]["listen"] == "192.168.1.11:53"
+
+
+def test_bind_localhost_allowed(tmp_path):
+    cfg = load_ok(tmp_path, "MIHOMO_BIND=localhost\nDNS_BIND=localhost\n")
+    assert cfg["external-controller"] == "localhost:9090"
+    assert cfg["dns"]["listen"] == "localhost:53"
+
+
+def test_bind_wildcard_warns(tmp_path):
+    proc, out_file = run_render(tmp_path, "MIHOMO_BIND=0.0.0.0\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "0.0.0.0" in proc.stderr
+    assert "WAN" in proc.stderr
+    cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert cfg["external-controller"] == "0.0.0.0:9090"
+
+
+@pytest.mark.parametrize("value", ["example.com", "192.168.1.300", "10.0.0.1:9090", "::1"])
+def test_bind_invalid_fails(tmp_path, value):
+    proc, out_file = run_render(tmp_path, f"MIHOMO_BIND={value}\n")
+    assert proc.returncode == 1, proc.stderr
+    assert "MIHOMO_BIND" in proc.stderr
+    assert not out_file.exists()
+
+
+def test_allow_lan_off_by_default(tmp_path):
+    cfg = load_ok(tmp_path)
+    assert cfg["allow-lan"] is False
+
+
+def test_allow_lan_enabled_by_env(tmp_path):
+    cfg = load_ok(tmp_path, "MIHOMO_ALLOW_LAN=yes\n")
+    assert cfg["allow-lan"] is True
+
+
+def test_allow_lan_garbage_is_off_and_warns(tmp_path):
+    proc, out_file = run_render(tmp_path, "MIHOMO_ALLOW_LAN=maybe\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "MIHOMO_ALLOW_LAN" in proc.stderr
+    cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert cfg["allow-lan"] is False
+
+
+@pytest.mark.parametrize(
+    "wan_ingress, expected",
+    [("yes", False), ("no", True), ("YES", False), ("", True), ("garbage", True)],
+)
+def test_auto_redirect_disabled_for_wan_ingress(tmp_path, wan_ingress, expected):
+    cfg = load_ok(tmp_path, f"WAN_INGRESS={wan_ingress}\n")
+    assert cfg["tun"]["auto-redirect"] is expected
+
+
+def test_tun_mtu_default_and_custom(tmp_path):
+    assert load_ok(tmp_path)["tun"]["mtu"] == 1280
+    assert load_ok(tmp_path, "MIHOMO_TUN_MTU=1400\n")["tun"]["mtu"] == 1400
+
+
+@pytest.mark.parametrize("value", ["100", "9001", "abc", "-1"])
+def test_tun_mtu_invalid_fails(tmp_path, value):
+    proc, out_file = run_render(tmp_path, f"MIHOMO_TUN_MTU={value}\n")
+    assert proc.returncode == 1, proc.stderr
+    assert "MIHOMO_TUN_MTU" in proc.stderr
+    assert not out_file.exists()
+
+
+def test_config_is_written_with_0600(tmp_path):
+    proc, out_file = run_render(tmp_path, "MIHOMO_SECRET=s3cret\n")
+    assert proc.returncode == 0, proc.stderr
+    assert stat.S_IMODE(out_file.stat().st_mode) == 0o600
 
 
 def test_help_and_bad_args(tmp_path):
