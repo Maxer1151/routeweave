@@ -14,3 +14,8 @@ state.json
 *.zip
 *.gz
 *.local.md
+
+# окружение компонента tg-ws-proxy и артефакты прогонов CI
+.env.tgws
+pytest-netns.log
+coverage.xml

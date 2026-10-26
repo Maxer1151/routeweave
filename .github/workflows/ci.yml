@@ -28,6 +28,12 @@ jobs:
       - name: make lint
         run: make lint SHELLCHECK=shellcheck RUFF=ruff
 
+      # tools/ не входит в цели Makefile, поэтому проверяем инструменты явно.
+      - name: Проверить tools/
+        run: |
+          ruff check tools
+          python -m compileall -q tools
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -40,50 +46,143 @@ jobs:
       - name: Установить зависимости
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r panel/requirements.txt pytest pyyaml
+          python -m pip install -r panel/requirements.txt pytest pyyaml pytest-cov
 
-      - name: pytest
-        run: python -m pytest tests -v -rs
+      # Порог 72 % при фактических ~77 % (panel/app.py) — запас 5 п.п. на
+      # разницу версий Python и порядок тестов. Привилегированные netns-тесты
+      # здесь по-прежнему skip (нет root) — их выполняет job `netns`.
+      - name: pytest с покрытием panel
+        run: |
+          python -m pytest tests -v -rs \
+            --cov=panel --cov-report=term-missing --cov-fail-under=72
 
       - name: Проверить синтаксис Python
         run: python -m compileall -q panel templates tests
 
-  # netns (ip netns add) требует SYS_ADMIN, а iptables внутри namespace —
-  # NET_ADMIN. Без этих capability тесты молча уйдут в skip, поэтому ниже
-  # отдельный шаг проверяет, что хотя бы часть тестов реально прошла.
-  # В container-job шаги по умолчанию идут через sh (dash), а в шаге
-  # pytest используется set -o pipefail — поэтому принудительно bash.
-  # Профиль AppArmor docker-default запрещает mount, без которого не работает
-  # ip netns add, поэтому для netns-тестов он отключён (capability остаются).
-  firewall:
+  # Привилегированный job: `ip netns add`, `ip netns exec ... iptables` и
+  # правила в netns требуют root (CAP_NET_ADMIN/SYS_ADMIN). В job `test` все
+  # такие тесты помечены skipif(os.geteuid() != 0) и потому молча уходят в
+  # skip — job остаётся зелёным, ничего не проверив. Здесь тот же набор
+  # запускается под sudo на обычном runner'е (netns и модуль ip_tables там
+  # доступны), а tools/check_no_skips.py превращает любой оставшийся
+  # SKIPPED в падение. Job доказывает, что сгенерированные правила
+  # fw-base.sh/fw-wan.sh реально применяются ядром: маршруты, mark/connmark,
+  # NAT, политика входа — а не только парсятся статически.
+  netns:
     runs-on: ubuntu-latest
+    needs: [lint]
     defaults:
       run:
         shell: bash
-    container:
-      image: ubuntu:24.04
-      options: --cap-add=NET_ADMIN --cap-add=SYS_ADMIN --security-opt apparmor=unconfined
     steps:
-      - name: Установить git для checkout
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates
-
       - uses: actions/checkout@v4
 
-      - name: Установить iptables, iproute2 и pytest
-        run: |
-          apt-get install -y --no-install-recommends iptables iproute2 python3 python3-pip
-          python3 -m pip install --break-system-packages pytest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: pytest (firewall)
+      - name: Установить iptables, iproute2 и shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            iptables iproute2 shellcheck
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r panel/requirements.txt pytest pyyaml
+
+      # Маркер `privileged` объявлен в pytest.ini и стоит ровно на тестах,
+      # которым нужны root/netns/iptables. Отбираем их по маркеру, а не по
+      # именам файлов: новый netns-тест попадёт в job автоматически.
+      # Шаг ниже проверяет, что известные netns-модули действительно дали
+      # privileged-тесты, — иначе потерянный маркер тихо выключил бы проверку.
+      - name: Проверить, что netns-тесты собраны
+        run: |
+          python -m pytest tests -q --collect-only -m privileged \
+            > /tmp/netns-collected.txt
+          rc=0
+          for f in tests/test_firewall.py tests/test_wan_ingress.py \
+                   tests/test_tailscale_exit.py tests/test_tailscale_nat.py \
+                   tests/test_input_policy.py tests/test_fw_nfq.py; do
+            if [ -f "$f" ] && ! grep -qF "$f" /tmp/netns-collected.txt; then
+              echo "::error::$f не дал ни одного теста с маркером privileged"
+              rc=1
+            fi
+          done
+          grep -F -- '::' /tmp/netns-collected.txt
+          exit $rc
+
+      # pytest под root: код возврата pytest пробрасывается через pipefail,
+      # а check_no_skips.py отдельно валит job, если что-то всё же скипнулось.
+      # sbin-каталоги в PATH добавлены явно: iptables и ip лежат там, а тесты
+      # проверяют их через shutil.which() и без этого ушли бы в skip.
+      - name: pytest (netns, root)
         run: |
           set -o pipefail
-          python3 -m pytest tests/test_firewall.py tests/test_tailscale_exit.py -v -rs | tee /tmp/fw.log
+          sudo -E env "PATH=/usr/local/sbin:/usr/sbin:/sbin:$PATH" \
+            python -m pytest tests \
+            -m privileged -q -rs --rootdir=. -p no:cacheprovider \
+            | tee pytest-netns.log
 
-      - name: Проверить, что тесты не все skip
+      - name: Запретить skip в netns-тестах
+        run: python tools/check_no_skips.py pytest-netns.log
+
+  # `docker compose config` ловит синтаксические ошибки и неразрешённые
+  # подстановки в docker-compose.yml без запуска контейнеров: файл читается
+  # целиком, переменные подставляются, результат нормализуется в YAML.
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Проверить docker compose и поставить pyyaml
         run: |
-          if ! grep -qE '[1-9][0-9]* passed' /tmp/fw.log; then
-            echo "::error::firewall-тесты не выполнились (все skip?)"
+          docker compose version
+          python -m pip install --upgrade pip
+          python -m pip install pyyaml
+
+      # env_file в compose указывает на /etc/routeweave/.env.tgws, которого
+      # на runner'е нет: `compose config` читает env_file и без файла ругается.
+      # Создаём пустую заглушку — проверяем сам compose-файл, а не машину.
+      - name: Подготовить env_file для config
+        run: |
+          sudo install -d -m 0755 /etc/routeweave
+          sudo touch /etc/routeweave/.env.tgws
+          sudo chmod 0644 /etc/routeweave/.env.tgws
+
+      # stderr у `compose config` — это предупреждения (устаревший ключ
+      # version, неразрешённая переменная, отсутствующий env_file), поэтому
+      # непустой stderr считаем ошибкой, а не шумом.
+      - name: Проверить docker-compose.yml
+        run: |
+          SERVER_IP=192.0.2.10 docker compose -f docker-compose.yml config \
+            > /tmp/compose-config.yml 2> /tmp/compose-stderr.log
+          if [ -s /tmp/compose-stderr.log ]; then
+            echo "::error::docker compose config написал в stderr"
+            cat /tmp/compose-stderr.log
             exit 1
           fi
+          if [ ! -s /tmp/compose-config.yml ]; then
+            echo "::error::docker compose config вернул пустой результат"
+            exit 1
+          fi
+          python - <<'PY'
+          import sys
+
+          import yaml
+
+          with open("/tmp/compose-config.yml", encoding="utf-8") as fh:
+              cfg = yaml.safe_load(fh)
+          services = cfg.get("services") if isinstance(cfg, dict) else None
+          if not services:
+              sys.exit("docker compose config: в результате нет services")
+          print("docker compose config: сервисы —", ", ".join(sorted(services)))
+          PY
+
+      - name: pytest tests/test_compose.py
+        run: python -m pytest tests/test_compose.py -q
