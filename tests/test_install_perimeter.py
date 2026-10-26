@@ -242,6 +242,64 @@ def test_default_mihomo_api_follows_bind(bind, server_ip, expected):
     assert proc.stdout == expected
 
 
+def valid_api_url_script():
+    """Скрипт с настоящей valid_api_url: код возврата — вердикт валидатора."""
+    return extract_function("valid_api_url") + '\nvalid_api_url "$1"\n'
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://198.51.100.10:9090",
+        "http://192.0.2.10:9090",
+        "https://panel.example.com:9090",
+        "http://127.0.0.1:9090",
+        "http://localhost:9090",
+        "http://[::1]:9090",
+        "http://host:9090/path?x=1",
+    ],
+)
+def test_valid_api_url_accepts_host_port(url):
+    # Валидатор выполняется в bash, а не проверяется по тексту скрипта:
+    # сломанный POSIX-класс символов иначе остаётся незамеченным.
+    proc = run_bash(valid_api_url_script(), url)
+    assert proc.returncode == 0, f"valid_api_url отклонила {url!r}: {proc.stderr}"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "198.51.100.10:9090",
+        "ftp://h:1",
+        "http://",
+        "http://h:90 90",
+        "http://h:9090;rm -rf /",
+        "http://h:9090|id",
+        "http://h:9090$(id)",
+        "http://h:9090&x",
+    ],
+)
+def test_valid_api_url_rejects_garbage(url):
+    # Мусор и попытки инъекции (;, |, $(), &) не должны проходить в .env.
+    proc = run_bash(valid_api_url_script(), url)
+    assert proc.returncode != 0, f"valid_api_url приняла {url!r}"
+
+
+def test_valid_api_url_accepts_plain_host_port_regression():
+    """Регрессия: класс символов нельзя закрывать на ``\\]``.
+
+    В POSIX bracket expression ``\\]`` не экранирует ``]``, а завершает класс:
+    остаток `` -]`` становился обязательным хвостом шаблона. В итоге не
+    принимался ни один адрес, и установка «из коробки» падала на дефолтном
+    ``http://192.0.2.10:9090``. При откате правки падает именно этот тест.
+    """
+    func = extract_function("valid_api_url")
+    assert "\\]" not in func, "класс символов закрыт через экранированную ]"
+    proc = run_bash(func + '\nvalid_api_url "$1"\n', "http://192.0.2.10:9090")
+    assert proc.returncode == 0, proc.stderr
+
+
 def test_explicit_mihomo_api_is_not_overridden():
     text = INSTALL.read_text(encoding="utf-8")
     # Дефолт вычисляется только при пустом MIHOMO_API, явное значение из .env

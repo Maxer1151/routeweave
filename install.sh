@@ -390,7 +390,7 @@ valid_wan_ports() {
 
 # shellcheck disable=SC2329,SC2317
 valid_api_url() { # MIHOMO_API: http(s)://host:port
-  [[ ${1-} =~ ^https?://[A-Za-z0-9._~%+:@/\[\]-]+$ ]]
+  [[ ${1-} =~ ^https?://[][A-Za-z0-9._~%+:@/?=-]+$ ]]
 }
 
 default_mihomo_api() { # <mihomo_bind> <server_ip> -> http://host:9090
