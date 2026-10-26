@@ -11,11 +11,18 @@
 # соединение не устанавливается. Из LAN спасает 9001 с suppress_prefixlength 0,
 # который отдаёт connected-маршруты из main.
 #
-# Решение — connmark: помечаем входящее из WAN NEW-соединение на нужные порты,
-# восстанавливаем метку на всех пакетах этого соединения (ответы контейнера
-# приходят на br-интерфейс и проходят PREROUTING -> FORWARD) и уводим
-# помеченные пакеты в main правилом с приоритетом НИЖЕ (численно меньше)
-# правил mihomo.
+# Решение — connmark: помечаем входящее из WAN NEW-соединение на нужные порты
+# (MARK на пакет — чтобы маршрутизация следующего же пакета ушла в main, и
+# CONNMARK — чтобы метку получили все пакеты соединения), восстанавливаем
+# метку на всех пакетах этого соединения (ответы контейнера приходят на
+# br-интерфейс и проходят PREROUTING -> FORWARD) и уводим помеченные пакеты
+# в main правилом с приоритетом НИЖЕ (численно меньше) правил mihomo.
+#
+# Метка по умолчанию — 0x200000. 0x40000 занят tailscale (subnet-route),
+# 0x80000 — zapret, 0x100000 — NAT-режим exit node: пересечение с ними
+# запрещено (validate_mark), иначе мы бы ломали чужую маршрутизацию.
+# Приоритеты 8990 (WDTT), 8991 (tailnet), 8992 (NAT exit node), 9000/9001/9002
+# (mihomo) тоже зарезервированы.
 #
 # restore-mark стоит ПЕРВЫМ в цепочке намеренно: у ответа контейнера src
 # приватный (172.21.x.x), и если бы RETURN для приватных сетей срабатывал
@@ -69,26 +76,67 @@ case "$WAN_INGRESS" in
 esac
 
 WAN_PORTS="${WAN_PORTS:-}"
-WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x40000}"
+# Дефолт 0x200000: 0x40000/0x80000/0x100000 уже заняты (tailscale/zapret/NAT
+# exit node) и запрещены в validate_mark ниже.
+WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x200000}"
 WAN_INGRESS_RULE_PRIO="${WAN_INGRESS_RULE_PRIO:-8993}"
 TUN_IFACE="${TUN_IFACE:-Meta}"
 LAN_IFACE="${LAN_IFACE:-}"
 SERVER_IP="${SERVER_IP:-}"
 
+# QUIC_DROP нужен только для предупреждения: WAN_PORTS с 443/udp при
+# QUIC_DROP=yes — почти всегда ошибка (fw-base.sh режет UDP/443, но помеченный
+# WAN_INGRESS трафик из этого DROP исключён). Нормализуем так же, как fw-base.
+QUIC_DROP="${QUIC_DROP:-yes}"
+QUIC_DROP="${QUIC_DROP,,}"
+case "$QUIC_DROP" in
+  yes | no) ;;
+  *)
+    warn "QUIC_DROP='${QUIC_DROP}' не yes/no, считаю yes"
+    QUIC_DROP="yes"
+    ;;
+esac
+
+# Метки, которые нельзя занимать: tailscale subnet-route, zapret, NAT-режим
+# exit node из fw-base.sh. Пересечение проверяем побитово — частичное
+# совпадение битов ломает restore-mark и policy-routing так же, как полное.
+RESERVED_MARKS="0x40000 0x80000 0x100000"
+# Приоритеты других компонентов: 8990 — WDTT, 8991 — tailnet, 8992 — NAT
+# exit node, 9000/9001/9002 — policy-routing mihomo.
+RESERVED_PRIOS="8990 8991 8992 9000 9001 9002"
+
 # Метка уходит в iptables и ip rule как есть, поэтому принимаем только
 # канонический вид 0x + 1..8 hex: иначе опечатка превратится в другое число
 # или в аргумент, который iptables поймёт не так, как ожидалось.
 validate_mark() {
+  local mark reserved
   [[ "$WAN_INGRESS_MARK" =~ ^0x[0-9a-fA-F]{1,8}$ ]] \
-    || die "WAN_INGRESS_MARK='${WAN_INGRESS_MARK}' должен быть 0x + 1..8 hex (например 0x40000)"
+    || die "WAN_INGRESS_MARK='${WAN_INGRESS_MARK}' должен быть 0x + 1..8 hex (например 0x200000)"
+
+  mark=$((WAN_INGRESS_MARK))
+  [ "$mark" -ne 0 ] \
+    || die "WAN_INGRESS_MARK=0x0 запрещён: с нулевой меткой правило fwmark не работает, а restore-mark не отличит наши пакеты"
+
+  for reserved in $RESERVED_MARKS; do
+    if ((mark & reserved)); then
+      die "WAN_INGRESS_MARK=$WAN_INGRESS_MARK пересекается с зарезервированной меткой $reserved (0x40000 — tailscale subnet-route, 0x80000 — zapret, 0x100000 — NAT-режим exit node tailnet); выберите другую, например 0x200000"
+    fi
+  done
 }
 # Приоритет меньше 32766 (main) и больше 0; практический диапазон — до 9000,
 # чтобы правило стояло выше policy-routing mihomo.
 [[ "$WAN_INGRESS_RULE_PRIO" =~ ^[0-9]{1,5}$ ]] \
   || die "WAN_INGRESS_RULE_PRIO='${WAN_INGRESS_RULE_PRIO}' должен быть целым числом"
+# 10# — чтобы "08993" не считалось восьмеричным (bash упал бы на 8/9).
+WAN_INGRESS_RULE_PRIO=$((10#$WAN_INGRESS_RULE_PRIO))
 if [ "$WAN_INGRESS_RULE_PRIO" -lt 1 ] || [ "$WAN_INGRESS_RULE_PRIO" -gt 32765 ]; then
   die "WAN_INGRESS_RULE_PRIO='${WAN_INGRESS_RULE_PRIO}' вне диапазона 1..32765"
 fi
+for reserved in $RESERVED_PRIOS; do
+  if [ "$WAN_INGRESS_RULE_PRIO" -eq "$reserved" ]; then
+    die "WAN_INGRESS_RULE_PRIO=$reserved зарезервирован (8990 — WDTT, 8991 — tailnet, 8992 — NAT-режим exit node, 9000/9001/9002 — mihomo); выберите другой, например 8993"
+  fi
+done
 
 # Разобранные порты: элементы вида "tcp 8081" / "udp 51820" / "tcp 8000:8100".
 PORTS=()
@@ -166,29 +214,72 @@ ports_display() {
 # Обе цепочки создаём идемпотентно и сразу чистим: start зовут повторно
 # (systemd restart, ExecStartPost mihomo, повторный запуск установщика).
 ensure_chain() { # ensure_chain <цепочка>
-  iptables -t mangle -nL "$1" >/dev/null 2>&1 || iptables -t mangle -N "$1"
-  iptables -t mangle -F "$1"
+  iptables -w 5 -t mangle -nL "$1" >/dev/null 2>&1 || iptables -w 5 -t mangle -N "$1" \
+    || die "не удалось создать цепочку mangle $1"
+  iptables -w 5 -t mangle -F "$1" || die "не удалось очистить цепочку mangle $1"
 }
 
 remove_jumps() { # remove_jumps <хук> <цепочка> — снять все прыжки, в т.ч. старые
-  while iptables -t mangle -D "$1" -j "$2" 2>/dev/null; do :; done
+  while iptables -w 5 -t mangle -D "$1" -j "$2" 2>/dev/null; do :; done
 }
 
 remove_ip_rule() {
-  # Правил с одним priority может быть несколько (наследие смены метки) —
-  # сносим все, иначе останется мусор на старую метку.
-  while ip rule del priority "$WAN_INGRESS_RULE_PRIO" 2>/dev/null; do :; done
+  # Снимаем только своё правило — точное совпадение метки, таблицы и
+  # приоритета. Удалять "всё с этим priority" нельзя: на том же номере может
+  # стоять чужое правило (пользовательское или другого компонента), и мы бы
+  # снесли его вместе со своим. Цикл нужен на случай дублей от старых версий;
+  # когда точного правила не осталось, ip rule del возвращает ошибку и цикл
+  # завершается.
+  while ip rule del fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" \
+    lookup main priority "$WAN_INGRESS_RULE_PRIO" 2>/dev/null; do :; done
 }
 
 cleanup() {
   remove_jumps PREROUTING "$CHAIN"
   remove_jumps OUTPUT "$OUT_CHAIN"
   # Цепочки может уже не быть (stop дважды подряд) — это не ошибка.
-  iptables -t mangle -F "$CHAIN" 2>/dev/null || true
-  iptables -t mangle -X "$CHAIN" 2>/dev/null || true
-  iptables -t mangle -F "$OUT_CHAIN" 2>/dev/null || true
-  iptables -t mangle -X "$OUT_CHAIN" 2>/dev/null || true
+  iptables -w 5 -t mangle -F "$CHAIN" 2>/dev/null || true
+  iptables -w 5 -t mangle -X "$CHAIN" 2>/dev/null || true
+  iptables -w 5 -t mangle -F "$OUT_CHAIN" 2>/dev/null || true
+  iptables -w 5 -t mangle -X "$OUT_CHAIN" 2>/dev/null || true
   remove_ip_rule
+}
+
+# mark_new — пометить NEW-соединение: MARK на пакет и CONNMARK на соединение.
+# MARK нужен, чтобы уже следующий пакет этого соединения ушёл по правилу
+# fwmark в main (маршрут выбирается после mangle PREROUTING); CONNMARK — чтобы
+# метку получили ответы контейнера через restore-mark. Без аргументов метятся
+# все порты.
+mark_new() { # mark_new [<proto> <порт|диапазон>]
+  local -a match=()
+  if [ "$#" -ge 2 ]; then
+    match=(-p "$1" --dport "$2")
+  fi
+  iptables -w 5 -t mangle -A "$CHAIN" -m conntrack --ctstate NEW \
+    ${match[@]+"${match[@]}"} -j MARK --set-xmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK"
+  iptables -w 5 -t mangle -A "$CHAIN" -m conntrack --ctstate NEW \
+    ${match[@]+"${match[@]}"} -j CONNMARK --set-mark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK"
+}
+
+# ports_include_udp_443 — есть ли в WAN_PORTS udp/443 (или диапазон с ним).
+ports_include_udp_443() {
+  local entry proto port lo hi
+  for entry in ${PORTS[@]+"${PORTS[@]}"}; do
+    proto="${entry%% *}"
+    port="${entry##* }"
+    [ "$proto" = "udp" ] || continue
+    case "$port" in
+      443) return 0 ;;
+      *:*)
+        lo="${port%%:*}"
+        hi="${port##*:}"
+        if [ "$lo" -le 443 ] && [ 443 -le "$hi" ]; then
+          return 0
+        fi
+        ;;
+    esac
+  done
+  return 1
 }
 
 start() {
@@ -203,6 +294,9 @@ start() {
 
   parse_ports || die "WAN_PORTS='${WAN_PORTS}' содержит недопустимые значения — исправьте $ETC/.env"
   validate_mark
+  if [ "$QUIC_DROP" = "yes" ] && ports_include_udp_443; then
+    warn "WAN_PORTS содержит 443/udp при QUIC_DROP=yes: fw-base.sh не режет UDP/443 только для помеченного WAN_INGRESS трафика (mark $WAN_INGRESS_MARK) — убедитесь, что fw-base.sh запущен и метка в .env совпадает"
+  fi
 
   ensure_chain "$CHAIN"
   ensure_chain "$OUT_CHAIN"
@@ -210,60 +304,60 @@ start() {
   # Снимаем все старые прыжки (в т.ч. оставшиеся от прежних версий) и ставим
   # ровно один: иначе пакет проходит цепочку несколько раз.
   remove_jumps PREROUTING "$CHAIN"
-  iptables -t mangle -I PREROUTING 1 -j "$CHAIN"
+  iptables -w 5 -t mangle -I PREROUTING 1 -j "$CHAIN" \
+    || die "не удалось вставить прыжок PREROUTING -> $CHAIN"
 
   remove_jumps OUTPUT "$OUT_CHAIN"
-  iptables -t mangle -I OUTPUT 1 -j "$OUT_CHAIN"
+  iptables -w 5 -t mangle -I OUTPUT 1 -j "$OUT_CHAIN" \
+    || die "не удалось вставить прыжок OUTPUT -> $OUT_CHAIN"
 
   # 1. Восстановление метки — строго первым. Ответ контейнера приходит на
   #    br-интерфейс с приватным src; если нижестоящий RETURN для приватных
   #    сетей сработает раньше, метка потеряется и ответ уйдёт в TUN.
-  iptables -t mangle -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED \
+  iptables -w 5 -t mangle -A "$CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED \
     -j CONNMARK --restore-mark --nfmask "$WAN_INGRESS_MARK" --ctmask "$WAN_INGRESS_MARK"
 
   # 2. Трафик самого mihomo из TUN не метим: иначе соединение, инициированное
   #    через прокси на тот же порт, получит метку, и его ответ пойдёт мимо
   #    прокси (напрямую из main).
   if [ -n "$TUN_IFACE" ]; then
-    iptables -t mangle -A "$CHAIN" -i "$TUN_IFACE" -j RETURN
+    iptables -w 5 -t mangle -A "$CHAIN" -i "$TUN_IFACE" -j RETURN
   fi
 
   # 3. Локальный трафик не является входящим из WAN.
-  iptables -t mangle -A "$CHAIN" -i lo -j RETURN
+  iptables -w 5 -t mangle -A "$CHAIN" -i lo -j RETURN
 
   # 4. Приватные источники — это LAN/VPN/сам хост, а не WAN. RETURN только
   #    для NEW: ESTABLISHED уже обработан restore-mark выше.
   for net in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 \
     100.64.0.0/10 169.254.0.0/16 127.0.0.0/8; do
-    iptables -t mangle -A "$CHAIN" -m conntrack --ctstate NEW -s "$net" -j RETURN
+    iptables -w 5 -t mangle -A "$CHAIN" -m conntrack --ctstate NEW -s "$net" -j RETURN
   done
 
-  # 5. Помечаем новые входящие соединения на опубликованные порты. Метка
-  #    ставится на соединение (CONNMARK), а не на пакет: тогда все пакеты,
-  #    включая ответы, получат её через restore-mark.
+  # 5. Помечаем новые входящие соединения на опубликованные порты: MARK на
+  #    пакет (маршрутизация) + CONNMARK на соединение (ответы и остальные
+  #    пакеты получат метку через restore-mark).
   if [ "${#PORTS[@]}" -gt 0 ]; then
     for entry in "${PORTS[@]}"; do
-      iptables -t mangle -A "$CHAIN" -m conntrack --ctstate NEW \
-        -p "${entry%% *}" --dport "${entry##* }" \
-        -j CONNMARK --set-mark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK"
+      mark_new "${entry%% *}" "${entry##* }"
     done
   else
     # Пустой WAN_PORTS при yes — это "все порты". Опасно и почти всегда
     # ошибка конфигурации, поэтому предупреждаем громко, но не отказываем:
     # пользователь мог сознательно открыть шлюз целиком.
     warn "WAN_PORTS пуст при WAN_INGRESS=yes: помечаются ВСЕ входящие NEW-соединения с не-приватных адресов (рекомендуется перечислить порты)"
-    iptables -t mangle -A "$CHAIN" -m conntrack --ctstate NEW \
-      -j CONNMARK --set-mark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK"
+    mark_new
   fi
 
   # OUTPUT: только восстановление метки для ответов локальных сервисов.
   # NEW-соединения здесь НЕ метим: иначе исходящие соединения самого хоста
   # на этот порт пошли бы мимо mihomo.
-  iptables -t mangle -A "$OUT_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED \
+  iptables -w 5 -t mangle -A "$OUT_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED \
     -j CONNMARK --restore-mark --nfmask "$WAN_INGRESS_MARK" --ctmask "$WAN_INGRESS_MARK"
 
-  # Правило сносим по priority, а не по метке: при смене WAN_INGRESS_MARK
-  # старое правило иначе осталось бы и уводило пакеты со старой меткой.
+  # Правило снимаем точным совпадением (метка + main + priority): при смене
+  # WAN_INGRESS_MARK старое правило иначе осталось бы и уводило пакеты со
+  # старой меткой, а удаление «по priority» снесло бы чужие правила.
   remove_ip_rule
   ip rule add fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" lookup main priority "$WAN_INGRESS_RULE_PRIO"
 
@@ -281,15 +375,47 @@ stop() {
 }
 
 chain_exists() {
-  iptables -t mangle -nL "$1" >/dev/null 2>&1
+  iptables -w 5 -t mangle -nL "$1" >/dev/null 2>&1
+}
+
+# route_dev — имя dev из вывода `ip route get`.
+route_dev() {
+  awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+}
+
+# lan_client_addr — адрес «клиента» в подсети LAN_IFACE для проверки
+# forwarded-маршрута. Последний октет заменяем на .2 (.3, если шлюз сам .2):
+# адрес не обязан существовать, `ip route get` только ищет маршрут. SERVER_IP
+# используется лишь как запасной источник подсети — в from он не подставляется,
+# иначе проверка снова стала бы локальным путём.
+lan_client_addr() {
+  local cidr="" ip last alt
+  if [ -n "$LAN_IFACE" ]; then
+    cidr=$(ip -4 -o addr show dev "$LAN_IFACE" scope global 2>/dev/null \
+      | awk 'NR==1{print $4}')
+  fi
+  if [ -z "$cidr" ] && [[ "$SERVER_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    cidr="$SERVER_IP/24"
+  fi
+  [ -n "$cidr" ] || return 1
+  # В /31 и /32 свободного адреса для клиента нет.
+  case "$cidr" in */3[12]) return 1 ;; esac
+  ip="${cidr%%/*}"
+  [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+  last="${ip##*.}"
+  alt=2
+  if [ "$last" = "2" ]; then
+    alt=3
+  fi
+  printf '%s.%s\n' "${ip%.*}" "$alt"
 }
 
 status() {
   local jumps_pre jumps_out rules ports_human
   parse_ports || warn "WAN_PORTS содержит недопустимые значения"
 
-  jumps_pre=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
-  jumps_out=$(iptables -t mangle -S OUTPUT 2>/dev/null || true)
+  jumps_pre=$(iptables -w 5 -t mangle -S PREROUTING 2>/dev/null || true)
+  jumps_out=$(iptables -w 5 -t mangle -S OUTPUT 2>/dev/null || true)
   rules=$(ip rule show 2>/dev/null || true)
 
   if [ "${#PORTS[@]}" -gt 0 ]; then
@@ -336,19 +462,18 @@ status() {
 
   if chain_exists "$CHAIN"; then
     echo "--- counters $CHAIN ---"
-    iptables -t mangle -L "$CHAIN" -vn 2>/dev/null || true
+    iptables -w 5 -t mangle -L "$CHAIN" -vn 2>/dev/null || true
   fi
   if chain_exists "$OUT_CHAIN"; then
     echo "--- counters $OUT_CHAIN ---"
-    iptables -t mangle -L "$OUT_CHAIN" -vn 2>/dev/null || true
+    iptables -w 5 -t mangle -L "$OUT_CHAIN" -vn 2>/dev/null || true
   fi
   return 0
 }
 
 doctor() {
-  local fails=0 line prio min_2022="" route_out dev_if addr_out ip_present=0 nft_out
-  local rules jumps_pre jumps_out
-  local -a route_args=()
+  local fails=0 line prio min_2022="" route_out dev_if nft_out client=""
+  local rules jumps_pre jumps_out chain_rules
 
   if [ "$WAN_INGRESS" != "yes" ]; then
     echo "OK: WAN_INGRESS=no, доступ из WAN выключен (настраивать нечего)"
@@ -356,9 +481,13 @@ doctor() {
   fi
   echo "OK: WAN_INGRESS=yes"
   validate_mark
+  parse_ports || warn "WAN_PORTS содержит недопустимые значения — проверка 443/udp пропущена"
+  if [ "$QUIC_DROP" = "yes" ] && ports_include_udp_443; then
+    echo "WARN: WAN_PORTS содержит 443/udp при QUIC_DROP=yes — fw-base.sh не режет UDP/443 только для помеченного WAN_INGRESS трафика (mark $WAN_INGRESS_MARK); проверьте, что fw-base.sh запущен и метка в .env совпадает"
+  fi
 
   # 2-3. Цепочки и прыжки.
-  jumps_pre=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+  jumps_pre=$(iptables -w 5 -t mangle -S PREROUTING 2>/dev/null || true)
   if chain_exists "$CHAIN" && [[ "$jumps_pre" == *"-j $CHAIN"* ]]; then
     echo "OK: цепочка $CHAIN есть, прыжок из PREROUTING есть"
   else
@@ -366,11 +495,23 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  jumps_out=$(iptables -t mangle -S OUTPUT 2>/dev/null || true)
+  jumps_out=$(iptables -w 5 -t mangle -S OUTPUT 2>/dev/null || true)
   if chain_exists "$OUT_CHAIN" && [[ "$jumps_out" == *"-j $OUT_CHAIN"* ]]; then
     echo "OK: цепочка $OUT_CHAIN есть, прыжок из OUTPUT есть"
   else
     echo "FAIL: нет цепочки $OUT_CHAIN или прыжка из OUTPUT — ответы локальных сервисов могут уйти в TUN; выполните systemctl restart routeweave-firewall"
+    fails=$((fails + 1))
+  fi
+
+  # 3a. Метки: MARK на пакет (маршрутизация) и CONNMARK на соединение
+  #     (ответы) должны быть в цепочке — одного CONNMARK мало: решение о
+  #     маршруте принимается по метке пакета.
+  chain_rules=$(iptables -w 5 -t mangle -S "$CHAIN" 2>/dev/null || true)
+  if [[ "$chain_rules" == *"-j MARK --set-xmark"* \
+    && "$chain_rules" == *"-j CONNMARK --set-mark"* ]]; then
+    echo "OK: в $CHAIN есть MARK --set-xmark и CONNMARK --set-mark для NEW"
+  else
+    echo "FAIL: в $CHAIN нет MARK --set-xmark и/или CONNMARK --set-mark — помеченные пакеты и их ответы не уйдут в main; выполните systemctl restart routeweave-firewall"
     fails=$((fails + 1))
   fi
 
@@ -405,34 +546,47 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 6. Реальный маршрут помеченного пакета. SERVER_IP добавляем как from,
-  #    только если он действительно есть на интерфейсе: иначе ip route get
-  #    вернёт ошибку на несвязанном адресе.
-  route_args=(route get 1.1.1.1 mark "$WAN_INGRESS_MARK")
-  if [ -n "$SERVER_IP" ]; then
-    addr_out=$(ip -4 -o addr show 2>/dev/null || true)
-    if awk -v ip="$SERVER_IP" '{split($4, a, "/"); if (a[1] == ip) found = 1} END {exit !found}' <<< "$addr_out"; then
-      ip_present=1
-      route_args+=(from "$SERVER_IP")
-    fi
-  fi
-
-  if route_out=$(ip "${route_args[@]}" 2>&1); then
-    dev_if=$(awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' <<< "$route_out")
+  # 6. Маршрут помеченного пакета.
+  #    6a. Локальный путь (без from/iif) — так ходит трафик самого шлюза.
+  #        Это НЕ проверка forwarded-трафика, и в отчёте это сказано явно.
+  if route_out=$(ip route get 1.1.1.1 mark "$WAN_INGRESS_MARK" 2>&1); then
+    dev_if=$(route_dev <<< "$route_out")
     if [ -n "$TUN_IFACE" ] && [ "$dev_if" = "$TUN_IFACE" ]; then
-      echo "FAIL: ip route get 1.1.1.1 mark $WAN_INGRESS_MARK уходит в $dev_if (TUN): метка не работает, ответы сервисов уйдут в mihomo"
+      echo "FAIL: локальный путь (ip route get 1.1.1.1 mark $WAN_INGRESS_MARK) уходит в $dev_if (TUN): метка не работает, ответы сервисов уйдут в mihomo"
       fails=$((fails + 1))
     elif [ -n "$LAN_IFACE" ] && [ "$dev_if" != "$LAN_IFACE" ]; then
-      echo "WARN: помеченный маршрут идёт через ${dev_if:-неизвестный интерфейс}, а LAN_IFACE=$LAN_IFACE — проверьте маршруты (это не обязательно ошибка при нескольких NIC)"
+      echo "WARN: локальный путь (mark $WAN_INGRESS_MARK) идёт через ${dev_if:-неизвестный интерфейс}, а LAN_IFACE=$LAN_IFACE — при нескольких NIC это не обязательно ошибка"
     else
-      echo "OK: ip route get 1.1.1.1 mark $WAN_INGRESS_MARK -> dev ${dev_if:-?}"
-    fi
-    if [ -n "$SERVER_IP" ] && [ "$ip_present" -eq 0 ]; then
-      echo "WARN: SERVER_IP=$SERVER_IP не найден на интерфейсах — проверка from пропущена"
+      echo "OK: локальный путь: ip route get 1.1.1.1 mark $WAN_INGRESS_MARK -> dev ${dev_if:-?} (локальный путь, не forwarded)"
     fi
   else
     echo "FAIL: ip route get 1.1.1.1 mark $WAN_INGRESS_MARK завершился ошибкой: $route_out"
     fails=$((fails + 1))
+  fi
+
+  #    6b. Forwarded-путь: пакет пришёл на LAN_IFACE от клиента (не от шлюза)
+  #        и должен уйти в WAN. from "$SERVER_IP" здесь не годится — это адрес
+  #        самого шлюза, то есть локальный путь; вместо него подставляем адрес
+  #        клиента из подсети LAN_IFACE.
+  client=$(lan_client_addr || true)
+  if [ -z "$LAN_IFACE" ]; then
+    echo "WARN: LAN_IFACE пуст — forwarded-путь не проверен (задайте LAN_IFACE в $ETC/.env)"
+  elif [ -z "$client" ]; then
+    echo "WARN: не удалось подобрать клиентский адрес в $LAN_IFACE — forwarded-путь не проверен; вручную: ip route get 1.1.1.1 iif $LAN_IFACE from <адрес клиента> mark $WAN_INGRESS_MARK (ожидается не $TUN_IFACE)"
+  elif route_out=$(ip route get 1.1.1.1 iif "$LAN_IFACE" from "$client" mark "$WAN_INGRESS_MARK" 2>&1); then
+    dev_if=$(route_dev <<< "$route_out")
+    if [ -n "$TUN_IFACE" ] && [ "$dev_if" = "$TUN_IFACE" ]; then
+      echo "FAIL: forwarded-путь (iif $LAN_IFACE from $client mark $WAN_INGRESS_MARK) уходит в $dev_if (TUN) — проверьте правило $WAN_INGRESS_RULE_PRIO"
+      fails=$((fails + 1))
+    elif [ -n "$LAN_IFACE" ] && [ "$dev_if" != "$LAN_IFACE" ]; then
+      echo "WARN: forwarded-путь идёт через ${dev_if:-неизвестный интерфейс}, а LAN_IFACE=$LAN_IFACE — при нескольких NIC это не обязательно ошибка"
+    else
+      echo "OK: forwarded-путь (iif $LAN_IFACE from $client mark $WAN_INGRESS_MARK) -> dev ${dev_if:-?}, не $TUN_IFACE"
+    fi
+  else
+    # На части ядер ip route get с from+iif отдаёт EINVAL: это ограничение
+    # проверки, а не обязательно поломка маршрутизации.
+    echo "WARN: не удалось проверить forwarded-путь: $route_out"
   fi
 
   # 7. auto-redirect mihomo заворачивает входящий TCP в TUN ещё в PREROUTING
@@ -462,11 +616,11 @@ doctor() {
   # 9. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
   if chain_exists "$CHAIN"; then
     echo "--- counters $CHAIN ---"
-    iptables -t mangle -L "$CHAIN" -vn 2>/dev/null || true
+    iptables -w 5 -t mangle -L "$CHAIN" -vn 2>/dev/null || true
   fi
   if chain_exists "$OUT_CHAIN"; then
     echo "--- counters $OUT_CHAIN ---"
-    iptables -t mangle -L "$OUT_CHAIN" -vn 2>/dev/null || true
+    iptables -w 5 -t mangle -L "$OUT_CHAIN" -vn 2>/dev/null || true
   fi
 
   if [ "$fails" -gt 0 ]; then

@@ -81,11 +81,11 @@ def test_fw_base_cleanup_is_called_and_idempotent():
 
 def test_fw_base_creates_nat_artifacts():
     text = read(FW_BASE)
-    assert 'iptables -t mangle -N "$TS_MARK_CHAIN"' in text
+    assert 'iptables -w 5 -t mangle -N "$TS_MARK_CHAIN"' in text
     assert '--set-xmark "$TS_NAT_MARK/$TS_NAT_MARK"' in text
-    assert 'iptables -t mangle -I PREROUTING 1 -j "$TS_MARK_CHAIN"' in text
-    assert 'iptables -t nat -N "$TS_NAT_CHAIN"' in text
-    assert 'iptables -t nat -I POSTROUTING 1 -j "$TS_NAT_CHAIN"' in text
+    assert 'iptables -w 5 -t mangle -I PREROUTING 1 -j "$TS_MARK_CHAIN"' in text
+    assert 'iptables -w 5 -t nat -N "$TS_NAT_CHAIN"' in text
+    assert 'iptables -w 5 -t nat -I POSTROUTING 1 -j "$TS_NAT_CHAIN"' in text
     assert 'ip rule add fwmark "$TS_NAT_MARK/$TS_NAT_MARK" lookup main priority "$TS_NAT_RULE_PRIO"' in text
     assert "TS_MODE=$TS_EXIT_MODE" in text
 
@@ -130,7 +130,8 @@ def test_fw_tailscale_branches_and_is_read_only():
 
 
 def test_env_example_has_default_mode():
-    assert 'TS_EXIT_MODE="policy"' in read(ENV_EXAMPLE)
+    # Формат .env.example — KEY='value': значение именно в одинарных кавычках.
+    assert "TS_EXIT_MODE='policy'" in read(ENV_EXAMPLE)
 
 
 def test_docs_mention_both_modes():

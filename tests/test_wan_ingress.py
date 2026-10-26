@@ -8,7 +8,7 @@
 
 Сценарий повторяет policy-routing mihomo: таблица 2022 с default dev Meta и
 правило 9002 iif lo lookup 2022. Без маркировки пакет уходит в TUN, с меткой
-0x40000 — в main через правило 8993.
+0x200000 — в main через правило 8993.
 """
 
 import os
@@ -30,7 +30,7 @@ pytestmark = [
 NS = "rwwan"
 REPO = Path(__file__).resolve().parent.parent
 FW_WAN = REPO / "templates" / "fw-wan.sh"
-MARK = "0x40000"
+MARK = "0x200000"
 PRIO = "8993"
 
 
@@ -88,7 +88,7 @@ def write_env(path, wan_ingress="yes"):
         "TUN_IFACE=Meta\n"
         "SERVER_IP=192.168.1.10\n"
         f"WAN_INGRESS={wan_ingress}\n"
-        'WAN_PORTS="8081/tcp 51820/udp"\n'
+        'WAN_PORTS="8081/tcp 51820/udp 443/udp"\n'
         f"WAN_INGRESS_MARK={MARK}\n"
         f"WAN_INGRESS_RULE_PRIO={PRIO}\n",
         encoding="utf-8",
@@ -183,6 +183,45 @@ def test_prerouting_chain_order(started):
     assert any("-p udp" in r and "--dport 51820" in r
                and ("--set-mark" in r or "--set-xmark" in r)
                for r in rules), "нет set-mark для udp/51820"
+
+
+def test_new_connection_gets_both_mark_and_connmark(started):
+    rules = chain_rules("ROUTEWEAVE-WANMARK")
+    for proto, port in (("tcp", "8081"), ("udp", "51820")):
+        matching = [r for r in rules
+                    if f"-p {proto}" in r and f"--dport {port}" in r
+                    and "--ctstate NEW" in r]
+        packet_mark = [r for r in matching
+                       if "-j MARK" in r and f"--set-xmark {MARK}/{MARK}" in r]
+        conn_mark = [r for r in matching
+                     if "-j CONNMARK" in r and f"--set-mark {MARK}/{MARK}" in r]
+        assert packet_mark, f"нет MARK --set-xmark для {proto}/{port}"
+        assert conn_mark, f"нет CONNMARK --set-mark для {proto}/{port}"
+        # MARK должен идти раньше CONNMARK: CONNMARK копирует метку пакета.
+        assert rules.index(packet_mark[0]) < rules.index(conn_mark[0])
+
+
+def test_quic_port_warning(started):
+    # WAN_PORTS в фикстуре содержит 443/udp при QUIC_DROP=yes (дефолт).
+    res = run_fw(started, "doctor")
+    assert "443/udp" in res.stdout, res.stdout
+    res = run_fw(started, "start")
+    assert res.returncode == 0, res.stderr
+    assert "443/udp" in res.stderr, res.stderr
+
+
+def test_doctor_fails_without_ip_rule(started):
+    assert run_fw(started, "start").returncode == 0
+    res = run_fw(started, "stop")
+    assert res.returncode == 0, res.stderr
+
+    res = run_fw(started, "doctor")
+    assert res.returncode != 0, res.stdout
+    assert "FAIL" in res.stdout
+    assert f"{PRIO}" in res.stdout
+
+    # Возвращаем состояние для остальных тестов модуля.
+    assert run_fw(started, "start").returncode == 0
 
 
 def test_output_chain_restore_only(started):
