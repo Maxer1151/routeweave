@@ -1,19 +1,75 @@
 # Routeweave: опциональный компонент tg-ws-proxy (только при INSTALL_TGWS=yes).
 # Требует Docker Engine + compose v2. Ядро шлюза работает без этого файла.
 #
+# ${SERVER_IP} в ports — переменная подстановки compose: она берётся из
+# окружения процесса compose, а НЕ из env_file сервиса (env_file виден только
+# внутри контейнера, и это другой файл — /etc/routeweave/.env.tgws). Именно так
+# и запускает install.sh: переменная передаётся в окружении команды:
+#   SERVER_IP=192.0.2.10 docker compose up -d
+# `--env-file /etc/routeweave/.env` сознательно НЕ используется: install.sh
+# пишет .env в одинарных кавычках с shell-экранированием '\'' (например, в
+# значении SOCKS_URL с паролем), а env-парсер compose (godotenv) не обязан
+# понимать такую запись. Для подстановки нужна ровно одна переменная —
+# SERVER_IP, это IPv4 без спецсимволов. Если она не задана, `:?` останавливает
+# запуск с внятной ошибкой: лучше упасть, чем молча опубликовать порт на
+# 0.0.0.0.
+#
+# Образ запинен по digest индекса (multi-arch), тег v2.5.8 оставлен для
+# читаемости и соответствует этому digest; источник истины — digest.
+# `latest` больше не используется: mutable-тег позволял подменить образ между
+# установками без изменения репозитория (Q-10). Обновление — вручную и
+# осознанно: взять новый digest у upstream
+# (`docker buildx imagetools inspect valnesfjord/tg-ws-proxy-rs:<tag>`), сверить
+# тег с digest, вписать сюда и записать изменение в CHANGELOG.md.
+# `docker compose pull` образ молча не «сдвинет»: при пине по digest он тянет
+# ровно этот digest. Манифесты этого digest:
+#   amd64 sha256:0ac16cec5e405ded0e1f39ba6ce68a89ae3a1ad89173be078dddad73fa1bbd8f
+#   arm64 sha256:0332173e2d22b2216de7d7636a529cd0ec6b3243169bd66c485360c44c83c8b3
+#
 # env_file — отдельный /etc/routeweave/.env.tgws, а не общий /etc/routeweave/.env:
 # контейнеру нужны только TG_SECRET, BASE_DOMAIN, TG_CF_WORKER_DOMAIN и (если
 # задан) TG_PINNED_UPSTREAM. Секреты панели (PANEL_PASS) и mihomo (MIHOMO_SECRET)
 # ему не нужны; чем меньше секретов попадает в `docker inspect`/окружение
-# контейнера, тем лучше. .env.tgws создаёт install.sh (0640 root:root).
+# контейнера, тем лучше. .env.tgws создаёт install.sh с правами 0640 root:root
+# (владелец root, группа root): читать его должен только root, включая docker
+# при старте контейнера. Секреты tg-ws-proxy не должны попадать в общий .env.
+#
+# Healthcheck намеренно отсутствует. Образ distroless: в rootfs только
+# /usr/local/bin/tg-ws-proxy и CA-сертификаты, нет sh, curl, wget, nc, python.
+# Проверить порт 1443 изнутри нечем, а запуск самого бинарника (`--version`) в
+# healthcheck подтверждал бы только работоспособность exec, а не сервиса.
+# Проверка снаружи: nc -z "$SERVER_IP" 1443; статус контейнера:
+# docker inspect -f '{{.State.Status}}' routeweave-tgwsproxy.
 name: routeweave
 
 services:
   tg-ws-proxy:
-    image: valnesfjord/tg-ws-proxy-rs:latest
+    image: valnesfjord/tg-ws-proxy-rs:v2.5.8@sha256:d10285e7735c6b2bd2abbfcdb2a4f133fbc6a601a0aae18fc55a2822d92b7d1e
     container_name: routeweave-tgwsproxy
     restart: unless-stopped
+    stop_grace_period: 10s
     ports:
-      - "1443:1443"
+      # Только LAN-адрес SERVER_IP, не 0.0.0.0: остальной периметр (панель,
+      # mihomo API) тоже слушает SERVER_IP, наружу порт не публикуется (B-05/B-06).
+      - "${SERVER_IP:?SERVER_IP не задан}:1443:1443"
     env_file:
       - /etc/routeweave/.env.tgws
+    # Hardening: контейнеру не нужен ни write-rootfs, ни capabilities. Порт 1443
+    # > 1024, поэтому NET_BIND_SERVICE не требуется; процесс и так uid 1000.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Лимиты для non-swarm (deploy.resources здесь не используется: compose
+    # применяет его только в swarm, а mem_limit/cpus работают и в обычном `up`).
+    mem_limit: 256m
+    pids_limit: 128
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
