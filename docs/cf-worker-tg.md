@@ -29,12 +29,30 @@
 
 ## 3. Подключение к tg-ws-proxy-rs
 
-Панель/конфиг: в `/etc/routeweave/.env` задайте
+В `/etc/routeweave/.env` задайте домен в одинарных кавычках:
 ```
-BASE_DOMAIN=myhome.dpdns.org
+BASE_DOMAIN='myhome.dpdns.org'
 ```
-и `sudo systemctl restart mihomo routeweave-panel` (домен уедет в fake-ip-filter и
-в правило DIRECT, чтобы туннель не заворачивался сам в себя).
+`TG_CF_WORKER_DOMAIN` обычно совпадает с ним; если он пуст, установщик
+подставит `BASE_DOMAIN`.
+
+После смены домена перезапуска юнитов `mihomo` и `routeweave-panel`
+**недостаточно**: `config.yaml` генерируется только установщиком, и в нём
+останутся старые fake-ip-filter и правило `DIRECT`. Из каталога репозитория
+выполните:
+```
+sudo INSTALL_TGWS=yes ./install.sh
+```
+`INSTALL_TGWS=yes` нужен, чтобы установщик перезаписал `/etc/routeweave/.env.tgws`
+новым доменом; существующий `TG_SECRET` он возьмёт из `.env`. Установщик
+перегенерирует `config.yaml` из `.env` и перезапустит юниты ядра. Проверка:
+```
+sudo mihomo -d /etc/routeweave -t
+systemctl status mihomo routeweave-panel
+sudo grep -n 'myhome.dpdns.org' /etc/routeweave/config.yaml
+```
+В `config.yaml` домен должен быть в `fake-ip-filter` и в правиле
+`DOMAIN-SUFFIX,...,DIRECT`, чтобы туннель не заворачивался сам в себя.
 
 Дальше — по документации tg-ws-proxy-rs (docs/Deployment.md в репозитории
 valnesfjord/tg-ws-proxy-rs). Без явного пина прокси сначала пробует прямой
@@ -56,7 +74,7 @@ TCP-соединение вообще не устанавливается, mihom
 `/etc/routeweave/.env.tgws` (и дублирует в общий `.env`) строку, которую прокси
 читает как `--pinned-upstream`:
 ```
-TG_PINNED_UPSTREAM="cfworker,ws,tcp"
+TG_PINNED_UPSTREAM='cfworker,ws,tcp'
 ```
 Порядок: CF Worker → прямой WS → TCP. Медиа-трафик наследует non-media пин.
 Если домен CF Worker не задан, ключ не пишется вовсе: пустой список тиров для
@@ -72,12 +90,18 @@ sudo INSTALL_TGWS=yes TG_PINNED_UPSTREAM="ws,cfworker,tcp" ./install.sh
 
 Как поправить уже установленный прокси без переустановки. Добавьте или измените
 строку в `/etc/routeweave/.env.tgws` (на старых установках, где compose читает
-общий `/etc/routeweave/.env`, — туда) и пересоздайте контейнер:
+общий `/etc/routeweave/.env`, — туда) и пересоздайте контейнер из каталога
+репозитория:
 ```
-sudo docker compose up -d --force-recreate
+sudo SERVER_IP=192.168.1.10 docker compose up -d --force-recreate
 ```
-Именно `--force-recreate`, а не `docker restart`: `env_file` читается при
-создании контейнера, при рестарте новые значения не подхватятся.
+`SERVER_IP` — адрес шлюза из вашего `.env` (IPv4); он передаётся в окружении
+процесса. `--env-file` не используется, чтобы compose не разбирал `.env` с
+shell-экранированием (`'\''`): env-парсер compose не обязан понимать такую
+запись и может упасть на значении с апострофом — например, в `SOCKS_URL`.
+Сам контейнер получает переменные из `/etc/routeweave/.env.tgws` через
+`env_file:`. Именно `--force-recreate`, а не `docker restart`: `env_file`
+читается при создании контейнера, при рестарте новые значения не подхватятся.
 
 Проверка. В логах сразу после старта должно быть `pinned → CF Worker connected`
 и не должно быть `WS DC2 timed out`:

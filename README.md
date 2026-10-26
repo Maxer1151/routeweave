@@ -10,8 +10,9 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 
 - Маршрутизация по доменам: отдельные списки для geo (SOCKS), dpi (zapret) и RU-направления.
 - fake-ip DNS на порту 53 и правила mihomo на файловых rule-provider'ах.
-- Firewall: отдельная цепочка `ROUTEWEAVE-FWD`, forwarding для LAN и VPN,
-  опциональный drop QUIC выше разрешающих правил.
+- Firewall: отдельные цепочки `ROUTEWEAVE-IN` (вход на шлюз) и
+  `ROUTEWEAVE-FWD` (forwarding для LAN, VPN и tailnet), опциональный drop QUIC
+  выше разрешающих правил.
 - Tailscale как третий вход: сервер работает как exit node, `tailscale0`
   получает ту же политику, что LAN и WDTT.
 - Автообновление списков по systemd-таймеру.
@@ -40,7 +41,7 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
   из `dpi.txt`.
 - **Списки доменов** — `/etc/routeweave/lists/`: geo, dpi, ru-direct и custom-файлы.
 - **Панель (FastAPI)** — статусы сервисов, пробы путей, редактор списков,
-  перезапуски; Basic-авторизация.
+  перезапуски; Basic-авторизация, один воркер, адрес прослушивания `PANEL_BIND`.
 - **Firewall** — `fw-base.sh` / `fw-wan.sh` / `fw-nfq.sh` / `fw-tailscale.sh`,
   systemd-юниты, policy-routing для WDTT и Tailscale.
 
@@ -54,7 +55,9 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 
 ## Требования
 
-- Ubuntu 20.04+ или Debian 12+, архитектура amd64/arm64, ≥1 ГБ RAM, ≥3 ГБ диска.
+- Ubuntu 22.04+ или Debian 12+, Python 3.10+, архитектура amd64/arm64,
+  ≥1 ГБ RAM, ≥3 ГБ диска. Более старые выпуски с Python 3.8 не
+  поддерживаются: панели и генератору конфига нужен 3.10+.
 - Одна NIC за роутером, статичный или зарезервированный в DHCP LAN-IP.
 - Доступ к github.com (mihomo, zashboard, zapret, WDTT-Plus).
 - Для Telegram-прокси: заранее установленные Docker Engine и compose v2.
@@ -77,10 +80,16 @@ sudo env INSTALL_TAILSCALE=yes bash install.sh  # + Tailscale exit node
 ```
 
 `--defaults` ставит только ядро; tgws, WDTT и Tailscale по умолчанию
-выключены. Установщик
-не перезаписывает существующие `.env` и live-списки. Повторный запуск обновляет
-mihomo до свежего релиза (если версия отличается), юниты и конфиги, но сохраняет
-`.env` и списки.
+выключены. Версии mihomo, zashboard, WDTT и zapret закреплены в `install.sh`
+вместе с sha256/коммитом, а не берутся «последним релизом». Повторный запуск
+после `git pull` обновляет управляемые ключи `/etc/routeweave/.env` (сначала
+делает бэкап `$ETC/.env.bak.YYYYmmdd-HHMMSS`, `0600 root:root`), чужие ключи и
+комментарии сохраняет, перегенерирует `config.yaml`, обновляет юниты и
+перезапускает ядро: `routeweave-firewall`, `mihomo`, `zapret-nfqws` и
+`routeweave-panel` (юниты перезапускаются, а не только перечитывают конфиг).
+Поэтому исправление безопасности применяется без ручного
+`systemctl restart`, но результат стоит проверить через `systemctl status`.
+Списки и `zapret.conf` сохраняются.
 
 Если на шлюзе активен ufw, установщик открывает доступ из LAN и `WG_SUBNET`
 к `53/tcp+udp`, `7890/tcp`, `9090/tcp`, `PANEL_PORT/tcp` и `1443/tcp` (при
@@ -88,36 +97,59 @@ mihomo до свежего релиза (если версия отличает�
 `wdtt0`. При `INSTALL_TAILSCALE=yes` или уже установленном Tailscale
 добавляются правила для `tailscale0`, `100.64.0.0/10` и `41641/udp`, а
 forwarding разрешён для tailnet. Правила добавляются идемпотентно, повторный
-запуск дублей не создаёт.
+запуск дублей не создаёт. Независимо от ufw вход на сам шлюз ограничивает
+цепочка `ROUTEWEAVE-IN` (прыжок в `INPUT 1`): политика `INPUT` не меняется,
+но панель, API mihomo, DNS и прокси открыты только из доверенных зон.
 
 ## Параметры `.env`
 
 Файл `/etc/routeweave/.env` создаётся с правами `0640 root:routeweave`:
-читать его могут только root и сервисный пользователь панели. Секреты
-генерирует установщик, в консоль они не печатаются.
+читать его могут только root и сервисный пользователь панели. Значения
+записываются в одинарных кавычках (`KEY='value'`), апостроф внутри значения —
+`'\''`. Файл — данные, а не shell-скрипт: `install.sh`, апдейтер списков и
+панель разбирают его построчно (`env_get`/shlex-подобный парсер), `source` и
+`eval` в установщике и апдейтере не используются. Секреты генерирует
+установщик; в консоль они не печатаются, кроме сгенерированного `PANEL_PASS`
+в итоговой сводке — его нужно один раз передать пользователю. `MIHOMO_SECRET`,
+`TG_SECRET` и `SOCKS_URL` остаются только в файле.
+
+Повторная установка делает бэкап `$ETC/.env.bak.YYYYmmdd-HHMMSS`
+(`0600 root:root`) и обновляет (upsert) все управляемые ключи значениями из
+ответов и окружения; незнакомые ключи и комментарии сохраняются.
 
 | Ключ | Назначение |
 |---|---|
 | `LAN_IFACE` | LAN-интерфейс сервера (единственная NIC) |
 | `SERVER_IP` | LAN-IP сервера, статичный или зарезервированный в DHCP |
-| `SOCKS_URL` | Внешний прокси для geo: `socks5h://` (имя резолвит прокси), `socks5://`, `socks://`, `http://`, `https://`; пусто = гео напрямую |
+| `SOCKS_URL` | Внешний прокси для geo: `socks5h://` (имя резолвит прокси), `socks5://`, `socks://`, `http://`; `https://` отклоняется — TLS к прокси не поддерживается; пусто = гео напрямую |
+| `PANEL_BIND` | Адрес прослушивания панели; по умолчанию `SERVER_IP`, если он пуст — `127.0.0.1` |
+| `PANEL_PORT` | Порт веб-панели, по умолчанию `8080` |
+| `PANEL_ALLOWED_HOSTS` | Доп. hostname/IP через запятую для проверки заголовка `Host`. Пусто **не** означает «любые»: всегда разрешены `SERVER_IP`, `localhost`, `127.0.0.1`, `::1`; неизвестный `Host` получает `421` |
+| `PANEL_RATE_LIMIT` | Лимит запросов `N/M` (N за M секунд), по умолчанию `120/60` |
+| `PANEL_AUTH_RATE_LIMIT` | Отдельный лимит на неуспешный Basic-auth, по умолчанию `10/60`; в `.env` пишется вручную |
+| `PANEL_TLS` | `yes`, если панель отдаётся по https через reverse-proxy: меняет только ожидаемую схему в сравнении `Origin`/`Referer` при CSRF-проверке. Встроенного TLS нет |
+| `PANEL_USER` | Логин панели, по умолчанию `admin` |
+| `PANEL_PASS` | Пароль панели; генерируется установщиком, печатается один раз в итоговой сводке |
+| `MIHOMO_API` | Адрес API mihomo для панели и апдейтера; по умолчанию `http://MIHOMO_BIND:9090` (пустой `MIHOMO_BIND` = `SERVER_IP`, `0.0.0.0` заменяется на `127.0.0.1`) |
+| `MIHOMO_BIND` | Адрес external-controller и `bind-address` mihomo, по умолчанию `SERVER_IP`; `0.0.0.0` допустим только осознанно (установщик предупреждает) |
+| `MIHOMO_ALLOW_LAN` | `no` по умолчанию: mixed-port `7890` не доступен из LAN; `yes` включает `allow-lan` |
+| `MIHOMO_TUN_MTU` | MTU TUN mihomo, по умолчанию `1280`; допустимо 576..9000 |
+| `DNS_BIND` | Адрес DNS-листенера mihomo (порт 53), по умолчанию `SERVER_IP` |
+| `SSH_PORT` | Порт SSH хоста, по умолчанию `22`; 1..65535. Используется правилом firewall и подсказками панели |
+| `MIHOMO_SECRET` | Секрет API mihomo; генерируется установщиком |
 | `BASE_DOMAIN` | Домен CF Worker для tg-ws-proxy |
 | `TG_CF_WORKER_DOMAIN` | Домен CF Worker (обычно совпадает с `BASE_DOMAIN`) |
 | `TG_PINNED_UPSTREAM` | Порядок апстримов tg-ws-proxy (`--pinned-upstream`), тиры через запятую: `ws`, `cfworker`, `cfproxy`, `mtproto`, `tcp`. Пишет установщик: по умолчанию `cfworker,ws,tcp`, если задан домен CF Worker; переопределяется одноимённой переменной окружения при установке (`TG_PINNED_UPSTREAM=... ./install.sh`); пусто = порядок прокси по умолчанию |
 | `TG_LINK_IP` | IP/хост для `tg://`-ссылки в панели; пусто = `SERVER_IP` |
+| `TG_SECRET` | Секрет MTProto-прокси; только при `INSTALL_TGWS=yes` |
 | `WG_SUBNET` | Подсеть клиентов WDTT (`wdtt0`), по умолчанию `10.66.66.0/24`; policy-routing — `ip rule` priority 8990 |
 | `TS_IFACE` | Интерфейс Tailscale, по умолчанию `tailscale0`; установщик не пишет, можно добавить вручную |
 | `TS_SUBNET` | Подсеть tailnet, по умолчанию `100.64.0.0/10`; установщик не пишет, можно добавить вручную |
 | `TS_EXIT_MODE` | Режим exit node: `policy` — трафик tailnet идёт через TUN mihomo (geo/DPI), `nat` — прямой NAT в WAN (быстрее, но без geo/DPI, источник маскарадится); по умолчанию `policy`, установщик не пишет |
 | `WAN_INGRESS` | `yes` — включить доступ из WAN к опубликованным портам; по умолчанию `no` |
 | `WAN_PORTS` | Порты для WAN-доступа: `8081`, `8081/tcp`, `51820/udp`, диапазоны `8000:8100/tcp` / `8000-8100/tcp`; голое число = tcp |
-| `WAN_INGRESS_MARK` | Метка connmark для WAN-доступа, по умолчанию `0x40000`; не должна пересекаться с метками mihomo/docker; при Tailscale задайте `0x200000` |
-| `WAN_INGRESS_RULE_PRIO` | Приоритет `ip rule` для помеченных пакетов, по умолчанию `8993`; должен быть меньше 9000 |
-| `PANEL_PORT` | Порт веб-панели, по умолчанию `8080` |
-| `PANEL_USER` | Логин панели, по умолчанию `admin` |
-| `PANEL_PASS` | Пароль панели; генерируется установщиком |
-| `MIHOMO_SECRET` | Секрет API mihomo; генерируется установщиком |
-| `TG_SECRET` | Секрет MTProto-прокси; только при `INSTALL_TGWS=yes` |
+| `WAN_INGRESS_MARK` | Метка connmark для WAN-доступа, по умолчанию `0x200000`. `0x40000` (tailscale subnet-route), `0x80000` (zapret), `0x100000` (NAT exit node) и `0x0` запрещены |
+| `WAN_INGRESS_RULE_PRIO` | Приоритет `ip rule` для помеченных пакетов, по умолчанию `8993`; `8990`, `8991`, `8992`, `9000`, `9001`, `9002` зарезервированы и отвергаются |
 | `QUIC_DROP` | Резать UDP/443: `yes`/`no` |
 | `FAKEIP_EXTRA` | Доп. записи в fake-ip-filter через запятую |
 
@@ -129,17 +161,24 @@ forwarding разрешён для tailnet. Правила добавляютс�
 | `INSTALL_TGWS` | `yes`/`no` — ставить tg-ws-proxy; по умолчанию `no`, `--defaults` — `no` |
 | `INSTALL_TAILSCALE` | `yes`/`no` — поставить Tailscale и настроить exit node; по умолчанию `no`, `--defaults` — `no` |
 | `TS_AUTHKEY_FILE` | файл с ключом авторизации Tailscale на время установки; предпочтительнее `TS_AUTHKEY`; в `.env` не пишется |
-| `ZAPRET_REF` | Ветка/тег zapret при клонировании и обновлении, по умолчанию `master`; фактический коммит пишется в `/etc/routeweave/zapret.commit` |
-| `MIHOMO_SHA256` | Ожидаемая sha256 архива mihomo, если апстрим не публикует `<url>.sha256` |
-| `ZASHBOARD_SHA256` | То же для `dist.zip` zashboard |
+| `TS_AUTHKEY` | ключ авторизации строкой; только на время установки, временный файл `0600` удаляется |
+| `ZAPRET_REF` | ref zapret при клонировании и обновлении; по умолчанию закреплённый 40-hex commit. Ветка/тег — осознанный override с предупреждением, фактический HEAD сверяется и пишется в `/etc/routeweave/zapret.commit` |
+| `ALLOW_UNVERIFIED` | `yes` — пропустить проверку sha256 скачанных архивов (эквивалент `--allow-unverified`); только для отладки, громко предупреждает. Проверку коммита zapret не отключает |
 
 `INSTALL_*` читаются из окружения или запрашиваются интерактивно; при
 `--defaults` вопросы не задаются. Ключ Tailscale (`TS_AUTHKEY_FILE` или
 `TS_AUTHKEY`) действует только на время установки и не сохраняется в
 `/etc/routeweave/.env`.
 
-Если контрольная сумма недоступна ни у апстрима, ни в переменной, установщик
-предупреждает, что целостность загрузки не проверена.
+Скачанные mihomo, zashboard и WDTT сверяются с sha256, зашитыми в `install.sh`;
+без совпадения установка останавливается. Архивы zashboard и WDTT
+распаковываются в `mktemp`, симлинки, setuid и абсолютные пути/`..`
+отклоняются, замена каталога атомарная. zapret собирается из закреплённого
+коммита; `ZAPRET_REF` с веткой или тегом — осознанный override с
+предупреждением, фактический HEAD всё равно сверяется и пишется в
+`/etc/routeweave/zapret.commit`. `--allow-unverified`/`ALLOW_UNVERIFIED=yes`
+отключает только проверку архивов и громко предупреждает; проверку коммита
+zapret он не отключает.
 
 ## После установки
 
@@ -158,7 +197,8 @@ forwarding разрешён для tailnet. Правила добавляютс�
 6. **Tailscale (если ставили).** Одобрите шлюз как exit node в admin console
    (**Machines** → **Edit exit node** → **Use as exit node**) и настройте DNS
    tailnet: **Use with exit node** и nameserver `100.x.y.z` (см. раздел
-   «Опционально: Tailscale»).
+   «Опционально: Tailscale»). DNS через fake-ip работает только при
+   `TS_EXIT_MODE=policy`; в режиме `nat` запросы уходят в WAN напрямую.
 
 ## Автообновление списков
 
@@ -187,12 +227,42 @@ journalctl -u routeweave-lists-update -n 50
 
 ## Панель
 
-Панель закрыта Basic-авторизацией (`PANEL_USER` / `PANEL_PASS`). Она работает
-от системного пользователя `routeweave`, а привилегированные действия
-(перезапуск mihomo/zapret/панели, обновление списков, управление tgws)
+Панель закрыта Basic-авторизацией (`PANEL_USER` / `PANEL_PASS`). Она слушает
+`PANEL_BIND` (по умолчанию `SERVER_IP`, иначе `127.0.0.1`) и работает ровно в
+одном воркере: состояние заданий и кэш `/api/status` живут в памяти процесса,
+multi-worker не поддерживается. Юнит ограничен `MemoryMax=256M` и `TasksMax=64`.
+Панель работает от системного пользователя `routeweave`, а привилегированные
+действия (перезапуск mihomo/zapret/панели, обновление списков, управление tgws)
 выполняются через `sudo -n` строго по allowlist из
-`/etc/sudoers.d/routeweave-panel` — без wildcard. Изменяющие запросы защищены
-от CSRF, ответы отдаются с CSP и security-заголовками. Вкладки:
+`/etc/sudoers.d/routeweave-panel` — без wildcard.
+
+Проверка `Host` идёт до аутентификации: разрешены только `SERVER_IP`,
+`localhost`, `127.0.0.1`, `::1` и значения из `PANEL_ALLOWED_HOSTS`; запрос с
+другим `Host` получает `421`. Лимит запросов задаёт `PANEL_RATE_LIMIT`
+(`120/60` по умолчанию), неуспешный Basic-auth ограничен отдельно
+`PANEL_AUTH_RATE_LIMIT` (`10/60`); превышение — `429`. Тело списка больше
+200 КБ отклоняется с `413`, в том числе при chunked-передаче. `/api/status`
+кэшируется на 3 секунды и считает статус один раз (single-flight); при
+переполнении одновременных запросов — `429`.
+
+Изменяющие запросы (`POST`/`PUT`/`DELETE`/`PATCH`) защищены fail-closed: нужен
+совпадающий `Origin`/`Referer`, либо `Sec-Fetch-Site: same-origin|none`, либо —
+если браузерных заголовков нет — `X-Requested-With: Routeweave`. Иначе `403`.
+Для ручного вызова из curl добавьте этот заголовок:
+
+```bash
+curl -u admin:ПАРОЛЬ -X PUT \
+  -H 'X-Requested-With: Routeweave' \
+  --data-binary @dpi.txt \
+  http://SERVER_IP:PANEL_PORT/api/lists/dpi
+```
+
+Ответы отдаются с CSP (`frame-ancestors 'none'`, `object-src 'none'`),
+`Permissions-Policy`, COOP/CORP; inline-скрипты и стили запрещены. Домены в
+списках проверяются по меткам: дефис в начале или конце метки (`a-.com`)
+отклоняется.
+
+Вкладки:
 
 - `geo-custom (→ SOCKS)` — пишет `geo-custom.txt`;
 - `dpi (→ zapret)` — пишет `dpi.txt`;
@@ -202,9 +272,9 @@ journalctl -u routeweave-lists-update -n 50
 mihomo» запускает апдейтер (для `dpi` — перезапуск `zapret-nfqws`); применение
 выполняется в фоне, прогресс отдаёт `GET /api/jobs/apply`. Подсказка в панели
 напоминает, что `geo.txt` и `ru-direct.txt` генерируются таймером, поэтому
-править нужно custom-списки и `dpi.txt`. Zashboard открывается
-по `http://SERVER_IP:9090/ui/` и работает под отдельной CSP, разрешающей
-запросы к API mihomo на другом порту.
+править нужно custom-списки и `dpi.txt`. Zashboard панель не раздаёт: его
+отдаёт сам mihomo по `http://SERVER_IP:9090/ui/`, это отдельный origin, и CSP
+панели на него не распространяется.
 
 При заданном `TG_SECRET` панель показывает готовую ссылку
 `tg://proxy?server=<TG_LINK_IP|SERVER_IP>&port=1443&secret=<TG_SECRET>`.
@@ -239,6 +309,16 @@ CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
 новая сессия платит 2–5 с за заведомо недоступный прямой WS — подробности в
 [`docs/cf-worker-tg.md`](docs/cf-worker-tg.md). Без этого компонента ядро
 работает как обычно.
+
+Образ запинен по digest
+(`valnesfjord/tg-ws-proxy-rs:v2.5.8@sha256:d10285e7…`), контейнер запускается
+с `read_only`, `cap_drop: ALL`, `no-new-privileges`, лимитами памяти/pids/CPU
+и ротацией логов. Порт публикуется как `${SERVER_IP}:1443:1443`, а не на
+`0.0.0.0`. Docker при этом всё равно вставляет свои правила в `DOCKER-USER`,
+которыми Routeweave не управляет: если `SERVER_IP` — публичный адрес или
+роутер пробрасывает `1443`, прокси будет доступен извне. Не пробрасывайте
+`1443` на роутере; полноценное ограничение `DOCKER-USER` отложено (см.
+`TODO.md`).
 
 ## Опционально: WDTT-Plus
 
@@ -297,7 +377,8 @@ sudo tailscale up --advertise-exit-node --netfilter-mode=nodivert --accept-dns=f
 
 `nodivert` обязателен: иначе Tailscale вставляет свои цепочки `ts-*`, помечает
 пакеты меткой `0x40000` и делает MASQUERADE, что конфликтует с policy-routing
-mihomo и `WAN_INGRESS_MARK` (тоже `0x40000`).
+mihomo. Метка `0x40000` зарезервирована за tailscale subnet-route, а
+`WAN_INGRESS_MARK` по умолчанию `0x200000`, поэтому эти метки не пересекаются.
 
 Одобрение: admin console → **Machines** → у сервера **Edit exit node** →
 **Use as exit node**. При кастомных ACL нужен grant на `autogroup:internet`.
@@ -327,17 +408,26 @@ mihomo. С nameserver клиент получает fake-ip `198.18.x.x`, и р�
 доменные правила geo/dpi/ru. DoH в браузерах и Private DNS на Android
 отключите: иначе приложения ходят мимо системного DNS.
 
+**Важно:** эта схема (nameserver на `100.x.y.z:53` плюс fake-ip) работает
+только при `TS_EXIT_MODE=policy`. В режиме `nat` трафик tailnet-клиентов идёт
+напрямую в WAN, fake-ip DNS не применяется, и доменные правила geo/dpi/ru для
+них не работают. Либо используйте `policy`, либо настраивайте DNS напрямую
+(без расчёта на fake-ip). Это известное ограничение (NET-08).
+
 Сервисы по tailscale-адресу: панель `http://100.x.y.z:PANEL_PORT`, zashboard
 `http://100.x.y.z:9090/ui/`, DNS `100.x.y.z:53`, mixed-proxy
-`100.x.y.z:7890`. Порты те же, что у LAN; при активном ufw их открывает
-`install.sh`: правила для `tailscale0`, `100.64.0.0/10` и `41641/udp`
-добавляются, если Tailscale установлен, в том числе только что. Если
-Tailscale поставлен позже, повторите `sudo bash install.sh` — правила ufw
-добавятся; повторный запуск идемпотентен.
+`100.x.y.z:7890` (последний доступен только при `MIHOMO_ALLOW_LAN=yes`).
+Порты те же, что у LAN. Вход на шлюз ограничивает цепочка `ROUTEWEAVE-IN`:
+порты открыты из `tailscale0`, `100.64.0.0/10`, `LAN_IFACE`, `wdtt0` и
+`WG_SUBNET`. При активном ufw `install.sh` дополнительно добавляет правила для
+`tailscale0`, `100.64.0.0/10` и `41641/udp`, если Tailscale установлен, в том
+числе только что. Если Tailscale поставлен позже, повторите
+`sudo bash install.sh` — правила добавятся; повторный запуск идемпотентен.
 
-После обновления Routeweave достаточно повторить `sudo bash install.sh` и
-`sudo systemctl restart routeweave-firewall`: пакет не переустанавливается,
-состояние Tailscale сохраняется.
+После обновления Routeweave достаточно повторить `sudo bash install.sh`: он
+перегенерирует `config.yaml`, обновит правила и перезапустит юниты ядра;
+пакет Tailscale не переустанавливается, состояние сохраняется. Проверьте
+`systemctl status` и `fw-tailscale.sh doctor`.
 
 Диагностика:
 
@@ -350,10 +440,11 @@ journalctl -u tailscaled -n 50
 Ограничения: policy-режим идёт через userspace-стек mihomo (ниже пропускная
 способность, выше нагрузка на CPU); в режиме `nat` нет geo/SOCKS/DPI-политики
 mihomo для tailnet (zapret на WAN-egress продолжает работать), а источник в
-LAN маскарадится; IPv6 не поддерживается; `QUIC_DROP=yes` режет UDP/443 и у
-tailnet-клиентов; fake-ip `198.18.0.0/16` может конфликтовать с другим прокси
-на клиенте. При `WAN_INGRESS=yes` метка по умолчанию `0x40000` совпадает с
-меткой Tailscale — задайте `WAN_INGRESS_MARK="0x200000"`.
+LAN маскарадится; DNS на `100.x.y.z` с fake-ip имеет смысл только в `policy`;
+IPv6 не поддерживается; `QUIC_DROP=yes` режет UDP/443 и у tailnet-клиентов;
+fake-ip `198.18.0.0/16` может конфликтовать с другим прокси на клиенте.
+`WAN_INGRESS_MARK` по умолчанию `0x200000` и с меткой Tailscale `0x40000` не
+конфликтует; `0x40000` вручную задавать нельзя.
 
 Подробности, DNS и ограничения — в
 [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md).
@@ -362,16 +453,19 @@ tailnet-клиентов; fake-ip `198.18.0.0/16` может конфликто�
 
 | Порт | Протокол | Назначение |
 |---|---|---|
-| 53 | TCP + UDP | DNS mihomo (fake-ip) |
-| 8080 | TCP | Веб-панель (`PANEL_PORT`) |
-| 9090 | TCP | mihomo API и zashboard |
-| 7890 | TCP | mixed-proxy mihomo (`allow-lan`) |
-| 1443 | TCP | tg-ws-proxy (опц.) |
+| 53 | TCP + UDP | DNS mihomo (fake-ip), `DNS_BIND` |
+| 8080 | TCP | Веб-панель (`PANEL_PORT`, слушает `PANEL_BIND`) |
+| 9090 | TCP | mihomo API и zashboard (`MIHOMO_BIND`) |
+| 7890 | TCP | mixed-proxy mihomo; из LAN только при `MIHOMO_ALLOW_LAN=yes` |
+| 1443 | TCP | tg-ws-proxy (опц.), публикуется на `SERVER_IP` |
 | 56000 | UDP | WDTT-Plus DTLS (опц.) |
 | 41641 | UDP | Tailscale, прямые соединения (опц.) |
 
-Порты `53`, `8080`, `9090`, `7890` и `1443` — только LAN/WG/tailnet, наружу их
-пробрасывать нельзя. `56000/udp` при использовании WDTT-Plus, наоборот,
+Порты `53`, `8080`, `9090`, `7890` и `1443` — только LAN/WG/tailnet, наружу
+их пробрасывать нельзя. Вход на `53`, `8080`, `9090` и `7890` дополнительно
+ограничен цепочкой `ROUTEWEAVE-IN`; `1443` публикует Docker на `SERVER_IP`, и
+его периметр держат правила Docker/ufw, а не `ROUTEWEAVE-IN` (см. раздел про
+tg-ws-proxy). `56000/udp` при использовании WDTT-Plus, наоборот,
 пробрасывается снаружи, иначе телефон не подключится. `41641/udp` нужен только
 для прямых соединений Tailscale: если шлюз за роутером, пробросьте порт на
 роутере, иначе соединения пойдут через DERP-релей.
@@ -388,15 +482,16 @@ IP) попадает в правило `9002` и уходит в TUN, поэто
 `9001` с `suppress_prefixlength 0` отдаёт connected-маршруты из `main`.
 
 Для WAN используется маркировка соединений: входящее NEW-соединение на
-указанные порты получает connmark, на всех пакетах соединения (включая ответы
-сервиса) метка восстанавливается, а `ip rule` с приоритетом `8993` уводит
-помеченные пакеты в `main` раньше правил mihomo `9001`/`9002`.
+указанные порты получает и метку пакета (`MARK`), и `CONNMARK`; на всех пакетах
+соединения (включая ответы сервиса) метка восстанавливается, а `ip rule` с
+приоритетом `8993` уводит помеченные пакеты в `main` раньше правил mihomo
+`9001`/`9002`.
 
 Включение:
 
 ```bash
-sudo sed -i 's/^WAN_INGRESS=.*/WAN_INGRESS="yes"/' /etc/routeweave/.env
-sudo sed -i 's/^WAN_PORTS=.*/WAN_PORTS="8081 51820\/udp"/' /etc/routeweave/.env
+sudo sed -i "s/^WAN_INGRESS=.*/WAN_INGRESS='yes'/" /etc/routeweave/.env
+sudo sed -i "s|^WAN_PORTS=.*|WAN_PORTS='8081 51820/udp'|" /etc/routeweave/.env
 sudo systemctl restart routeweave-firewall
 sudo /etc/routeweave/fw-wan.sh status
 ```
@@ -412,7 +507,7 @@ sudo /etc/routeweave/fw-wan.sh status
 `RETURN` для приватных сетей срабатывал раньше, метка бы не восстановилась и
 ответ снова ушёл бы в TUN.
 
-Выключение — `WAN_INGRESS="no"` и `sudo systemctl restart routeweave-firewall`:
+Выключение — `WAN_INGRESS='no'` и `sudo systemctl restart routeweave-firewall`:
 `fw-wan.sh start` при выключенном флаге сам снимает цепочки, прыжки и правило
 `8993`. Отдельный `fw-wan.sh stop` делает то же самое.
 
@@ -425,11 +520,11 @@ sudo /etc/routeweave/fw-wan.sh status
 
 Диагностика — `sudo /etc/routeweave/fw-wan.sh doctor`: проверяет цепочки и
 прыжки, наличие правила `8993`, что его приоритет меньше правил таблицы
-`2022`, что `ip route get 1.1.1.1 mark 0x40000` уходит не в TUN, а также
-предупреждает о `redirect` в nftables и `auto-redirect: true` в
-`config.yaml`. При `auto-redirect` mihomo перехватывает входящий TCP ещё до
-маркировки; если WAN-доступ не работает, поставьте `auto-redirect: false` и
-перезапустите mihomo.
+`2022`, что forwarded-путь помеченного пакета (от адреса клиента в `LAN_IFACE`,
+а не от `SERVER_IP`) уходит не в TUN, а также предупреждает о `redirect` в
+nftables и `auto-redirect: true` в `config.yaml`. При `auto-redirect` mihomo
+перехватывает входящий TCP ещё до маркировки; если WAN-доступ не работает,
+поставьте `auto-redirect: false` и перезапустите mihomo.
 
 Оба WARN, про `redirect` и `auto-redirect`, — ожидаемая картина на рабочей
 установке, а не признак поломки. Таблица `2022` и правила `9001`/`9002`,
@@ -453,26 +548,52 @@ reverse-proxy: открывайте только те порты, которые
 - Панель рассчитана на доверенную LAN. Не выставляйте `8080`, `9090`, `1443`,
   `7890` и `53` в интернет; при необходимости удалённого доступа — VPN (в том
   числе tailnet) или reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
-- `.env` создаётся с правами `0640 root:routeweave`. Контейнер tg-ws-proxy
+- `.env` — данные, а не shell: значения в одинарных кавычках, `install.sh`,
+  апдейтер и панель разбирают файл построчно и не исполняют его. Права
+  `0640 root:routeweave`; при повторной установке создаётся бэкап
+  `.env.bak.YYYYmmdd-HHMMSS` с `0600 root:root`. Контейнер tg-ws-proxy
   получает только переменные из своего `.env.tgws` и не видит секретов
   панели и mihomo.
 - Панель работает от пользователя `routeweave`; root-доступ — только через
   `sudo -n` по allowlist `/etc/sudoers.d/routeweave-panel`, без wildcard.
 - `NoNewPrivileges=no` в юните панели стоит осознанно: иначе setuid-`sudo`
-  не работает. Компенсация — пустой `CapabilityBoundingSet`,
-  `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+  не работает. `CapabilityBoundingSet` при этом **не пустой**: в нём
+  минимальный набор `CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE
+  CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT`,
+  без которого setuid-`sudo` не может повысить привилегии. Широких
+  capability (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`) нет;
+  остальные ограничения — `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
   `RestrictAddressFamilies` и узкий sudo-allowlist.
-- Изменяющие запросы защищены от CSRF (`Origin`, `Referer`,
-  `Sec-Fetch-Site`), CSP запрещает inline-скрипты и стили, ответы получают
-  security-заголовки.
-- Firewall держит правила в отдельной цепочке `ROUTEWEAVE-FWD`; `QUIC_DROP`
-  стоит выше `ACCEPT`.
+- Изменяющие запросы защищены fail-closed: нужен совпадающий
+  `Origin`/`Referer`, либо `Sec-Fetch-Site: same-origin|none`, либо
+  `X-Requested-With: Routeweave`. Неизвестный `Host` получает `421`, список
+  больше 200 КБ — `413`, превышение лимита запросов или Basic-auth — `429`.
+  CSP запрещает inline-скрипты и стили (`frame-ancestors 'none'`,
+  `object-src 'none'`), ответы получают `Permissions-Policy` и COOP/CORP.
+- Firewall держит правила в двух цепочках: `ROUTEWEAVE-IN` (прыжок в
+  `INPUT 1`) и `ROUTEWEAVE-FWD`. Вход разрешён только из доверенных зон, а
+  `QUIC_DROP` стоит выше `ACCEPT`; помеченный `WAN_INGRESS` трафик из
+  QUIC-drop исключён. Политика `INPUT` не меняется.
+- IPv6 осознанно не фильтруется: проект IPv4-only, `ip6tables` не трогается.
+  Это известное ограничение — IPv6 в LAN нужно отключать.
 - Tailnet — отдельная граница доверия: доступ к панели и API mihomo по
   tailscale-адресу регулируется ACL/grants и сроком действия ключей. Это не
   публикация в интернет.
 - CGNAT-спуфинг с `100.64.0.0/10` не с `tailscale0` дропается.
 - `41641/udp` открыт осознанно: только для прямых соединений Tailscale.
-- Установщик не печатает секреты в консоль и не отдаёт `.env` через панель.
+- tg-ws-proxy запускается из образа, запиненного по digest, с `read_only`,
+  `cap_drop: ALL`, `no-new-privileges` и лимитами; порт публикуется на
+  `SERVER_IP`, а не на `0.0.0.0`. Правила Docker в `DOCKER-USER` Routeweave не
+  управляет: при публичном `SERVER_IP` или пробросе `1443` на роутере прокси
+  будет доступен извне.
+- Целостность: версии mihomo, zashboard и WDTT и их sha256 зашиты в git;
+  несовпадение останавливает установку. Архивы распаковываются в `mktemp` с
+  отказом от symlink/setuid и путей `..`, zapret собирается из закреплённого
+  коммита. `--allow-unverified` — только для отладки и не отключает проверку
+  коммита zapret.
+- Установщик печатает только сгенерированный `PANEL_PASS` — один раз в
+  итоговой сводке; `MIHOMO_SECRET`, `TG_SECRET` и `SOCKS_URL` в консоль не
+  попадают, панель `.env` не отдаёт.
 - SOCKS-креды лежат в `.env`; не публикуйте файл, логи и дампы.
 - Не коммитьте `.env`, логи и дампы: в логах могут быть креды.
 
@@ -486,7 +607,14 @@ reverse-proxy: открывайте только те порты, которые
 - Discord-голос через SOCKS не спасти: только текст и картинки.
 - fake-ip: домены из `FAKEIP_EXTRA` получают реальный IP; добавляйте туда
   чувствительные к подмене приложения.
-- IPv6 в LAN обходит шлюз — отключайте его в роутере.
+- IPv6 в LAN обходит шлюз — отключайте его в роутере. Firewall Routeweave
+  фильтрует только IPv4; `ip6tables` не трогается.
+- mixed-port `7890` по умолчанию слушает только localhost: из LAN он доступен
+  лишь при `MIHOMO_ALLOW_LAN=yes`.
+- Docker вставляет свои правила в `DOCKER-USER`; Routeweave ими не управляет.
+  Порт `1443` опубликован на `SERVER_IP` — не пробрасывайте его на роутере.
+- zashboard отдаёт сам mihomo на `:9090/ui/` — это отдельный origin, не часть
+  панели.
 - Двойной NAT (LAN → шлюз → роутер → провайдер) — нормально.
 
 ## Если что-то сломалось
@@ -515,7 +643,10 @@ reverse-proxy: открывайте только те порты, которые
   `ru-direct-custom.txt` и `dpi.txt`, а не генерируемые `geo.txt` /
   `ru-direct.txt`.
 - **Панель не пускает.** Проверьте `PANEL_PASS` в `.env`; пустой пароль —
-  панель не стартует.
+  панель не стартует. `421` означает неизвестный `Host` (добавьте его в
+  `PANEL_ALLOWED_HOSTS`), `429` — сработал `PANEL_RATE_LIMIT` или
+  `PANEL_AUTH_RATE_LIMIT`, `413` — список больше 200 КБ, `403` — не пройдена
+  CSRF-проверка (для curl нужен `X-Requested-With: Routeweave`).
 - **Снаружи не открывается сервис на опубликованном порту.** Запустите
   `sudo /etc/routeweave/fw-wan.sh doctor`: он покажет, помечаются ли
   соединения, стоит ли `ip rule` 8993 выше правил mihomo и не уходит ли
@@ -534,16 +665,25 @@ reverse-proxy: открывайте только те порты, которые
 
 ## Обновление и удаление
 
-Повторный `sudo bash install.sh` обновляет mihomo при новой версии, юниты и
-конфиги; `.env` и списки сохраняются. `zapret.conf` **сохраняется**: при
-изменении `LAN_IFACE` обновляется только строка `WAN_IFACE=`, а перед
-правкой делается бэкап `zapret.conf.bak-<timestamp>`. `config.yaml`
-регенерируется из `.env`, но прежняя версия также сохраняется в бэкап.
+Повторный `sudo bash install.sh` сверяет закреплённые версии, обновляет
+mihomo/zashboard при необходимости, юниты и конфиги, делает бэкап и upsert
+управляемых ключей `.env`, перегенерирует `config.yaml` и перезапускает
+юниты ядра. `zapret.conf` **сохраняется**: при изменении `LAN_IFACE`
+обновляется только строка `WAN_IFACE=`, а перед правкой делается бэкап
+`zapret.conf.bak-<timestamp>`. Прежний `config.yaml` тоже сохраняется в
+бэкап. После обновления проверьте `systemctl status` и `fw-wan.sh doctor`.
 
-`sudo bash uninstall.sh` останавливает и удаляет юниты, панель, zapret,
-mihomo, таймер и апдейтер списков; контейнер tg-ws-proxy также останавливается
-и удаляется. Каталог `/etc/routeweave` остаётся. WDTT-Plus не затрагивается.
-`uninstall.sh` не удаляет пакет Tailscale и состояние `/var/lib/tailscale`;
+`sudo bash uninstall.sh [--dry-run] [--purge]` останавливает и удаляет юниты,
+панель, zapret, mihomo, таймер и апдейтер списков; контейнер tg-ws-proxy также
+останавливается и удаляется. По умолчанию каталог `/etc/routeweave` с секретами
+сохраняется: в интерактивном режиме скрипт спросит подтверждение, при
+неинтерактивном — напечатает предупреждение о ротации секретов и команду с
+`--purge`. `--purge` удаляет каталог, `--dry-run` только печатает план и не
+требует root. Скрипт восстанавливает `net.ipv4.ip_forward` из
+`ip_forward.orig`, удаляет `/opt/zapret`, `mihomo`, юниты и drop-in
+`systemd-resolved` только при подтверждении владения (маркер `owned` и
+бэкапы) — чужие файлы не трогает. WDTT-Plus остаётся, его `ip rule` 8990
+сохраняется. Пакет Tailscale и состояние `/var/lib/tailscale` не удаляются;
 пакет при необходимости удаляется вручную.
 
 ## Разработка
@@ -563,13 +703,18 @@ make lint    # bash -n, shellcheck, ruff, compileall
 make test    # pytest tests -v
 make all     # lint + test (цель по умолчанию)
 make help    # список целей
+
+python -m pytest tests -q   # обычный прогон; netns-тесты без root пропускаются
 ```
 
 `make lint` требует `shellcheck` и `ruff` в PATH; пути можно задать
-переменными (`make lint SHELLCHECK=... RUFF=...`). Firewall-тесты помечены
-`privileged` и без root/netns корректно пропускаются. CI (GitHub Actions)
-прогоняет линт, тесты и отдельный job с `NET_ADMIN`/`SYS_ADMIN` для
-firewall-тестов.
+переменными (`make lint SHELLCHECK=... RUFF=...`). Привилегированные
+netns-тесты помечены `privileged` и без root корректно пропускаются. Отдельный
+CI job запускает все тесты с маркером `privileged` (netns-модули:
+`test_firewall.py`, `test_wan_ingress.py`, `test_tailscale_nat.py`,
+`test_tailscale_exit.py`, `test_input_policy.py`, `test_fw_nfq.py`) под root и
+падает, если в логе есть хоть один `SKIPPED`. Другие job'ы прогоняют
+`docker compose config` и pytest с порогом покрытия `panel/`.
 
 ## Лицензия
 

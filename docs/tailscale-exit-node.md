@@ -59,9 +59,9 @@ tailnet, 8993 — WAN, 9001/9002 — mihomo.
 - нужен корректный `LAN_IFACE`: если `LAN_IFACE`, `TS_IFACE` или `TS_SUBNET`
   пусты, firewall не падает, пишет `warn` и работает как `policy`.
 
-Почему такие метка и приоритет: `0x100000` свободна (`0x40000` — tailscale и
-`WAN_INGRESS`, `0x80000` — zapret, `0x200000` рекомендуют для `WAN_INGRESS` при
-Tailscale), `8992` свободен (`8990` — WDTT, `8991` — tailnet, `8993` — WAN,
+Почему такие метка и приоритет: `0x100000` свободна (`0x40000` — tailscale
+subnet-route, `0x80000` — zapret, `0x200000` — `WAN_INGRESS_MARK` по
+умолчанию), `8992` свободен (`8990` — WDTT, `8991` — tailnet, `8993` — WAN,
 `9001/9002` — mihomo).
 
 ## 2. Требования и что не нужно делать
@@ -155,17 +155,20 @@ sysctl net.ipv4.ip_forward
 По умолчанию Tailscale работает с `--netfilter-mode=on`: создаёт цепочки
 `ts-input`, `ts-forward`, `ts-postrouting` и сам вставляет в них прыжки. В
 `ts-postrouting` есть MASQUERADE, а свои пакеты Tailscale помечает меткой
-`0x40000`. На шлюзе это конфликтует с двумя вещами:
+`0x40000`. На шлюзе это ломает две вещи:
 
 - policy-routing mihomo: трафик должен уходить в TUN и получать политику, а не
   маскарадиться и идти напрямую;
-- `WAN_INGRESS_MARK`, у которого метка по умолчанию тоже `0x40000`.
+- метки: `0x40000` занята tailscale subnet-route. Если задать её же в
+  `WAN_INGRESS_MARK` (в старых установках это было дефолтом), метки становятся
+  неразличимы. Сейчас дефолт — `0x200000`, а `0x40000` для
+  `WAN_INGRESS_MARK` запрещён.
 
 С `--netfilter-mode=nodivert` Tailscale создаёт свои цепочки, но не вызывает
 их: `ROUTEWEAVE-FWD` остаётся единственным хозяином forwarding. Поэтому
 Routeweave сам разрешает forwarding в TUN и обратный путь и закрывает
-CGNAT-спуфинг, а установщик открывает INPUT для нужных портов (если ufw
-активен).
+CGNAT-спуфинг, а установщик открывает INPUT для нужных портов (в ufw и
+цепочкой `ROUTEWEAVE-IN`).
 
 Проверить, что прыжков нет:
 
@@ -189,9 +192,9 @@ sudo systemctl restart tailscaled
 значение задаётся вручную. Включить прямой NAT:
 
 ```bash
-sudo sed -i 's/^TS_EXIT_MODE=.*/TS_EXIT_MODE="nat"/' /etc/routeweave/.env
+sudo sed -i "s/^TS_EXIT_MODE=.*/TS_EXIT_MODE='nat'/" /etc/routeweave/.env
 # если строки ещё нет:
-echo 'TS_EXIT_MODE="nat"' | sudo tee -a /etc/routeweave/.env
+echo "TS_EXIT_MODE='nat'" | sudo tee -a /etc/routeweave/.env
 sudo systemctl restart routeweave-firewall
 sudo /etc/routeweave/fw-tailscale.sh doctor
 sudo /etc/routeweave/fw-tailscale.sh status
@@ -285,6 +288,11 @@ sudo tailscale set --exit-node=
 
 ## 6. DNS и fake-ip
 
+> **Работает только при `TS_EXIT_MODE=policy`.** В режиме `nat` трафик
+> tailnet-клиентов уходит напрямую в WAN, fake-ip DNS не применяется, и
+> доменные правила geo/dpi/ru для них не работают. Нужен либо `policy`, либо
+> DNS напрямую без расчёта на fake-ip. Это известное ограничение (NET-08).
+
 Это самый важный шаг: без него exit node работает, но доменные правила
 geo/dpi/ru не применяются.
 
@@ -347,9 +355,12 @@ DoH в браузерах (Chrome, Edge, Firefox) и **Private DNS** на Androi
 - zashboard — `http://100.x.y.z:9090/ui/`, backend `http://100.x.y.z:9090`,
   секрет `MIHOMO_SECRET` из `/etc/routeweave/.env`;
 - DNS — `100.x.y.z:53` (его же указываем в admin console);
-- mixed-proxy — `100.x.y.z:7890`.
+- mixed-proxy — `100.x.y.z:7890` (доступен только при
+  `MIHOMO_ALLOW_LAN=yes`; по умолчанию mixed-port слушает localhost).
 
-Порты те же, что у LAN. При активном ufw `install.sh` добавляет:
+Порты те же, что у LAN. Вход на шлюз ограничивает цепочка `ROUTEWEAVE-IN`:
+перечисленные порты открыты только из `tailscale0`, `100.64.0.0/10`,
+`LAN_IFACE`, `wdtt0` и `WG_SUBNET`. При активном ufw `install.sh` добавляет:
 
 - `ufw route allow in on tailscale0` и `ufw route allow out on tailscale0`;
 - `ufw allow 41641/udp` — прямые соединения Tailscale;
@@ -457,7 +468,7 @@ sudo /etc/routeweave/fw-tailscale.sh status
 - анонсирован и одобрен ли exit node;
 - маршруты до tailnet;
 - правила ufw;
-- не конфликтует ли метка `0x40000` с `WAN_INGRESS_MARK`;
+- не конфликтует ли метка `WAN_INGRESS_MARK` с зарезервированной `0x40000`;
 - в режиме `nat` — правило 8992, цепочки `ROUTEWEAVE-TSMARK` и
   `ROUTEWEAVE-TSNAT`, MASQUERADE и маршрут помеченного пакета в WAN (а не в
   TUN). Правила `tailscale0 ↔ Meta` в этом режиме не требуются.
@@ -500,7 +511,9 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
   Для гигабита используйте `TS_EXIT_MODE=nat`.
 - В режиме `nat` нет geo/SOCKS/DPI-политики mihomo: гео-блокировки и
   DPI-фильтрация для tailnet не обходятся. zapret на WAN-egress продолжает
-  работать, но доменные правила mihomo не применяются.
+  работать, но доменные правила mihomo не применяются. Схема DNS на
+  `100.x.y.z:53` с fake-ip в этом режиме тоже не работает: запросы уходят
+  напрямую в WAN (NET-08).
 - В режиме `nat` источник в LAN маскарадится: LAN-устройства видят адрес
   шлюза, а не `100.x` клиента, и логов с адресом клиента на них не будет.
 - Режиму `nat` нужен корректный `LAN_IFACE`: при пустом значении (как и при
@@ -518,10 +531,10 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
 - fake-ip `198.18.0.0/16` может конфликтовать с другим прокси на клиенте,
   который использует тот же диапазон (например, второй mihomo/Clash).
   Оставьте один перехватчик или смените диапазон у второго.
-- При `WAN_INGRESS=yes` метка по умолчанию `0x40000` совпадает с меткой
-  Tailscale. Поставьте в `/etc/routeweave/.env`
-  `WAN_INGRESS_MARK="0x200000"` и выполните
-  `sudo systemctl restart routeweave-firewall`.
+- При `WAN_INGRESS=yes` метка `0x40000` занята tailscale subnet-route, а
+  `0x80000` — zapret. `WAN_INGRESS_MARK` по умолчанию `0x200000` и с ними не
+  пересекается; `0x40000`, `0x80000`, `0x100000` и `0x0` задавать нельзя —
+  `fw-wan.sh` отвергнет их при старте.
 
 ## 11. Откат
 
@@ -537,7 +550,7 @@ sudo tailscale set --advertise-exit-node=false
 Вернуть `policy` из `nat`:
 
 ```bash
-sudo sed -i 's/^TS_EXIT_MODE=.*/TS_EXIT_MODE="policy"/' /etc/routeweave/.env
+sudo sed -i "s/^TS_EXIT_MODE=.*/TS_EXIT_MODE='policy'/" /etc/routeweave/.env
 sudo systemctl restart routeweave-firewall
 ```
 
