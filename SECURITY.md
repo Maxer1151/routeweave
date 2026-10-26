@@ -75,9 +75,11 @@ Routeweave — домашний шлюз, который по своей при�
 - `/etc/routeweave/.env` — `0640 root:routeweave`: читать могут только root
   и сервисный пользователь панели. В файле лежат `PANEL_PASS`,
   `MIHOMO_SECRET`, `TG_SECRET` и параметры прокси.
-- `/etc/routeweave/.env.tgws` — `0640 root:root`, содержит только
-  `TG_SECRET`, `BASE_DOMAIN` и `TG_CF_WORKER_DOMAIN`. Контейнер tg-ws-proxy
-  получает только эти три переменные и не видит секретов панели и mihomo.
+- `/etc/routeweave/.env.tgws` — `0640 root:root`, содержит `TG_SECRET`,
+  `BASE_DOMAIN`, `TG_CF_WORKER_DOMAIN` и (если задан) `TG_PINNED_UPSTREAM`.
+  Контейнер tg-ws-proxy получает только эти переменные и не видит секретов
+  панели и mihomo. Пустой `TG_PINNED_UPSTREAM` в файл не пишется: пустой
+  список тиров для прокси невалиден.
 - Установщик не печатает секреты в консоль (кроме сгенерированного
   `PANEL_PASS` в итоговой сводке — его нужно передать пользователю).
 - Панель не отдаёт `.env` и не логирует его содержимое.

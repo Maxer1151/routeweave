@@ -60,6 +60,10 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
   MIHOMO_SHA256=<hex>     ожидаемая sha256 архива mihomo, если апстрим не
                           публикует <url>.sha256
   ZASHBOARD_SHA256=<hex>  то же для dist.zip дашборда zashboard
+  TG_PINNED_UPSTREAM=<tiers>
+                          порядок апстримов tg-ws-proxy через запятую
+                          (ws, cfworker, cfproxy, mtproto, tcp); по умолчанию
+                          cfworker,ws,tcp, если задан домен CF Worker
 
 Что делает установщик:
   1. ставит пакеты, создаёт системного пользователя routeweave и минимальный
@@ -187,6 +191,24 @@ normalize_yn() { # yes/no (регистронезависимо); rc=1 если 
     no|n|нет|0|false) printf 'no' ;;
     *) return 1 ;;
   esac
+}
+
+# tgws_pinned_upstream <cf_worker_domain> — порядок тиров tg-ws-proxy
+# (--pinned-upstream): имена через запятую; пусто = пин не задавать.
+# Если домен CF Worker задан, Worker идёт первым: прямой WS к Telegram DC
+# обычно режется на SYN, и каждая новая сессия тратит 2-5 с впустую.
+# Env TG_PINNED_UPSTREAM имеет приоритет; невалидный список -> rc=2.
+tgws_pinned_upstream() {
+  local cf_domain=${1-}
+  local pin=${TG_PINNED_UPSTREAM:-}
+  local tiers='ws|cfworker|cfproxy|mtproto|tcp'
+  if [ -z "$pin" ] && [ -n "$cf_domain" ]; then
+    pin="cfworker,ws,tcp"
+  fi
+  if [ -n "$pin" ] && [[ ! $pin =~ ^($tiers)(,($tiers))*$ ]]; then
+    return 2
+  fi
+  printf '%s' "$pin"
 }
 
 tailscale_repo_urls() { # tailscale_repo_urls <id> <codename> -> два URL apt-репозитория
@@ -801,6 +823,9 @@ cp -n "$APP_DIR"/lists/*.txt "$ETC/lists/" 2>/dev/null || true
 TG_CF_WORKER_DOMAIN="${TG_CF_WORKER_DOMAIN:-$BASE_DOMAIN}"
 TG_LINK_IP="${TG_LINK_IP:-}"
 FAKEIP_EXTRA="${FAKEIP_EXTRA:-}"
+# Порядок апстримов tg-ws-proxy; проверяется до записи .env/.env.tgws.
+TG_PINNED_UPSTREAM=$(tgws_pinned_upstream "$TG_CF_WORKER_DOMAIN") \
+  || die "TG_PINNED_UPSTREAM: ожидается список тиров через запятую: ws, cfworker, cfproxy, mtproto, tcp"
 
 if [ ! -f "$ETC/.env" ]; then
   {
@@ -812,6 +837,10 @@ if [ ! -f "$ETC/.env" ]; then
     env_line BASE_DOMAIN "$BASE_DOMAIN"
     echo "# Домен CF Worker для tg-ws-proxy (опционально; обычно совпадает с BASE_DOMAIN)"
     env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+    if [ -n "$TG_PINNED_UPSTREAM" ]; then
+      echo "# Порядок апстримов tg-ws-proxy (--pinned-upstream), дублируется в .env.tgws"
+      env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM"
+    fi
     echo "# IP/хост для tg://-ссылки (пусто = SERVER_IP)"
     env_line TG_LINK_IP "$TG_LINK_IP"
     env_line WG_SUBNET "$WG_SUBNET"
@@ -853,6 +882,22 @@ else
   if [ "$ENV_SECRETS_UPDATED" = 1 ]; then
     ok "в .env добавлены отсутствующие секреты (PANEL_PASS/MIHOMO_SECRET)"
   fi
+  # Пин апстримов нужен и старым установкам: compose читает общий .env,
+  # а устаревший пин (без домена CF Worker) лучше убрать, чем оставить.
+  if [ "$INSTALL_TGWS" = "yes" ]; then
+    if [ -n "$TG_PINNED_UPSTREAM" ]; then
+      if grep -q '^TG_PINNED_UPSTREAM=' "$ETC/.env"; then
+        sed -i "s|^TG_PINNED_UPSTREAM=.*|$(env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM")|" "$ETC/.env"
+      else
+        [ -z "$(tail -c1 "$ETC/.env")" ] || printf '\n' >> "$ETC/.env"
+        env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM" >> "$ETC/.env"
+      fi
+      ok "в .env закреплён порядок апстримов tg-ws-proxy: $TG_PINNED_UPSTREAM"
+    elif grep -q '^TG_PINNED_UPSTREAM=' "$ETC/.env"; then
+      sed -i '/^TG_PINNED_UPSTREAM=/d' "$ETC/.env"
+      ok "из .env удалён устаревший TG_PINNED_UPSTREAM (домен CF Worker не задан)"
+    fi
+  fi
 fi
 
 chown root:routeweave "$ETC/.env"
@@ -869,6 +914,9 @@ if [ "$INSTALL_TGWS" = "yes" ]; then
     env_line TG_SECRET "$TG_SECRET"
     env_line BASE_DOMAIN "$BASE_DOMAIN"
     env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+    if [ -n "$TG_PINNED_UPSTREAM" ]; then
+      env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM"
+    fi
   } > "$WORK_DIR/env.tgws"
   install -m 0640 -o root -g root "$WORK_DIR/env.tgws" "$ETC/.env.tgws"
   ok "$ETC/.env.tgws создан (0640 root:root)"

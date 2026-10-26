@@ -103,6 +103,7 @@ forwarding разрешён для tailnet. Правила добавляютс�
 | `SOCKS_URL` | Внешний прокси для geo: `socks5h://` (имя резолвит прокси), `socks5://`, `socks://`, `http://`, `https://`; пусто = гео напрямую |
 | `BASE_DOMAIN` | Домен CF Worker для tg-ws-proxy |
 | `TG_CF_WORKER_DOMAIN` | Домен CF Worker (обычно совпадает с `BASE_DOMAIN`) |
+| `TG_PINNED_UPSTREAM` | Порядок апстримов tg-ws-proxy (`--pinned-upstream`), тиры через запятую: `ws`, `cfworker`, `cfproxy`, `mtproto`, `tcp`. Пишет установщик: по умолчанию `cfworker,ws,tcp`, если задан домен CF Worker; переопределяется одноимённой переменной окружения при установке (`TG_PINNED_UPSTREAM=... ./install.sh`); пусто = порядок прокси по умолчанию |
 | `TG_LINK_IP` | IP/хост для `tg://`-ссылки в панели; пусто = `SERVER_IP` |
 | `WG_SUBNET` | Подсеть клиентов WDTT (`wdtt0`), по умолчанию `10.66.66.0/24`; policy-routing — `ip rule` priority 8990 |
 | `TS_IFACE` | Интерфейс Tailscale, по умолчанию `tailscale0`; установщик не пишет, можно добавить вручную |
@@ -232,8 +233,11 @@ arm64 — `mihomo-linux-arm64`. Стратегия по умолчанию — `
 Включается `INSTALL_TGWS=yes`. Нужны Docker Engine и compose v2, порт `1443`.
 Секрет прокси для клиентов смотрите в `docker logs routeweave-tgwsproxy`.
 CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
-`TG_CF_WORKER_DOMAIN`, `TG_LINK_IP`. Без этого компонента ядро работает как
-обычно.
+`TG_CF_WORKER_DOMAIN`, `TG_LINK_IP`. При заданном домене CF Worker установщик
+ставит Worker первым в цепочке апстримов (`TG_PINNED_UPSTREAM`), иначе каждая
+новая сессия платит 2–5 с за заведомо недоступный прямой WS — подробности в
+[`docs/cf-worker-tg.md`](docs/cf-worker-tg.md). Без этого компонента ядро
+работает как обычно.
 
 ## Опционально: WDTT-Plus
 
@@ -441,7 +445,7 @@ reverse-proxy: открывайте только те порты, которые
   `7890` и `53` в интернет; при необходимости удалённого доступа — VPN (в том
   числе tailnet) или reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
 - `.env` создаётся с правами `0640 root:routeweave`. Контейнер tg-ws-proxy
-  получает только свои три переменные (`.env.tgws`) и не видит секретов
+  получает только переменные из своего `.env.tgws` и не видит секретов
   панели и mihomo.
 - Панель работает от пользователя `routeweave`; root-доступ — только через
   `sudo -n` по allowlist `/etc/sudoers.d/routeweave-panel`, без wildcard.
