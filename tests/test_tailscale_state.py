@@ -1,10 +1,11 @@
 """Тесты helper'а состояния Tailscale и его установки (без root и сети).
 
 Helper ``templates/routeweave-tailscale-state.sh`` только читает состояние:
-``tailscale status --json``, ``systemctl is-active tailscaled`` и счётчики
-sysfs. Тесты подменяют PATH на временный каталог со стабами, поэтому
-настоящий ``tailscale``/``systemctl`` на хосте не вызывается, а пути к .env
-и sysfs задаются через ``ROUTEWEAVE_TS_ENV`` / ``ROUTEWEAVE_TS_SYSFS``.
+``tailscale status --json``, ``tailscale debug prefs`` (лишь
+``AdvertiseRoutes``), ``systemctl is-active tailscaled`` и счётчики sysfs.
+Тесты подменяют PATH на временный каталог со стабами, поэтому настоящий
+``tailscale``/``systemctl`` на хосте не вызывается, а пути к .env и sysfs
+задаются через ``ROUTEWEAVE_TS_ENV`` / ``ROUTEWEAVE_TS_SYSFS``.
 
 Дополнительно статически проверяется, что установщик копирует helper и
 выдаёт панели точечное право sudo без wildcard, а uninstall удаляет файл.
@@ -21,20 +22,22 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "templates" / "routeweave-tailscale-state.sh"
+FW_TAILSCALE = ROOT / "templates" / "fw-tailscale.sh"
 INSTALL = ROOT / "install.sh"
 UNINSTALL = ROOT / "uninstall.sh"
 
-# Ответ tailscale status --json: CGNAT-адрес — заглушка из 100.64.0.0/10,
-# имя пира фиктивное.
+# Ответ tailscale status --json реального вида 1.104.x: CGNAT-адрес — заглушка
+# из 100.64.0.0/10, имя пира фиктивное. Поля PrimaryRoutes у Self нет, Prefs
+# верхнего уровня в ответе отсутствуют: одобрение видно только по
+# ExitNodeOption, анонс — по `tailscale debug prefs`.
 STATUS_JSON = json.dumps(
     {
         "BackendState": "Running",
         "Self": {
             "TailscaleIPs": ["100.64.0.10", "fd7a:115c::1"],
+            "AllowedIPs": ["100.64.0.10/32", "fd7a:115c::1/128", "0.0.0.0/0", "::/0"],
             "ExitNodeOption": True,
-            "PrimaryRoutes": ["0.0.0.0/0"],
         },
-        "Prefs": {"AdvertiseRoutes": ["0.0.0.0/0"]},
         "Peers": [{"HostName": "peer-a"}],
     },
     separators=(",", ":"),
@@ -64,6 +67,7 @@ def make_path(
     tmp_path,
     with_tailscale=True,
     status_json=STATUS_JSON,
+    prefs_json="",
     systemctl_out="active\n",
     tailscale_rc=0,
     env_content='TS_IFACE="tailscale0"\n',
@@ -91,6 +95,8 @@ def make_path(
             fi
             if [ "$1" = "status" ]; then
               printf '%s' "$TS_STUB_JSON"
+            elif [ "$1" = "debug" ] && [ "$2" = "prefs" ]; then
+              printf '%s' "${TS_STUB_PREFS_JSON:-}"
             fi
             exit 0
             """,
@@ -110,6 +116,7 @@ def make_path(
         "ROUTEWEAVE_TS_ENV": str(env_file),
         "ROUTEWEAVE_TS_SYSFS": str(sys_dir),
         "TS_STUB_JSON": status_json,
+        "TS_STUB_PREFS_JSON": prefs_json,
         "SYSTEMCTL_OUT": systemctl_out,
         "TAILSCALE_RC": str(tailscale_rc),
     }
@@ -234,25 +241,75 @@ def test_counters_read_from_sysfs(tmp_path):
     assert state["tx_bytes"] == 0
 
 
-def test_advertised_via_prefs_only(tmp_path):
+def _status_without_exit_routes(ip="100.64.0.11"):
+    """Running-узел без одобрения и без exit-маршрутов в AllowedIPs."""
+    return json.dumps(
+        {
+            "BackendState": "Running",
+            "Self": {
+                "TailscaleIPs": [ip, "fd7a:115c::2"],
+                "AllowedIPs": [f"{ip}/32", "fd7a:115c::2/128"],
+                "ExitNodeOption": False,
+            },
+            "Peers": [],
+        },
+        separators=(",", ":"),
+    )
+
+
+def test_advertised_pending_approval_via_debug_prefs(tmp_path):
+    # Prefs верхнего уровня в status --json больше не поддерживаем: анонс
+    # берём из `tailscale debug prefs` (AdvertiseRoutes), одобрения нет.
+    state = parse_state(
+        run_helper(
+            make_path(
+                tmp_path,
+                status_json=_status_without_exit_routes(),
+                prefs_json='{"AdvertiseRoutes":["0.0.0.0/0","::/0"]}',
+            )
+        )
+    )
+
+    assert state["advertised"] is True
+    assert state["approved"] is False
+    assert state["peers"] == 0
+
+
+def test_approved_without_primary_routes(tmp_path):
+    # В tailscale status --json 1.104.x у Self нет PrimaryRoutes: одобрение
+    # определяется только по ExitNodeOption.
     status_json = json.dumps(
         {
             "BackendState": "Running",
             "Self": {
-                "TailscaleIPs": ["100.64.0.11"],
-                "ExitNodeOption": False,
-                "PrimaryRoutes": [],
+                "TailscaleIPs": ["100.64.0.12"],
+                "ExitNodeOption": True,
             },
-            "Prefs": {"AdvertiseRoutes": ["0.0.0.0/0"]},
-            "Peers": [],
         },
         separators=(",", ":"),
     )
     state = parse_state(run_helper(make_path(tmp_path, status_json=status_json)))
 
+    assert state["approved"] is True
     assert state["advertised"] is True
+
+
+def test_not_advertised_when_prefs_unavailable(tmp_path):
+    # `tailscale debug prefs` недоступен (стаб печатает пустоту) — деградация
+    # до advertised=false, без ошибки в ответе.
+    state = parse_state(
+        run_helper(
+            make_path(
+                tmp_path,
+                status_json=_status_without_exit_routes("100.64.0.13"),
+                prefs_json="",
+            )
+        )
+    )
+
+    assert state["advertised"] is False
     assert state["approved"] is False
-    assert state["peers"] == 0
+    assert state["error"] == ""
 
 
 def test_no_python3_fallback(tmp_path):
@@ -265,6 +322,20 @@ def test_no_python3_fallback(tmp_path):
     # Fallback не читает sysfs и печатает нулевые счётчики.
     assert state["rx_bytes"] == 0
     assert state["tx_bytes"] == 0
+
+
+# ---------------- fw-tailscale.sh (статически) ----------------
+
+def test_fw_tailscale_uses_exitnodeoption():
+    text = FW_TAILSCALE.read_text(encoding="utf-8")
+
+    # PrimaryRoutes — это subnet-маршруты, у Self в 1.104.x поля нет.
+    assert 'self_.get("PrimaryRoutes")' not in text
+    assert 'self_.get("ExitNodeOption")' in text
+    # Анонс без одобрения виден только в локальных prefs.
+    assert '["tailscale", "debug", "prefs"]' in text
+    # doctor не должен выдавать ложный FAIL про «маршрут не одобрен».
+    assert "(Self.ExitNodeOption)" in text
 
 
 # ---------------- Установщик (статически) ----------------

@@ -81,6 +81,7 @@ ts_status_kv() {
   raw=$(tailscale status --json 2>/dev/null) || return 1
   printf '%s' "$raw" | python3 -c '
 import json
+import subprocess
 import sys
 
 try:
@@ -89,12 +90,35 @@ except Exception:
     sys.exit(1)
 
 self_ = data.get("Self") or {}
-prefs = data.get("Prefs") or {}
 ips = self_.get("TailscaleIPs") or []
 ipv4 = next((ip for ip in ips if ":" not in ip), "")
-advertised_routes = prefs.get("AdvertiseRoutes") or []
-advertised = bool(self_.get("ExitNodeOption")) or "0.0.0.0/0" in advertised_routes
-approved = "0.0.0.0/0" in (self_.get("PrimaryRoutes") or [])
+# ExitNodeOption — авторитетный признак: tailscale выставляет его, когда
+# узел анонсировал exit node и одобрен (offered && approved). Prefs в
+# tailscale status --json нет, PrimaryRoutes — про subnet-маршруты.
+approved = bool(self_.get("ExitNodeOption"))
+advertised = approved
+# Без одобрения проверяем анонс по локальным prefs. Полный вывод содержит
+# чувствительные поля, поэтому читаем его только в памяти и не логируем.
+if not advertised:
+    try:
+        proc = subprocess.run(
+            ["tailscale", "debug", "prefs"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        try:
+            prefs = json.loads(proc.stdout)
+        except ValueError:
+            prefs = None
+        if isinstance(prefs, dict):
+            routes = prefs.get("AdvertiseRoutes")
+            advertised = isinstance(routes, list) and "0.0.0.0/0" in routes
 print("state=" + str(data.get("BackendState") or ""))
 print("ipv4=" + str(ipv4))
 print("advertised=" + ("1" if advertised else "0"))
@@ -367,9 +391,9 @@ doctor() {
         fails=$((fails + 1))
       fi
       if [ "$approved" = "1" ]; then
-        echo "OK: маршрут 0.0.0.0/0 одобрен (Self.PrimaryRoutes)"
+        echo "OK: exit node одобрен (Self.ExitNodeOption)"
       else
-        echo "FAIL: маршрут 0.0.0.0/0 не одобрен — подтвердите exit node в админ-консоли Tailscale"
+        echo "FAIL: exit node не одобрен — подтвердите его в админ-консоли Tailscale"
         fails=$((fails + 1))
       fi
     else

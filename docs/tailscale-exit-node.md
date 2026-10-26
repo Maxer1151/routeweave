@@ -216,6 +216,12 @@ sudo /etc/routeweave/fw-tailscale.sh status
 
 Пока exit node не одобрен, клиенты его не видят.
 
+Проверить одобрение на сервере (после шага 3 должно быть `True`):
+
+```bash
+sudo tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["ExitNodeOption"])'
+```
+
 По умолчанию в tailnet разрешено всё, и отдельный grant не нужен. Если ACL
 кастомизированы, добавьте grant на `autogroup:internet` — именно он разрешает
 использовать узел как интернет-шлюз:
@@ -392,6 +398,9 @@ CGNAT-спуфинг закрыт и на уровне iptables: пакет с �
 - `systemctl is-active tailscaled`;
 - `tailscale status --json` — через `sudo`, поэтому доступен сокет
   `tailscaled`, закрытый для непривилегированной панели;
+- `tailscale debug prefs` — только при отсутствии одобрения и только поле
+  `AdvertiseRoutes`; полный вывод содержит служебные данные, поэтому не
+  сохраняется и не логируется;
 - счётчики `/sys/class/net/<TS_IFACE>/statistics/rx_bytes` и `tx_bytes`.
 
 Наружу helper отдаёт одну строку JSON с агрегатами: статус демона, tailnet-адрес,
@@ -404,8 +413,24 @@ CGNAT-спуфинг закрыт и на уровне iptables: пакет с �
 
 Одобрение exit node карточка не заменяет: оно по-прежнему делается только в
 admin console (**Machines** → **Edit exit node** → **Use as exit node**, см.
-раздел 4). Карточка лишь показывает `advertised`/`approved` из
-`tailscale status --json`; пока одобрения нет, будет `ждёт одобрения`.
+раздел 4).
+
+Флаги считаются так:
+
+- `approved` — `Self.ExitNodeOption` из `tailscale status --json`. Tailscale
+  выставляет это поле, только когда узел анонсировал exit node **и** одобрен
+  (`offered && approved`), а сборка умеет использовать exit node. Это
+  авторитетный признак, отдельного поля `Prefs` в JSON нет.
+- `advertised` — либо то же одобрение, либо наличие `0.0.0.0/0` в
+  `AdvertiseRoutes` из `tailscale debug prefs` (запрашивается только когда
+  одобрения нет). Так `ждёт одобрения` (анонсирован, но не одобрен)
+  отличается от `не анонсирован`. Если команда недоступна или вернула не
+  JSON, считается `advertised=false`.
+
+`Self.PrimaryRoutes` здесь не используется: в JSON 1.104.x такого поля у
+своего узла нет, а само поле описывает subnet-маршруты, для которых узел
+сейчас primary, и к exit node отношения не имеет. `Self.AllowedIPs` тоже не
+разбирается: `ExitNodeOption` уже учитывает и `AllowedIPs`, и buildfeature.
 
 `install.sh` ставит helper в `/usr/local/sbin` и включает его в sudo-allowlist
 панели (`/etc/sudoers.d/routeweave-panel`, без wildcard). `uninstall.sh`
@@ -455,8 +480,9 @@ journalctl -u tailscaled -n 50
 - `ip rule show` — строка `8991: from all to 100.64.0.0/10 lookup main`;
 - `iptables -S ROUTEWEAVE-FWD` — ACCEPT для `tailscale0` и DROP для
   `100.64.0.0/10` не с `tailscale0`;
-- `tailscale status --json` — поля `ExitNode`/`ExitNodeOption` и
-  `PrimaryRoutes` у своего узла и пиров (формат JSON может меняться между
+- `tailscale status --json` — `Self.ExitNodeOption` (`true` = анонсирован и
+  одобрен) и `Self.AllowedIPs`, куда control-plane кладёт `0.0.0.0/0` и
+  `::/0` только для одобренного exit node (формат JSON может меняться между
   версиями);
 - `journalctl` — ошибки `tailscaled`, конфликты netfilter, проблемы с
   маршрутами.

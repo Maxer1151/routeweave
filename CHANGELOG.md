@@ -16,6 +16,13 @@
 
 ### Исправлено
 
+- Tailscale: статус exit node больше не берётся из `Self.PrimaryRoutes` — в
+  `tailscale status --json` 1.104.x такого поля у своего узла нет, а само
+  поле описывает subnet-маршруты. Одобрение теперь определяется по
+  `Self.ExitNodeOption` (`offered && approved`), а `анонсирован, но не
+  одобрен` — по `AdvertiseRoutes` из `tailscale debug prefs` (только при
+  отсутствии одобрения). Карточка снова показывает «анонсирован и одобрен»,
+  `fw-tailscale.sh doctor` не даёт ложный FAIL про неодобренный маршрут.
 - tg-ws-proxy: при заданном CF Worker он теперь ставится первым в
   `--pinned-upstream` (`cfworker,ws,tcp`). Прямой WS к Telegram DC режется на
   SYN, поэтому каждая новая сессия тратила 2–5 с на заведомо неудачную

@@ -2,8 +2,9 @@
 # Routeweave: состояние Tailscale для веб-панели.
 #
 # Скрипт только читает: `tailscale status --json`, `systemctl is-active
-# tailscaled` и счётчики байт из sysfs. Ничего не меняет и не печатает пиров,
-# ключи и имена устройств — только агрегаты. Печатает ровно одну строку
+# tailscaled`, `tailscale debug prefs` (только AdvertiseRoutes, без сохранения
+# и печати вывода) и счётчики байт из sysfs. Ничего не меняет и не печатает
+# пиров, ключи и имена устройств — только агрегаты. Печатает ровно одну строку
 # компактного JSON и возвращает 0, если состояние удалось напечатать.
 #
 # Запускается от root через sudo из allowlist панели: только так доступен
@@ -98,6 +99,7 @@ fi
 # Разбор JSON — через python3, jq не нужен. Компактный вывод: одна строка.
 json=$(printf '%s' "$raw" | python3 -c '
 import json
+import subprocess
 import sys
 
 installed = sys.argv[1] == "1"
@@ -144,18 +146,37 @@ if data is not None:
     self_ = data.get("Self")
     if not isinstance(self_, dict):
         self_ = {}
-    prefs = data.get("Prefs")
-    if not isinstance(prefs, dict):
-        prefs = {}
     ips = self_.get("TailscaleIPs")
     if isinstance(ips, list):
         self_ip = next((ip for ip in ips if isinstance(ip, str) and ":" not in ip), "")
-    primary = self_.get("PrimaryRoutes")
-    approved = isinstance(primary, list) and "0.0.0.0/0" in primary
-    advertised = bool(self_.get("ExitNodeOption"))
-    routes = prefs.get("AdvertiseRoutes")
-    if isinstance(routes, list) and "0.0.0.0/0" in routes:
-        advertised = True
+    # ExitNodeOption — авторитетный признак: tailscale выставляет его, когда
+    # узел анонсировал exit node и одобрен (offered && approved). Поля Prefs
+    # в tailscale status --json нет, а PrimaryRoutes — про subnet-маршруты.
+    approved = bool(self_.get("ExitNodeOption"))
+    advertised = approved
+    # Если одобрения нет, отличаем "анонсирован, но ждёт одобрения" от
+    # "не анонсирован" по локальным prefs. Полный вывод содержит
+    # чувствительные поля, поэтому читаем его только в памяти и не логируем.
+    if not advertised:
+        try:
+            proc = subprocess.run(
+                ["tailscale", "debug", "prefs"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            try:
+                prefs = json.loads(proc.stdout)
+            except ValueError:
+                prefs = None
+            if isinstance(prefs, dict):
+                routes = prefs.get("AdvertiseRoutes")
+                advertised = isinstance(routes, list) and "0.0.0.0/0" in routes
     peers_raw = data.get("Peers")
     if isinstance(peers_raw, (list, dict)):
         peers = len(peers_raw)
