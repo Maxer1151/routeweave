@@ -79,15 +79,26 @@ start() {
     mv -f "$tmp" "$HOSTLIST"
   fi
 
-  iptables -t mangle -C POSTROUTING -o "$WAN_IFACE" "${RULE[@]}" 2>/dev/null || \
-    iptables -t mangle -I POSTROUTING 1 -o "$WAN_IFACE" "${RULE[@]}"
+  # -w 5 во всех вызовах: Docker/ufw/другие хуки держат xtables-lock, и без
+  # ожидания iptables падает с "Resource temporarily unavailable". Раньше это
+  # давало частично применённые правила при формально успешном скрипте.
+  if ! iptables -w 5 -t mangle -C POSTROUTING -o "$WAN_IFACE" "${RULE[@]}" 2>/dev/null; then
+    # Вставка — критичная операция: без правила очередь не наполняется и
+    # десинк молча не работает. Падаем, чтобы юнит ушёл в failed.
+    iptables -w 5 -t mangle -I POSTROUTING 1 -o "$WAN_IFACE" "${RULE[@]}" || {
+      echo "не удалось вставить правило NFQUEUE в mangle POSTROUTING (WAN_IFACE=$WAN_IFACE, QNUM=$QNUM)" >&2
+      exit 1
+    }
+  fi
 }
 
 stop() {
   # Без WAN_IFACE правило не построить (интерфейс исчез/переименован) — не
   # падаем. Заодно снимаем возможные дубли от старых запусков.
   if [ -n "$WAN_IFACE" ]; then
-    while iptables -t mangle -D POSTROUTING -o "$WAN_IFACE" "${RULE[@]}" 2>/dev/null; do :; done || true
+    # Удаление необязательно (правила может не быть) — поэтому || true, но с
+    # -w 5, чтобы не гонять гонку с параллельными правками iptables.
+    while iptables -w 5 -t mangle -D POSTROUTING -o "$WAN_IFACE" "${RULE[@]}" 2>/dev/null; do :; done || true
   fi
   echo "ok: nfq rule stopped"
 }
