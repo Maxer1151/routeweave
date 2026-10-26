@@ -177,7 +177,12 @@ if data is not None:
             if isinstance(prefs, dict):
                 routes = prefs.get("AdvertiseRoutes")
                 advertised = isinstance(routes, list) and "0.0.0.0/0" in routes
-    peers_raw = data.get("Peers")
+    # В tailscale status --json 1.104.x пиры лежат в объекте Peer (ключ —
+    # публичный ключ узла), поля Peers нет. Ветка Peers оставлена только как
+    # совместимость с нестандартным ответом.
+    peers_raw = data.get("Peer")
+    if not isinstance(peers_raw, (list, dict)):
+        peers_raw = data.get("Peers")
     if isinstance(peers_raw, (list, dict)):
         peers = len(peers_raw)
 

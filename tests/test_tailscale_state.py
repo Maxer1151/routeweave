@@ -38,7 +38,7 @@ STATUS_JSON = json.dumps(
             "AllowedIPs": ["100.64.0.10/32", "fd7a:115c::1/128", "0.0.0.0/0", "::/0"],
             "ExitNodeOption": True,
         },
-        "Peers": [{"HostName": "peer-a"}],
+        "Peer": {"peer-a": {"HostName": "peer-a"}},
     },
     separators=(",", ":"),
 )
@@ -197,6 +197,27 @@ def test_running_tailscale_aggregates(tmp_path):
     assert "HostName" not in proc.stdout
 
 
+def test_peers_counted_from_peer_map(tmp_path):
+    # Пиры считаются по числу ключей объекта Peer; поля Peers в 1.104.x нет.
+    status_json = json.dumps(
+        {
+            "BackendState": "Running",
+            "Self": {
+                "TailscaleIPs": ["100.64.0.14"],
+                "ExitNodeOption": False,
+            },
+            "Peer": {"a": {}, "b": {}},
+        },
+        separators=(",", ":"),
+    )
+    proc = run_helper(make_path(tmp_path, status_json=status_json))
+    state = parse_state(proc)
+
+    assert state["peers"] == 2
+    assert state["approved"] is False
+    assert "HostName" not in proc.stdout
+
+
 def test_status_failure_keeps_installed(tmp_path):
     paths = make_path(tmp_path, tailscale_rc=1)
     state = parse_state(run_helper(paths))
@@ -251,7 +272,7 @@ def _status_without_exit_routes(ip="100.64.0.11"):
                 "AllowedIPs": [f"{ip}/32", "fd7a:115c::2/128"],
                 "ExitNodeOption": False,
             },
-            "Peers": [],
+            "Peer": {},
         },
         separators=(",", ":"),
     )
