@@ -347,6 +347,18 @@ def test_no_python3_fallback(tmp_path):
 
 # ---------------- fw-tailscale.sh (статически) ----------------
 
+def test_fw_tailscale_wan_ingress_mark_default_matches_other_scripts():
+    text = FW_TAILSCALE.read_text(encoding="utf-8")
+
+    # Fallback должен совпадать с fw-base.sh/fw-wan.sh/install.sh: прежний
+    # 0x40000 — это TS_MARK (subnet-route tailscale), doctor ложно ругался
+    # на конфликт при отсутствии ключа в .env.
+    assert 'WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x200000}"' in text
+    assert ":-0x40000" not in text
+    # Сама метка tailscale при этом остаётся 0x40000.
+    assert 'TS_MARK="0x40000"' in text
+
+
 def test_fw_tailscale_uses_exitnodeoption():
     text = FW_TAILSCALE.read_text(encoding="utf-8")
 

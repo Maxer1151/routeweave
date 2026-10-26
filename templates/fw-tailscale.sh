@@ -29,7 +29,11 @@ TUN_IFACE="${TUN_IFACE:-Meta}"
 PANEL_PORT="${PANEL_PORT:-8080}"
 WAN_INGRESS="${WAN_INGRESS:-no}"
 WAN_INGRESS="${WAN_INGRESS,,}"
-WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x40000}"
+# Метка WAN_INGRESS используется только в doctor (проверка конфликта), но
+# дефолт обязан совпадать с фактическим: 0x200000, как в fw-wan.sh,
+# fw-base.sh и install.sh. Занимать нельзя 0x40000 (subnet-route tailscale),
+# 0x80000 (zapret), 0x100000 (NAT-режим exit node) и 0x0.
+WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x200000}"
 LAN_IFACE="${LAN_IFACE:-}"
 FWD_CHAIN="ROUTEWEAVE-FWD"
 TS_RULE_PRIO=8991
