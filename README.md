@@ -130,7 +130,7 @@ forwarding разрешён для tailnet. Правила добавляютс�
 | `PANEL_TLS` | `yes`, если панель отдаётся по https через reverse-proxy: меняет только ожидаемую схему в сравнении `Origin`/`Referer` при CSRF-проверке. Встроенного TLS нет |
 | `PANEL_USER` | Логин панели, по умолчанию `admin` |
 | `PANEL_PASS` | Пароль панели; генерируется установщиком, печатается один раз в итоговой сводке |
-| `MIHOMO_API` | Адрес API mihomo для панели и апдейтера; по умолчанию `http://MIHOMO_BIND:9090` (пустой `MIHOMO_BIND` = `SERVER_IP`, `0.0.0.0` заменяется на `127.0.0.1`) |
+| `MIHOMO_API` | Адрес API mihomo для панели и апдейтера; по умолчанию `http://MIHOMO_BIND:9090` (пустой `MIHOMO_BIND` = `SERVER_IP`, `0.0.0.0` заменяется на `127.0.0.1`); при смене `MIHOMO_BIND` обновите `MIHOMO_API` вручную — установщик не пересчитывает уже записанное значение |
 | `MIHOMO_BIND` | Адрес external-controller и `bind-address` mihomo, по умолчанию `SERVER_IP`; `0.0.0.0` допустим только осознанно (установщик предупреждает) |
 | `MIHOMO_ALLOW_LAN` | `no` по умолчанию: mixed-port `7890` не доступен из LAN; `yes` включает `allow-lan` |
 | `MIHOMO_TUN_MTU` | MTU TUN mihomo, по умолчанию `1280`; допустимо 576..9000 |
