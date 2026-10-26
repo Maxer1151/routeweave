@@ -11,4 +11,11 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-exec docker restart "$CONTAINER"
+restart_rc=0
+# timeout 60: restart не должен висеть дольше таймаута панели.
+timeout 60 docker restart "$CONTAINER" || restart_rc=$?
+if [ "$restart_rc" -eq 124 ]; then
+  echo "routeweave-tgws-restart: docker restart не уложился в 60 с" >&2
+  exit 124
+fi
+exit "$restart_rc"

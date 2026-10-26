@@ -63,3 +63,30 @@ def test_lists_directory_is_writable():
     """Панель правит списки, поэтому каталог должен быть в ReadWritePaths."""
     paths = service_value("ReadWritePaths").split()
     assert "/etc/routeweave/lists" in paths
+
+
+def test_exec_start_has_no_wildcard_host_and_single_worker():
+    """0.0.0.0 в ExecStart — регресс: адрес задаёт PANEL_BIND.
+
+    --workers не поддерживается: JOB и кэш /api/status живут в памяти
+    процесса, второй воркер отвечал бы чужим состоянием.
+    """
+    exec_start = service_value("ExecStart")
+    assert "0.0.0.0" not in exec_start
+    assert "--host" not in exec_start
+    assert "--workers" not in exec_start
+    assert "app.py" in exec_start
+    assert "uvicorn" not in exec_start
+
+
+def test_service_resource_limits():
+    """MemoryMax/TasksMax ограничивают утечки памяти и потоки."""
+    assert service_value("MemoryMax") == "256M"
+    assert service_value("TasksMax") == "64"
+
+
+def test_memory_and_tasks_limits_anywhere_in_unit():
+    text = UNIT.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        assert "--workers" not in line
+        assert "0.0.0.0" not in line

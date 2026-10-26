@@ -44,7 +44,14 @@ if [ "$installed" -eq 0 ]; then
   # Без пакета Tailscale демона нет по определению.
   daemon="absent"
 elif command -v systemctl >/dev/null 2>&1; then
-  daemon=$(systemctl is-active tailscaled 2>/dev/null) || true
+  # timeout: зависший systemctl не должен вешать панель (sudo-вызов имеет
+  # собственный таймаут, но helper обязан уложиться сам). В тестовом PATH
+  # утилиты timeout может не быть — тогда вызываем напрямую.
+  if command -v timeout >/dev/null 2>&1; then
+    daemon=$(timeout 5 systemctl is-active tailscaled 2>/dev/null) || true
+  else
+    daemon=$(systemctl is-active tailscaled 2>/dev/null) || true
+  fi
   case "$daemon" in
     active | inactive | failed | activating) ;;
     *) daemon="unknown" ;;
@@ -52,17 +59,25 @@ elif command -v systemctl >/dev/null 2>&1; then
 fi
 
 # raw — ответ tailscale; error — короткая фиксированная строка по-русски.
-# stderr и текст ответа наружу не попадают.
+# stderr и текст ответа наружу не попадают. timeout 5: повисший tailscaled
+# (или ожидание сокета) не должен задерживать /api/status.
 raw=""
 error=""
 if [ "$installed" -eq 1 ]; then
-  if raw=$(tailscale status --json 2>/dev/null); then
-    if [ -z "$raw" ]; then
-      error="tailscale status вернул пустой ответ"
-    fi
+  status_rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    raw=$(timeout 5 tailscale status --json 2>/dev/null) || status_rc=$?
   else
+    raw=$(tailscale status --json 2>/dev/null) || status_rc=$?
+  fi
+  if [ "$status_rc" -eq 124 ]; then
+    raw=""
+    error="tailscale status не ответил за 5 с"
+  elif [ "$status_rc" -ne 0 ]; then
     raw=""
     error="tailscale status недоступен"
+  elif [ -z "$raw" ]; then
+    error="tailscale status вернул пустой ответ"
   fi
 fi
 
@@ -164,7 +179,7 @@ if data is not None:
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=5,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):

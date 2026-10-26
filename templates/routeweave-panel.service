@@ -37,9 +37,15 @@
 #   например /run/routeweave). ProtectSystem=strict делает всю остальную ФС
 #   read-only, ReadWritePaths открывает ровно эти два пути.
 #
-# PANEL_PORT берётся из EnvironmentFile и подставляет его systemd на этапе
-# exec (спецификаторы ${VAR} в ExecStart раскрывает менеджер сервисов, а не
-# шелл — поэтому здесь нет /bin/sh -c и нет риска инъекции из .env).
+# PANEL_PORT и PANEL_BIND берутся из EnvironmentFile: app.py читает их через
+# os.environ/.env и сам передаёт в uvicorn. ExecStart запускает app.py без
+# флагов хоста и без флагов воркеров: адрес прослушивания задаёт PANEL_BIND
+# (по умолчанию SERVER_IP, иначе 127.0.0.1), а ровно один воркер обязателен —
+# состояние JOB и кэш /api/status живут в памяти процесса.
+#
+# MemoryMax/TasksMax — предохранитель от утечек и размножения потоков
+# (uvicorn + threadpool + sudo-helper'ы): панель не должна съесть память
+# шлюза, даже если её начнут дёргать непрерывно.
 
 [Unit]
 Description=Routeweave panel (FastAPI)
@@ -53,9 +59,11 @@ Group=routeweave
 EnvironmentFile=/etc/routeweave/.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=/opt/routeweave-panel
-ExecStart=/opt/routeweave-panel/venv/bin/uvicorn app:app --host 0.0.0.0 --port ${PANEL_PORT}
+ExecStart=/opt/routeweave-panel/venv/bin/python app.py
 Restart=on-failure
 RestartSec=3
+MemoryMax=256M
+TasksMax=64
 NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes

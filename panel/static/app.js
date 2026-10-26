@@ -264,10 +264,15 @@
 
     let res;
     try {
+      const headers = {};
+      if (opt.body !== undefined) headers['Content-Type'] = 'text/plain; charset=utf-8';
+      // CSRF: сервер принимает мутирующий запрос без Origin/Referer только
+      // с этим заголовком (см. _check_csrf в panel/app.py).
+      if (method !== 'GET' && method !== 'HEAD') headers['X-Requested-With'] = 'Routeweave';
       res = await fetch(path, {
         method: method,
         body: opt.body === undefined ? undefined : opt.body,
-        headers: opt.body === undefined ? undefined : { 'Content-Type': 'text/plain; charset=utf-8' },
+        headers: Object.keys(headers).length ? headers : undefined,
         cache: 'no-store',
         credentials: 'same-origin',
         signal: controller.signal
@@ -1008,14 +1013,23 @@
     if (item.loading) return;
     item.loading = true;
     item.error = null;
-    if (id === state.currentList) renderEditorMeta();
+    // Сразу переводим редактор в readOnly и показываем «Загрузка…».
+    if (id === state.currentList) renderEditor();
 
     try {
       const res = await api(API.list(id), { timeout: 15000 });
       const content = res && typeof res.content === 'string' ? res.content : '';
       const wasDirty = item.loaded && item.draft !== item.saved;
+      const firstLoad = !item.loaded;
+      // Первая загрузка не должна затирать то, что пользователь уже напечатал.
+      const typedDraft = firstLoad && item.draft !== '' && item.draft !== content;
       item.saved = content;
-      if (!wasDirty) item.draft = content;
+      if (typedDraft) {
+        state.editorMessage = { tone: 'warn', text: 'В редакторе был черновик — он сохранён, проверьте и сохраните вручную' };
+        toast('warn', 'Черновик в редакторе не перезаписан', 'Содержимое списка с сервера загружено как сохранённая версия.');
+      } else if (!wasDirty) {
+        item.draft = content;
+      }
       item.loaded = true;
     } catch (err) {
       if (err.status !== 401) {
@@ -1053,10 +1067,13 @@
     refs.saveBtn.disabled = true;
     renderEditorMeta();
     let ok = false;
+    // Фиксируем отправляемое содержимое: пока идёт запрос, в редакторе могли
+    // снова начать печатать, и saved должен стать именно отправленным текстом.
+    const payload = item.draft;
 
     try {
-      const res = await api(API.list(id), { method: 'PUT', body: item.draft, timeout: 30000 });
-      item.saved = item.draft;
+      const res = await api(API.list(id), { method: 'PUT', body: payload, timeout: 30000 });
+      item.saved = payload;
       ok = true;
       if (!(options && options.silent)) {
         toast('ok', meta.file + ' сохранён', res && res.bytes ? 'Записано ' + fmtBytes(res.bytes) + '. Не забудьте применить.' : 'Не забудьте применить изменения.');
@@ -1111,6 +1128,13 @@
 
   function finishApply(ok, detail, toneOverride) {
     const meta = LIST_META[state.currentList];
+    if (ok === null || ok === undefined) {
+      // Сервер не сообщил результат: нельзя писать «Применено».
+      toast('warn', 'Состояние применения неизвестно',
+        truncate(detail || 'проверьте списки и статус сервисов вручную', 500));
+      state.editorMessage = { tone: 'warn', text: 'Состояние неизвестно — проверьте вручную' };
+      return;
+    }
     const tone = toneOverride || (ok ? 'ok' : 'bad');
     if (tone === 'ok') {
       toast('ok', 'Списки применены', detail ? truncate(detail, 400) : meta.applyHint);
@@ -1154,7 +1178,12 @@
             ? 'запуск ' + job.started_at + (job.finished_at ? ' → ' + job.finished_at : '')
             : ''
         );
-        finishApply(job.ok !== false, detail);
+        // Успех — только явный ok === true. ok === null значит, что фоновый
+        // воркер не дошёл до результата (или JOB сброшен) — не выдаём это
+        // за успешное применение.
+        if (job.ok === true) finishApply(true, detail);
+        else if (job.ok === false) finishApply(false, detail);
+        else finishApply(null, detail || 'панель не сообщила результат применения');
         return;
       }
     }
@@ -1202,13 +1231,15 @@
     }
 
     const baselineTs = (state.probes && state.probes.ts) || null;
+    // Отправляем ровно тот текст, который увидит пользователь в момент нажатия.
+    const payload = item.draft;
     setApplyBusy(true, 'Сохраняем…');
     startApplyTicker();
     say('Сохранение и применение списка ' + LIST_META[id].file);
 
     try {
-      await api(API.list(id), { method: 'PUT', body: item.draft, timeout: 30000 });
-      item.saved = item.draft;
+      await api(API.list(id), { method: 'PUT', body: payload, timeout: 30000 });
+      item.saved = payload;
       state.editorMessage = null;
       renderEditorMeta();
 
@@ -1305,9 +1336,7 @@
     items.push({ label: 'Tailscale', value: tsIp ? tsIp + ':1443' : 'имя-сервера-в-tailscale:1443', copy: !!tsIp });
     items.push({ label: 'Секрет', value: 'docker logs routeweave-tgwsproxy', mono: true, copy: false });
 
-    const deepLink = typeof cfg.tg_link === 'string' && cfg.tg_link.indexOf('tg://') === 0
-      ? cfg.tg_link
-      : '';
+    const deepLink = buildTgLink(cfg);
     refs.tgList.textContent = '';
     for (const item of items) {
       const copyable = item.copy !== false && /^[\w.:\-\[\]]+$/.test(item.value);
@@ -1334,6 +1363,29 @@
       refs.tgOpen.removeAttribute('href');
     }
     refs.tgCard.hidden = false;
+  }
+
+  /* tg://-ссылка: секрет перекодируем на клиенте, чтобы символы вроде & и #
+     не рвали query (сервер тоже отдаёт percent-encoded значение, это защита
+     от старой версии панели и от ручной сборки ссылки). */
+  function buildTgLink(cfg) {
+    const link = typeof cfg.tg_link === 'string' && cfg.tg_link.indexOf('tg://') === 0
+      ? cfg.tg_link
+      : '';
+    if (!link) return '';
+    let secret = '';
+    let server = '';
+    try {
+      const parsed = new URL(link);
+      secret = parsed.searchParams.get('secret') || '';
+      server = parsed.searchParams.get('server') || '';
+    } catch (err) {
+      return link;
+    }
+    const serverHost = cfg.tg_link_ip || server;
+    if (!secret || !serverHost) return link;
+    return 'tg://proxy?server=' + encodeURIComponent(serverHost) +
+      '&port=1443&secret=' + encodeURIComponent(secret);
   }
 
   function wgHostFromSubnet(subnet) {
