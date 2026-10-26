@@ -79,7 +79,7 @@ jobs:
       - name: pytest (firewall)
         run: |
           set -o pipefail
-          python3 -m pytest tests/test_firewall.py -v -rs | tee /tmp/fw.log
+          python3 -m pytest tests/test_firewall.py tests/test_tailscale_exit.py -v -rs | tee /tmp/fw.log
 
       - name: Проверить, что тесты не все skip
         run: |

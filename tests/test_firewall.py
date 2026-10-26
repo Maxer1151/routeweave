@@ -79,7 +79,7 @@ def started(tmp_path_factory):
         pytest.skip(f"ip netns add недоступен: {res.stderr.strip()}")
 
     try:
-        for iface in ("lan0", "wdtt0", "wg0"):
+        for iface in ("lan0", "wdtt0", "wg0", "tailscale0"):
             ns_ok("ip", "link", "add", iface, "type", "dummy")
             ns_ok("ip", "link", "set", iface, "up")
         ns_ok("ip", "link", "set", "lo", "up")
@@ -123,6 +123,34 @@ def test_vpn_ifaces(started):
     assert not any("wg+" in r for r in rules)
 
 
+def test_tailscale_forwarding(started):
+    rules = chain_rules()
+
+    # exit-node: вход из tailnet в TUN и возврат из TUN в tailnet
+    assert any("-i tailscale0" in r and "-o Meta" in r and "-j ACCEPT"
+               for r in rules), "нет ACCEPT tailscale0 -> Meta"
+    assert any("-i Meta" in r and "-o tailscale0" in r and "-j ACCEPT"
+               for r in rules), "нет ACCEPT Meta -> tailscale0"
+
+    # tailnet <-> tailnet и LAN -> tailnet
+    assert any("-i tailscale0" in r and "-o tailscale0" in r and "-j ACCEPT"
+               for r in rules), "нет ACCEPT tailscale0 -> tailscale0"
+    assert any("-i lan0" in r and "-o tailscale0" in r and "-j ACCEPT"
+               for r in rules), "нет ACCEPT lan0 -> tailscale0"
+
+    # CGNAT-спуф с любого интерфейса, кроме tailscale0
+    assert any("! -i tailscale0" in r and "-s 100.64.0.0/10" in r
+               and "-j DROP" in r for r in rules), "нет DROP для CGNAT-спуфа"
+
+
+def test_tailscale_ip_rule(started):
+    lines = ns_ok("ip", "rule", "show").splitlines()
+    rules = [ln for ln in lines if ln.startswith("8991:")]
+    assert len(rules) == 1, lines
+    assert "to 100.64.0.0/10" in rules[0], rules[0]
+    assert "lookup main" in rules[0], rules[0]
+
+
 def test_single_forward_jump(started):
     assert len(forward_jumps()) == 1, forward_jumps()
 
@@ -133,6 +161,8 @@ def test_second_start_does_not_duplicate(started):
     assert res.returncode == 0, res.stderr
     assert len(chain_rules()) == before
     assert len(forward_jumps()) == 1, forward_jumps()
+    lines = ns_ok("ip", "rule", "show").splitlines()
+    assert sum(1 for ln in lines if ln.startswith("8991:")) == 1, lines
 
 
 def test_wdtt_ip_rule(started):
@@ -151,7 +181,10 @@ def test_stop_removes_everything(started):
     assert "ROUTEWEAVE-FWD" not in ns_ok("iptables", "-S", "FORWARD")
     assert ns("iptables", "-S", "ROUTEWEAVE-FWD").returncode != 0, \
         "цепочка ROUTEWEAVE-FWD осталась после stop"
-    assert "10.77.0.0/24" not in ns_ok("ip", "rule")
+    rule_lines = ns_ok("ip", "rule", "show").splitlines()
+    assert "10.77.0.0/24" not in "\n".join(rule_lines)
+    assert not any(ln.startswith("8991:") for ln in rule_lines), rule_lines
+    assert "100.64.0.0/10" not in "\n".join(rule_lines), rule_lines
 
     # повторный stop — успех, а не "chain does not exist"
     again = run_fw(started, "stop")

@@ -6,6 +6,7 @@
 #  Опционально:
 #    - tg-ws-proxy-rs (Telegram MTProto, docker) — INSTALL_TGWS=yes
 #    - WDTT-Plus (VPN-сервер для Android, amd64) — INSTALL_WDTT=yes
+#    - Tailscale (exit node для tailnet, официальный apt) — INSTALL_TAILSCALE=yes
 #  Запуск: sudo ./install.sh            (интерактивно)
 #          sudo ./install.sh --defaults (без вопросов — только ядро)
 #          ./install.sh --help          (справка, root не нужен)
@@ -21,6 +22,10 @@ SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
 TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
 TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
 MIHOMO_FALLBACK_VER="v1.19.13"
+TS_STATUS="не устанавливался"
+TS_REPO_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
+TS_REPO_LIST=/etc/apt/sources.list.d/tailscale.list
+FAIL=0
 
 C_G='\033[0;32m'; C_Y='\033[1;33m'; C_R='\033[0;31m'; C_B='\033[1;34m'; C_N='\033[0m'
 info()  { echo -e "${C_B}[i]${C_N} $*"; }
@@ -39,11 +44,16 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
 Опции:
   -h, --help    показать эту справку и выйти (root не нужен)
   --defaults    не задавать вопросов: взять значения по умолчанию
-                (ядро; INSTALL_WDTT=no, INSTALL_TGWS=no)
+                (ядро; INSTALL_WDTT=no, INSTALL_TGWS=no, INSTALL_TAILSCALE=no)
 
 Переменные окружения времени установки (НЕ из /etc/routeweave/.env):
   INSTALL_WDTT=yes|no     поставить WDTT-Plus (VPN для Android, только amd64)
   INSTALL_TGWS=yes|no     поставить tg-ws-proxy (Telegram MTProto, нужен Docker)
+  INSTALL_TAILSCALE=yes|no
+                          поставить Tailscale (exit node; официальный apt,
+                          только Ubuntu/Debian)
+  TS_AUTHKEY_FILE=<path>  auth key Tailscale в файле (предпочтительно)
+  TS_AUTHKEY=<key>        auth key строкой (только на время установки)
   ZAPRET_REF=<ref>        ветка/тег zapret при клонировании и обновлении
                           (по умолчанию master)
   MIHOMO_SHA256=<hex>     ожидаемая sha256 архива mihomo, если апстрим не
@@ -60,7 +70,7 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
      если активен), не затирая ручные правки /etc/routeweave/zapret.conf;
   5. ставит systemd-юниты, helper-скрипты в /usr/local/sbin и FastAPI-панель
      в venv (/opt/routeweave-panel);
-  6. при желании — zashboard, tg-ws-proxy (docker) и WDTT-Plus.
+  6. при желании — zashboard, tg-ws-proxy (docker), WDTT-Plus и Tailscale.
 
 Пароли (генерируются один раз, если их нет в существующем .env):
   PANEL_PASS     — пароль входа в веб-панель (пишется в .env);
@@ -178,6 +188,18 @@ normalize_yn() { # yes/no (регистронезависимо); rc=1 если 
   esac
 }
 
+tailscale_repo_urls() { # tailscale_repo_urls <id> <codename> -> два URL apt-репозитория
+  local id=${1-} codename=${2-}
+  case "$id" in
+    ubuntu|debian) ;;
+    *) return 1 ;;
+  esac
+  # codename — строчная латиница/цифры; пустое значение и пути недопустимы.
+  [[ $codename =~ ^[a-z][a-z0-9]*$ ]] || return 1
+  printf 'https://pkgs.tailscale.com/stable/%s/%s.noarmor.gpg\n' "$id" "$codename"
+  printf 'https://pkgs.tailscale.com/stable/%s/%s.tailscale-keyring.list\n' "$id" "$codename"
+}
+
 gen_hex() { # gen_hex <байт> -> hex-строка длиной 2*<байт>
   local n=${1:-16}
   if command -v openssl >/dev/null 2>&1; then
@@ -207,6 +229,7 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-tgws-state.sh \
     templates/fw-base.sh \
     templates/fw-wan.sh \
+    templates/fw-tailscale.sh \
     templates/fw-nfq.sh \
     templates/mihomo.service \
     templates/routeweave-firewall.service \
@@ -481,6 +504,11 @@ if [ -f "$ETC/.env" ]; then
   . "$ETC/.env"
 fi
 
+# Auth key Tailscale приходит только из окружения времени установки;
+# в /etc/routeweave/.env он не пишется.
+TS_AUTHKEY_FILE="${TS_AUTHKEY_FILE:-}"
+TS_AUTHKEY="${TS_AUTHKEY:-}"
+
 DETECTED_IFACE="${LAN_IFACE:-$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')}"
 [ -n "$DETECTED_IFACE" ] || die "Не удалось определить сетевой интерфейс"
 DETECTED_IP="${SERVER_IP:-$(ip -4 addr show "$DETECTED_IFACE" | awk '/inet /{print $2; exit}' | cut -d/ -f1)}"
@@ -577,6 +605,15 @@ ask INSTALL_TGWS "Установить tg-ws-proxy (Telegram MTProto, нужен
 if ! INSTALL_TGWS=$(normalize_yn "$INSTALL_TGWS"); then
   warn "INSTALL_TGWS: нераспознанное значение — считаю no"
   INSTALL_TGWS=no
+fi
+
+# Tailscale (exit node для tailnet) — только по явному согласию: ставится из
+# официального apt-репозитория, поддерживаются Ubuntu/Debian.
+INSTALL_TAILSCALE="${INSTALL_TAILSCALE:-no}"
+ask INSTALL_TAILSCALE "Установить Tailscale (exit node для tailnet)? yes/no" "${INSTALL_TAILSCALE:-no}"
+if ! INSTALL_TAILSCALE=$(normalize_yn "$INSTALL_TAILSCALE"); then
+  warn "INSTALL_TAILSCALE: нераспознанное значение — считаю no"
+  INSTALL_TAILSCALE=no
 fi
 
 PANEL_PASS_GENERATED=0
@@ -838,6 +875,7 @@ fi
 # fw-скрипты и конфиг zapret
 install -m 0755 "$APP_DIR/templates/fw-base.sh" "$ETC/fw-base.sh"
 install -m 0755 "$APP_DIR/templates/fw-wan.sh" "$ETC/fw-wan.sh"
+install -m 0755 "$APP_DIR/templates/fw-tailscale.sh" "$ETC/fw-tailscale.sh"
 install -m 0755 "$APP_DIR/templates/fw-nfq.sh"  "$ETC/fw-nfq.sh"
 
 # .env — источник истины для config.yaml и LAN_IFACE; из LAN_IFACE ниже
@@ -972,7 +1010,135 @@ else
   info "tg-ws-proxy: пропущен (INSTALL_TGWS=no)"
 fi
 
-# ---------- 11. Firewall / ufw ----------
+# ---------- 11. Tailscale (exit node для tailnet) ----------
+ts_fail() { warn "Tailscale: $*"; TS_STATUS="ошибка"; return 1; }
+
+# BackendState через python3: jq не обязателен (хотя и есть в пакетах).
+ts_backend_state() {
+  tailscale status --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+print(data.get("BackendState", ""))
+' 2>/dev/null
+}
+
+# Демон после enable --now отвечает не сразу: до ~10 секунд ждём
+# определённого состояния, чтобы не уйти в авторизацию по пустому ответу.
+ts_wait_state() {
+  local state=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    state=$(ts_backend_state) || state=""
+    case "$state" in
+      Running|NeedsLogin|NeedsMachineAuth|Stopped) break ;;
+    esac
+    sleep 1
+  done
+  printf '%s' "$state"
+}
+
+install_tailscale() {
+  local os_id="${ID:-}" os_codename="${VERSION_CODENAME:-}"
+  local urls key_url list_url auth_arg="" auth_tmp="" state
+
+  if command -v tailscale >/dev/null 2>&1; then
+    info "Tailscale уже установлен — пакет не переустанавливаю"
+    TS_STATUS="установлен"
+  else
+    if ! urls=$(tailscale_repo_urls "$os_id" "$os_codename"); then
+      ts_fail "официальный apt-репозиторий поддерживается только для Ubuntu/Debian с известным codename (ID=${os_id:-?}, VERSION_CODENAME=${os_codename:-?}); шаг пропущен"
+      return 1
+    fi
+    key_url=$(printf '%s\n' "$urls" | sed -n '1p')
+    list_url=$(printf '%s\n' "$urls" | sed -n '2p')
+    info "Добавление apt-репозитория Tailscale ($os_id/$os_codename)..."
+    install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d \
+      || { ts_fail "не удалось создать каталоги apt"; return 1; }
+    curl -fsSL --retry 2 --max-time 60 -o "$WORK_DIR/tailscale-archive-keyring.gpg" "$key_url" \
+      || { ts_fail "не удалось скачать $key_url"; return 1; }
+    curl -fsSL --retry 2 --max-time 60 -o "$WORK_DIR/tailscale.list" "$list_url" \
+      || { ts_fail "не удалось скачать $list_url"; return 1; }
+    install -m 0644 "$WORK_DIR/tailscale-archive-keyring.gpg" "$TS_REPO_KEYRING" \
+      || { ts_fail "не удалось установить $TS_REPO_KEYRING"; return 1; }
+    install -m 0644 "$WORK_DIR/tailscale.list" "$TS_REPO_LIST" \
+      || { ts_fail "не удалось установить $TS_REPO_LIST"; return 1; }
+    apt-get update -qq \
+      || { ts_fail "apt-get update завершился ошибкой"; return 1; }
+    apt-get install -y -qq tailscale tailscale-archive-keyring \
+      || { ts_fail "не удалось установить пакет tailscale"; return 1; }
+    TS_STATUS="установлен"
+    ok "Tailscale установлен из официального apt-репозитория"
+  fi
+
+  systemctl enable --now tailscaled >/dev/null 2>&1 \
+    || { ts_fail "не удалось запустить tailscaled (systemctl status tailscaled)"; return 1; }
+
+  state=$(ts_wait_state)
+  info "Tailscale BackendState: ${state:-неизвестно}"
+
+  if [ "$state" = "Running" ]; then
+    tailscale set --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false \
+      || { ts_fail "tailscale set завершился ошибкой"; return 1; }
+    TS_STATUS="настроен"
+    ok "Tailscale: exit node анонсирован, netfilter-mode=nodivert, accept-dns=false"
+  else
+    if [ -n "$TS_AUTHKEY_FILE" ]; then
+      case "$TS_AUTHKEY_FILE" in
+        /*) ;;
+        *) ts_fail "TS_AUTHKEY_FILE должен быть абсолютным путём: $TS_AUTHKEY_FILE"; return 1 ;;
+      esac
+      if [ ! -f "$TS_AUTHKEY_FILE" ] || [ ! -r "$TS_AUTHKEY_FILE" ]; then
+        ts_fail "TS_AUTHKEY_FILE не читается: $TS_AUTHKEY_FILE"
+        return 1
+      fi
+      auth_arg="--auth-key=file:$TS_AUTHKEY_FILE"
+    elif [ -n "$TS_AUTHKEY" ]; then
+      auth_tmp="$WORK_DIR/ts-authkey"
+      ( umask 077; printf '%s\n' "$TS_AUTHKEY" > "$auth_tmp" ) \
+        || { ts_fail "не удалось записать временный файл ключа"; return 1; }
+      auth_arg="--auth-key=file:$auth_tmp"
+    fi
+
+    if [ -n "$auth_arg" ]; then
+      info "Авторизация Tailscale..."
+      if ! tailscale up "$auth_arg" \
+          --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false --timeout=60s; then
+        if [ -n "$auth_tmp" ]; then rm -f "$auth_tmp" 2>/dev/null || true; fi
+        unset TS_AUTHKEY
+        ts_fail "tailscale up завершился ошибкой — проверьте ключ и журнал tailscaled"
+        return 1
+      fi
+      TS_STATUS="настроен"
+      ok "Tailscale авторизован: exit node анонсирован"
+    else
+      TS_STATUS="требуется авторизация"
+      warn "Tailscale: требуется авторизация — ключ не задан, tailscale up не запускаю"
+      echo "  Выполните вручную:"
+      echo "  sudo tailscale up --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false --timeout=60s"
+    fi
+  fi
+
+  if [ -n "$auth_tmp" ]; then rm -f "$auth_tmp" 2>/dev/null || true; fi
+  unset TS_AUTHKEY
+  # fw-base.sh при старте смотрит наличие tailscale0; перезапускаем, чтобы
+  # правила для exit-node появились сразу после установки.
+  systemctl restart routeweave-firewall >/dev/null 2>&1 || true
+  return 0
+}
+
+if [ "$INSTALL_TAILSCALE" = "yes" ]; then
+  info "Шаг Tailscale..."
+  install_tailscale || FAIL=1
+else
+  info "Tailscale: пропущен (INSTALL_TAILSCALE=no)"
+  TS_STATUS="пропущен"
+fi
+
+# ---------- 12. Firewall / ufw ----------
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   info "ufw активен — добавляю разрешения для локалки..."
   ufw route allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
@@ -983,18 +1149,38 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     PORTS_TCP="$PORTS_TCP 1443"
   fi
 
-  # Один и тот же набор портов — для WDTT-подсети и для LAN-подсети.
-  for src in "$WG_SUBNET" "$LAN_CIDR"; do
+  # Tailscale может быть поставлен установщиком (INSTALL_TAILSCALE=yes) или
+  # уже стоять; если команда есть, открываем tailnet те же порты, что LAN/WDTT,
+  # и разрешаем forwarded-трафик.
+  TS_CIDR=""
+  if command -v tailscale >/dev/null 2>&1; then
+    TS_CIDR="${TS_SUBNET:-100.64.0.0/10}"
+    TS_IFACE="${TS_IFACE:-tailscale0}"
+    ufw route allow in on "$TS_IFACE" >/dev/null 2>&1 || true
+    ufw route allow out on "$TS_IFACE" >/dev/null 2>&1 || true
+    # Прямые соединения tailscale (когда DERP не нужен).
+    ufw allow 41641/udp >/dev/null 2>&1 || true
+    # CGNAT-спуфинг с LAN: пакет с tailnet-источником не должен приходить
+    # из локальной сети. insert 1 — deny обязан стоять выше allow-правил.
+    ufw insert 1 deny in on "$LAN_IFACE" from "$TS_CIDR" >/dev/null 2>&1 || true
+  fi
+
+  # Один и тот же набор портов — для WDTT-подсети, LAN-подсети и tailnet.
+  for src in "$WG_SUBNET" "$LAN_CIDR" "${TS_CIDR:-}"; do
     [ -n "$src" ] || continue
     for p in $PORTS_TCP; do
       ufw allow from "$src" to any port "$p" proto tcp >/dev/null 2>&1 || true
     done
     ufw allow from "$src" to any port 53 proto udp >/dev/null 2>&1 || true
   done
-  ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53)"
+  if [ -n "$TS_CIDR" ]; then
+    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53; tailscale: $TS_CIDR через $TS_IFACE, 41641/udp; спуф с $LAN_IFACE запрещён)"
+  else
+    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53)"
+  fi
 fi
 
-# ---------- 12. Запуск ----------
+# ---------- 13. Запуск ----------
 info "Запуск сервисов..."
 systemctl daemon-reload
 systemctl enable --now routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
@@ -1002,7 +1188,6 @@ systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
 sleep 3
 
-FAIL=0
 for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lists-update.timer; do
   st=$(systemctl is-active "$u" || true)
   if [ "$st" = "active" ]; then ok "$u: active"; else warn "$u: $st (journalctl -u $u -n 30)"; FAIL=1; fi
@@ -1013,7 +1198,7 @@ info "Первый прогон обновления списков..."
 systemctl start routeweave-lists-update.service \
   || warn "обновление списков завершилось ошибкой — journalctl -u routeweave-lists-update -n 50"
 
-# ---------- 13. WDTT-Plus (VPN-сервер для Android) ----------
+# ---------- 14. WDTT-Plus (VPN-сервер для Android) ----------
 if [ "$INSTALL_WDTT" = "yes" ]; then
   info "Шаг WDTT-Plus..."
   install_wdtt || FAIL=1
@@ -1026,6 +1211,10 @@ fi
 WDTT_OK=0
 if [ "$INSTALL_WDTT" = "yes" ]; then
   case "$WDTT_STATUS" in установлен|"уже установлен") WDTT_OK=1 ;; esac
+fi
+TS_OK=0
+if [ "$INSTALL_TAILSCALE" = "yes" ]; then
+  case "$TS_STATUS" in установлен|настроен) TS_OK=1 ;; esac
 fi
 
 echo
@@ -1048,6 +1237,22 @@ if [ "$WDTT_OK" = 1 ]; then
   echo -e "  Конфиг:      ${WDTT_INITIAL_CONFIG:-/root/wdtt-initial.json} (chmod 600, главный пароль внутри)"
   echo -e "  Управление:  ${C_B}$WDTT_DIR/install.sh status|doctor|monitor${C_N}"
 fi
+if [ "$INSTALL_TAILSCALE" = "yes" ]; then
+  echo -e "Tailscale:     $TS_STATUS"
+  case "$TS_STATUS" in
+    установлен|настроен)
+      echo -e "  Exit node:   ${C_Y}одобрите узел в админ-консоли Tailscale${C_N} (Machines → ... → Edit route settings)"
+      echo -e "  DNS:         включите «Use with exit node» для этого узла, если нужен DNS через шлюз"
+      ;;
+    "требуется авторизация")
+      echo -e "  Авторизация: ${C_B}sudo tailscale up --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false --timeout=60s${C_N}"
+      echo -e "  Exit node:   после входа одобрите узел в админ-консоли Tailscale"
+      ;;
+    ошибка)
+      echo -e "  Установка Tailscale не удалась — шлюз работает без него; повторите с INSTALL_TAILSCALE=yes"
+      ;;
+  esac
+fi
 
 TAIL=""
 STEP=4
@@ -1068,6 +1273,12 @@ if [ "$WDTT_OK" = 1 ]; then
   TAIL="${TAIL}  $STEP. WDTT-Plus (Android): внешний IP/домен, UDP $WDTT_DTLS_PORT, главный пароль
      в ${WDTT_INITIAL_CONFIG:-/root/wdtt-initial.json}; управление —
      sudo $WDTT_DIR/install.sh status|doctor|monitor
+"
+fi
+if [ "$TS_OK" = 1 ]; then
+  STEP=$((STEP + 1))
+  TAIL="${TAIL}  $STEP. Tailscale: одобрите exit node в админ-консоли (Machines -> ...
+     -> Edit route settings) и включите DNS «Use with exit node» для узла.
 "
 fi
 cat <<EOF

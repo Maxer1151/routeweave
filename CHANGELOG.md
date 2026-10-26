@@ -79,6 +79,20 @@
 
 ### Добавлено
 
+- Firewall: `tailscale0` как третий вход (forwarding в TUN, возвратный путь,
+  CGNAT-спуф-гард, `ip rule` 8991).
+- Диагностика: `fw-tailscale.sh status|doctor`.
+- Установщик: ufw-правила для `100.64.0.0/10` и `tailscale0`, `41641/udp`.
+- Установщик: `INSTALL_TAILSCALE=yes|no` (по умолчанию `no`, `--defaults` —
+  `no`) — установка Tailscale из официального apt-репозитория Ubuntu/Debian,
+  включение `tailscaled` и настройка
+  `--advertise-exit-node --netfilter-mode=nodivert --accept-dns=false`.
+  Повторный запуск идемпотентен: установленный пакет не переустанавливается,
+  авторизованный узел (`BackendState=Running`) получает `tailscale set`, а
+  состояние `/var/lib/tailscale` и логин сохраняются. Ключ
+  `TS_AUTHKEY_FILE`/`TS_AUTHKEY` используется только на время установки и не
+  попадает в `.env`; если узел не авторизован и ключа нет, установщик не
+  зависает, а печатает команду `tailscale up`.
 - `feat(firewall): доступ из WAN (WAN_INGRESS)`:
   - цепочка `ROUTEWEAVE-WANMARK` помечает входящие NEW-соединения на
     `WAN_PORTS` и восстанавливает connmark на ответах (`restore-mark` первым,
@@ -105,6 +119,10 @@
 
 ### Изменено
 
+- Документация: Tailscale теперь необязательный компонент и может ставиться
+  установщиком (`INSTALL_TAILSCALE=yes`): идемпотентность, ключ авторизации без
+  хранения в `.env`, ручной `tailscale up`, одобрение exit node, DNS/fake-ip с
+  **Use with exit node**, доступ к сервисам по tailscale-адресу, ufw и откат.
 - `zapret-nfqws.service` запускает `/etc/routeweave/nfqws-launch.sh` с
   whitelist `EXTRA` вместо `sh -c`; `EnvironmentFile` убран.
 - `fw-nfq.sh`: читаемый массив правил, атомарная запись hostlist, проверка

@@ -4,7 +4,7 @@
 
 ## Что это
 
-Routeweave — прозрачный шлюз на Ubuntu/Debian, который ставится на отдельную машину за домашним роутером. Клиенты получают его как шлюз и DNS, а mihomo разводит трафик по доменам: часть доменов проходит через DPI-десинк zapret, гео-блокировки уходят через внешний SOCKS/HTTP-прокси, российские сервисы и всё остальное идут напрямую. Необязательные компоненты — Telegram-прокси (tg-ws-proxy) и WDTT-Plus для входа с телефона.
+Routeweave — прозрачный шлюз на Ubuntu/Debian, который ставится на отдельную машину за домашним роутером. Клиенты получают его как шлюз и DNS, а mihomo разводит трафик по доменам: часть доменов проходит через DPI-десинк zapret, гео-блокировки уходят через внешний SOCKS/HTTP-прокси, российские сервисы и всё остальное идут напрямую. Необязательные компоненты — Telegram-прокси (tg-ws-proxy), WDTT-Plus для входа с телефона и Tailscale (exit node).
 
 ## Возможности
 
@@ -12,20 +12,23 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 - fake-ip DNS на порту 53 и правила mihomo на файловых rule-provider'ах.
 - Firewall: отдельная цепочка `ROUTEWEAVE-FWD`, forwarding для LAN и VPN,
   опциональный drop QUIC выше разрешающих правил.
+- Tailscale как третий вход: сервер работает как exit node, `tailscale0`
+  получает ту же политику, что LAN и WDTT.
 - Автообновление списков по systemd-таймеру.
 - Веб-панель: статусы сервисов, пробы путей, редактор списков, перезапуски.
 - zashboard для соединений и трафика.
-- Опциональные tg-ws-proxy и WDTT-Plus.
+- Опциональные tg-ws-proxy, WDTT-Plus и Tailscale.
 
 ## Архитектура
 
 ```text
-                 ┌────────── Routeweave: шлюз (Ubuntu/Debian, 1 NIC) ───────────┐
-  LAN ──────────►│ firewall ─► mihomo: TUN, fake-ip DNS :53, правила            │──► DIRECT: RU / GEOIP,RU
-  WDTT (опц.) ──►│ wdtt0 ────► та же политика, что у LAN                        │──► DIRECT + zapret: dpi.txt
-                 │ zapret (nfqws) · панель :8080 · zashboard :9090/ui           │──► SOCKS/HTTP: geo.txt
-                 │ tg-ws-proxy :1443 (опц.)                                     │──► WS/TLS: Telegram (опц.)
-                 └──────────────────────────────────────────────────────────────┘
+                       ┌────────── Routeweave: шлюз (Ubuntu/Debian, 1 NIC) ───────────┐
+  LAN ────────────────►│ firewall ─► mihomo: TUN, fake-ip DNS :53, правила            │──► DIRECT: RU / GEOIP,RU
+  WDTT (опц.) ────────►│ wdtt0 ────► та же политика, что у LAN                        │──► DIRECT + zapret: dpi.txt
+  Tailscale (опц.) ───►│ tailscale0 ──► та же политика, что у LAN                     │
+                       │ zapret (nfqws) · панель :8080 · zashboard :9090/ui           │──► SOCKS/HTTP: geo.txt
+                       │ tg-ws-proxy :1443 (опц.)                                     │──► WS/TLS: Telegram (опц.)
+                       └──────────────────────────────────────────────────────────────┘
 ```
 
 ## Состав
@@ -38,13 +41,16 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 - **Списки доменов** — `/etc/routeweave/lists/`: geo, dpi, ru-direct и custom-файлы.
 - **Панель (FastAPI)** — статусы сервисов, пробы путей, редактор списков,
   перезапуски; Basic-авторизация.
-- **Firewall** — `fw-base.sh` / `fw-wan.sh` / `fw-nfq.sh`, systemd-юниты, policy-routing для WDTT.
+- **Firewall** — `fw-base.sh` / `fw-wan.sh` / `fw-nfq.sh` / `fw-tailscale.sh`,
+  systemd-юниты, policy-routing для WDTT и Tailscale.
 
 Опционально:
 
 - **tg-ws-proxy-rs** — Telegram MTProto-прокси в Docker, порт `1443`.
 - **WDTT-Plus** — сервер WDTT в systemd (`wdtt`), только amd64: DTLS
   `56000/udp`, внутренний WireGuard `56001/udp`, интерфейс `wdtt0`.
+- **Tailscale** — опциональный exit node: ставится установщиком при
+  `INSTALL_TAILSCALE=yes` (или вручную), интерфейс `tailscale0`.
 
 ## Требования
 
@@ -54,6 +60,9 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
 - Для Telegram-прокси: заранее установленные Docker Engine и compose v2.
   Установщик Docker **не ставит**.
 - Для WDTT-Plus: amd64 и внешний UDP-порт (по умолчанию `56000`) для проброса.
+- Для Tailscale: Ubuntu/Debian и доступ к официальному apt-репозиторию
+  Tailscale (нужен интернет). Авторизация — ключ (`TS_AUTHKEY_FILE` или
+  `TS_AUTHKEY`) либо ручной `tailscale up` после установки.
 
 ## Быстрый старт
 
@@ -64,9 +73,11 @@ sudo bash install.sh                  # интерактивно
 sudo bash install.sh --defaults       # только ядро, без вопросов
 sudo env INSTALL_TGWS=yes bash install.sh   # + Telegram-прокси (нужен Docker)
 sudo env INSTALL_WDTT=yes bash install.sh   # + WDTT-Plus (amd64)
+sudo env INSTALL_TAILSCALE=yes bash install.sh  # + Tailscale exit node
 ```
 
-`--defaults` ставит только ядро; tgws и WDTT по умолчанию выключены. Установщик
+`--defaults` ставит только ядро; tgws, WDTT и Tailscale по умолчанию
+выключены. Установщик
 не перезаписывает существующие `.env` и live-списки. Повторный запуск обновляет
 mihomo до свежего релиза (если версия отличается), юниты и конфиги, но сохраняет
 `.env` и списки.
@@ -74,7 +85,10 @@ mihomo до свежего релиза (если версия отличает�
 Если на шлюзе активен ufw, установщик открывает доступ из LAN и `WG_SUBNET`
 к `53/tcp+udp`, `7890/tcp`, `9090/tcp`, `PANEL_PORT/tcp` и `1443/tcp` (при
 `INSTALL_TGWS=yes`), а также разрешает forwarding для LAN-интерфейса и
-`wdtt0`. Правила добавляются идемпотентно, повторный запуск дублей не создаёт.
+`wdtt0`. При `INSTALL_TAILSCALE=yes` или уже установленном Tailscale
+добавляются правила для `tailscale0`, `100.64.0.0/10` и `41641/udp`, а
+forwarding разрешён для tailnet. Правила добавляются идемпотентно, повторный
+запуск дублей не создаёт.
 
 ## Параметры `.env`
 
@@ -91,9 +105,11 @@ mihomo до свежего релиза (если версия отличает�
 | `TG_CF_WORKER_DOMAIN` | Домен CF Worker (обычно совпадает с `BASE_DOMAIN`) |
 | `TG_LINK_IP` | IP/хост для `tg://`-ссылки в панели; пусто = `SERVER_IP` |
 | `WG_SUBNET` | Подсеть клиентов WDTT (`wdtt0`), по умолчанию `10.66.66.0/24`; policy-routing — `ip rule` priority 8990 |
+| `TS_IFACE` | Интерфейс Tailscale, по умолчанию `tailscale0`; установщик не пишет, можно добавить вручную |
+| `TS_SUBNET` | Подсеть tailnet, по умолчанию `100.64.0.0/10`; установщик не пишет, можно добавить вручную |
 | `WAN_INGRESS` | `yes` — включить доступ из WAN к опубликованным портам; по умолчанию `no` |
 | `WAN_PORTS` | Порты для WAN-доступа: `8081`, `8081/tcp`, `51820/udp`, диапазоны `8000:8100/tcp` / `8000-8100/tcp`; голое число = tcp |
-| `WAN_INGRESS_MARK` | Метка connmark для WAN-доступа, по умолчанию `0x40000`; не должна пересекаться с метками mihomo/docker |
+| `WAN_INGRESS_MARK` | Метка connmark для WAN-доступа, по умолчанию `0x40000`; не должна пересекаться с метками mihomo/docker; при Tailscale задайте `0x200000` |
 | `WAN_INGRESS_RULE_PRIO` | Приоритет `ip rule` для помеченных пакетов, по умолчанию `8993`; должен быть меньше 9000 |
 | `PANEL_PORT` | Порт веб-панели, по умолчанию `8080` |
 | `PANEL_USER` | Логин панели, по умолчанию `admin` |
@@ -107,9 +123,18 @@ mihomo до свежего релиза (если версия отличает�
 
 | Переменная | Назначение |
 |---|---|
+| `INSTALL_WDTT` | `yes`/`no` — ставить WDTT-Plus; по умолчанию `no`, `--defaults` — `no` |
+| `INSTALL_TGWS` | `yes`/`no` — ставить tg-ws-proxy; по умолчанию `no`, `--defaults` — `no` |
+| `INSTALL_TAILSCALE` | `yes`/`no` — поставить Tailscale и настроить exit node; по умолчанию `no`, `--defaults` — `no` |
+| `TS_AUTHKEY_FILE` | файл с ключом авторизации Tailscale на время установки; предпочтительнее `TS_AUTHKEY`; в `.env` не пишется |
 | `ZAPRET_REF` | Ветка/тег zapret при клонировании и обновлении, по умолчанию `master`; фактический коммит пишется в `/etc/routeweave/zapret.commit` |
 | `MIHOMO_SHA256` | Ожидаемая sha256 архива mihomo, если апстрим не публикует `<url>.sha256` |
 | `ZASHBOARD_SHA256` | То же для `dist.zip` zashboard |
+
+`INSTALL_*` читаются из окружения или запрашиваются интерактивно; при
+`--defaults` вопросы не задаются. Ключ Tailscale (`TS_AUTHKEY_FILE` или
+`TS_AUTHKEY`) действует только на время установки и не сохраняется в
+`/etc/routeweave/.env`.
 
 Если контрольная сумма недоступна ни у апстрима, ни в переменной, установщик
 предупреждает, что целостность загрузки не проверена.
@@ -128,6 +153,10 @@ mihomo до свежего релиза (если версия отличает�
 5. **Стратегия zapret.** Запустите `sudo /opt/zapret/blockcheck.sh`, перенесите
    рабочую стратегию в `/etc/routeweave/zapret.conf` и выполните
    `sudo systemctl restart zapret-nfqws`.
+6. **Tailscale (если ставили).** Одобрите шлюз как exit node в admin console
+   (**Machines** → **Edit exit node** → **Use as exit node**) и настройте DNS
+   tailnet: **Use with exit node** и nameserver `100.x.y.z` (см. раздел
+   «Опционально: Tailscale»).
 
 ## Автообновление списков
 
@@ -197,18 +226,111 @@ CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
 `TG_CF_WORKER_DOMAIN`, `TG_LINK_IP`. Без этого компонента ядро работает как
 обычно.
 
-## Опционально: WDTT-Plus и Tailscale
+## Опционально: WDTT-Plus
 
 WDTT-Plus включается `INSTALL_WDTT=yes`, только amd64. DTLS `56000/udp`,
 внутренний WireGuard `56001/udp`, интерфейс `wdtt0`, начальный конфиг
 `/root/wdtt-initial.json`. VK-хеш создаётся вручную. Управление:
 `/opt/wdtt-installer/install.sh status|doctor|monitor`. Подсеть `WG_SUBNET`
 (по умолчанию `10.66.66.0/24`) получает ту же политику, что LAN; для неё
-добавляется `ip rule` priority 8990. Firewall учитывает `wdtt0`,
-`tailscale0` и существующие `wg*`.
+добавляется `ip rule` priority 8990. Firewall учитывает `wdtt0` и
+существующие `wg*`; `tailscale0` — в разделе ниже.
 
-Tailscale настраивается отдельно, Routeweave его не трогает. При проблемах
-смотрите `tailscale status`.
+## Опционально: Tailscale (exit node)
+
+Tailscale ставится установщиком при `INSTALL_TAILSCALE=yes` (интерактивный
+вопрос, по умолчанию `no`; `--defaults` — `no`). Без него шлюз работает как
+обычно. Сервер работает как exit node, а `tailscale0` — третий вход шлюза:
+трафик клиентов уходит в TUN mihomo и получает ту же политику, что LAN и WDTT
+(geo → SOCKS, dpi → zapret, RU → direct). Прямого NAT-режима нет.
+
+Что делает установщик:
+
+- добавляет официальный apt-репозиторий Tailscale для Ubuntu/Debian, ставит
+  пакет `tailscale` и включает `tailscaled`;
+- применяет `--advertise-exit-node --netfilter-mode=nodivert
+  --accept-dns=false` (для уже авторизованного узла — через `tailscale set`);
+- не переустанавливает уже установленный пакет и не логинит узел заново:
+  состояние `/var/lib/tailscale` сохраняется, повторный `tailscale login` не
+  нужен;
+- если узел не авторизован и ключа нет, не зависает: включает `tailscaled` и
+  печатает команду для ручного входа.
+
+Ключ авторизации передаётся только на время установки:
+
+```bash
+sudo env INSTALL_TAILSCALE=yes TS_AUTHKEY_FILE=/root/ts-authkey bash install.sh
+```
+
+`TS_AUTHKEY_FILE` предпочтительнее; `TS_AUTHKEY` тоже поддерживается, но
+установщик временно пишет его в файл `0600` и удаляет. В `/etc/routeweave/.env`
+и в репозиторий ключ не пишется. Если узел ещё не авторизован и ключа нет,
+после установки выполните напечатанную команду:
+
+```bash
+sudo tailscale up --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false
+```
+
+`--accept-dns=false` рекомендуется, чтобы Tailscale не перехватывал DNS самого
+шлюза: DNS клиентов обслуживает mihomo.
+
+`nodivert` обязателен: иначе Tailscale вставляет свои цепочки `ts-*`, помечает
+пакеты меткой `0x40000` и делает MASQUERADE, что конфликтует с policy-routing
+mihomo и `WAN_INGRESS_MARK` (тоже `0x40000`).
+
+Одобрение: admin console → **Machines** → у сервера **Edit exit node** →
+**Use as exit node**. При кастомных ACL нужен grant на `autogroup:internet`.
+
+Клиент (Linux):
+
+```bash
+sudo tailscale set --exit-node=100.x.y.z --exit-node-allow-lan-access=true
+```
+
+На Windows и Android exit node выбирается в меню приложения; там же включите
+**Allow LAN access**.
+
+DNS. В admin console → **DNS** → **Nameservers** → **Add nameserver** →
+**Custom** → `100.x.y.z` (tailscale-адрес шлюза) и включите
+**Use with exit node**: без этого при активном exit node Tailscale резолвит
+через сам exit node, игнорируя кастомный nameserver. **Override local DNS**
+включает сервер для всего tailnet, **Split DNS** — только для выбранных
+доменов. В приложениях Android/Windows тумблер **Use Tailscale DNS settings**
+должен быть включён: без него клиент не использует nameserver из админки,
+но и одного тумблера без nameserver недостаточно — запросы не попадут в
+mihomo. С nameserver клиент получает fake-ip `198.18.x.x`, и работают
+доменные правила geo/dpi/ru. DoH в браузерах и Private DNS на Android
+отключите: иначе приложения ходят мимо системного DNS.
+
+Сервисы по tailscale-адресу: панель `http://100.x.y.z:PANEL_PORT`, zashboard
+`http://100.x.y.z:9090/ui/`, DNS `100.x.y.z:53`, mixed-proxy
+`100.x.y.z:7890`. Порты те же, что у LAN; при активном ufw их открывает
+`install.sh`: правила для `tailscale0`, `100.64.0.0/10` и `41641/udp`
+добавляются, если Tailscale установлен, в том числе только что. Если
+Tailscale поставлен позже, повторите `sudo bash install.sh` — правила ufw
+добавятся; повторный запуск идемпотентен.
+
+После обновления Routeweave достаточно повторить `sudo bash install.sh` и
+`sudo systemctl restart routeweave-firewall`: пакет не переустанавливается,
+состояние Tailscale сохраняется.
+
+Диагностика:
+
+```bash
+sudo /etc/routeweave/fw-tailscale.sh doctor
+tailscale status
+journalctl -u tailscaled -n 50
+```
+
+Ограничения: policy-режим через userspace-стек mihomo (ниже пропускная
+способность, выше нагрузка на CPU); IPv6 не поддерживается; `QUIC_DROP=yes`
+режет UDP/443 и у tailnet-клиентов; fake-ip `198.18.0.0/16` может
+конфликтовать с другим прокси на клиенте. При `WAN_INGRESS=yes` метка по
+умолчанию `0x40000` совпадает с меткой Tailscale — задайте
+`WAN_INGRESS_MARK="0x200000"`.
+
+Подробности, DNS и ограничения — в
+[`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md).
 
 ## Порты
 
@@ -220,10 +342,13 @@ Tailscale настраивается отдельно, Routeweave его не т
 | 7890 | TCP | mixed-proxy mihomo (`allow-lan`) |
 | 1443 | TCP | tg-ws-proxy (опц.) |
 | 56000 | UDP | WDTT-Plus DTLS (опц.) |
+| 41641 | UDP | Tailscale, прямые соединения (опц.) |
 
-Порты `53`, `8080`, `9090`, `7890` и `1443` — только LAN/WG, наружу их
+Порты `53`, `8080`, `9090`, `7890` и `1443` — только LAN/WG/tailnet, наружу их
 пробрасывать нельзя. `56000/udp` при использовании WDTT-Plus, наоборот,
-пробрасывается снаружи, иначе телефон не подключится.
+пробрасывается снаружи, иначе телефон не подключится. `41641/udp` нужен только
+для прямых соединений Tailscale: если шлюз за роутером, пробросьте порт на
+роутере, иначе соединения пойдут через DERP-релей.
 
 ## Доступ извне (WAN)
 
@@ -300,8 +425,8 @@ reverse-proxy: открывайте только те порты, которые
 ## Безопасность
 
 - Панель рассчитана на доверенную LAN. Не выставляйте `8080`, `9090`, `1443`,
-  `7890` и `53` в интернет; при необходимости удалённого доступа — VPN или
-  reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
+  `7890` и `53` в интернет; при необходимости удалённого доступа — VPN (в том
+  числе tailnet) или reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
 - `.env` создаётся с правами `0640 root:routeweave`. Контейнер tg-ws-proxy
   получает только свои три переменные (`.env.tgws`) и не видит секретов
   панели и mihomo.
@@ -316,6 +441,11 @@ reverse-proxy: открывайте только те порты, которые
   security-заголовки.
 - Firewall держит правила в отдельной цепочке `ROUTEWEAVE-FWD`; `QUIC_DROP`
   стоит выше `ACCEPT`.
+- Tailnet — отдельная граница доверия: доступ к панели и API mihomo по
+  tailscale-адресу регулируется ACL/grants и сроком действия ключей. Это не
+  публикация в интернет.
+- CGNAT-спуфинг с `100.64.0.0/10` не с `tailscale0` дропается.
+- `41641/udp` открыт осознанно: только для прямых соединений Tailscale.
 - Установщик не печатает секреты в консоль и не отдаёт `.env` через панель.
 - SOCKS-креды лежат в `.env`; не публикуйте файл, логи и дампы.
 - Не коммитьте `.env`, логи и дампы: в логах могут быть креды.
@@ -369,6 +499,12 @@ reverse-proxy: открывайте только те порты, которые
   и совпадение секрета в клиенте.
 - **WDTT.** `systemctl status wdtt`, `journalctl -u wdtt -n 50`,
   `ss -lunp | grep 56000`.
+- **Нет выхода через Tailscale exit node.** Запустите
+  `sudo /etc/routeweave/fw-tailscale.sh doctor`: он проверяет tailscaled,
+  `ip_forward`, правило `8991`, правила `ROUTEWEAVE-FWD` и отсутствие прыжков
+  в `ts-*`. Убедитесь, что exit node одобрен в admin console, а Tailscale
+  работает с `--netfilter-mode=nodivert`. Логи: `tailscale status`,
+  `journalctl -u tailscaled -n 50`.
 
 ## Обновление и удаление
 
@@ -381,6 +517,8 @@ reverse-proxy: открывайте только те порты, которые
 `sudo bash uninstall.sh` останавливает и удаляет юниты, панель, zapret,
 mihomo, таймер и апдейтер списков; контейнер tg-ws-proxy также останавливается
 и удаляется. Каталог `/etc/routeweave` остаётся. WDTT-Plus не затрагивается.
+`uninstall.sh` не удаляет пакет Tailscale и состояние `/var/lib/tailscale`;
+пакет при необходимости удаляется вручную.
 
 ## Разработка
 

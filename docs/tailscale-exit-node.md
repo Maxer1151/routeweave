@@ -1,0 +1,418 @@
+# Tailscale как exit node
+
+> **Опционально:** установщик Routeweave может поставить Tailscale
+> (`INSTALL_TAILSCALE=yes`), либо вы вручную. Без него шлюз работает как
+> обычно.
+
+Сервер Routeweave может быть exit node для tailnet: клиенты отправляют весь
+интернет-трафик на шлюз, а он разводит его по тем же правилам, что LAN и WDTT.
+Прямого NAT-режима нет — трафик проходит через mihomo TUN.
+
+## 1. Как это работает
+
+- Клиент Tailscale выбирает шлюз как exit node и отправляет трафик в tailnet.
+  Пакеты приходят на интерфейс `tailscale0`.
+- `ROUTEWEAVE-FWD` разрешает forwarding `tailscale0 → Meta` (TUN mihomo).
+  Дальше работает обычная политика: geo → SOCKS, dpi → zapret, RU → direct.
+- Ответный трафик из `Meta` в `tailscale0` разрешён правилом
+  `-i Meta -o tailscale0` для `RELATED,ESTABLISHED`.
+- Адреса tailnet `100.64.0.0/10` уходят в таблицу `main` по правилу `ip rule`
+  priority 8991. Иначе policy-routing mihomo (таблица 2022, приоритеты
+  9001/9002) завернул бы их в TUN. Это нужно и для доступа к панели, DNS и
+  прокси по tailscale-адресу, и для работы самого `tailscaled`.
+- В `ROUTEWEAVE-FWD` также стоят симметричные ACCEPT `tailscale0 → tailscale0`
+  и `LAN → tailscale0`, поэтому трафик между tailnet-клиентами и из LAN в
+  tailnet не режется.
+- Пакеты с источником из `100.64.0.0/10`, пришедшие не с `tailscale0`,
+  дропаются в `ROUTEWEAVE-FWD`: это CGNAT-спуфинг.
+
+Порядок приоритетов `ip rule`: 8990 — WDTT, 8991 — tailnet, 8993 — WAN,
+9001/9002 — mihomo.
+
+## 2. Требования и что не нужно делать
+
+Нужно:
+
+- Tailscale установлен и узел авторизован: `tailscale status` показывает сервер
+  и его адрес `100.x.y.z`. Пакет можно поставить установщиком
+  (`INSTALL_TAILSCALE=yes`) или вручную.
+- Для установки установщиком: Ubuntu/Debian, доступ к официальному
+  apt-репозиторию Tailscale и интернет.
+- Версия Tailscale поддерживает exit node (с 1.20) и команду `tailscale set`;
+  на старых версиях используйте `tailscale up` с теми же флагами.
+- `net.ipv4.ip_forward=1`. Routeweave выставляет его при старте firewall;
+  проверка — `sysctl net.ipv4.ip_forward`.
+
+Не нужно:
+
+- Переустанавливать Tailscale и заново логиниться. Состояние узла лежит в
+  `/var/lib/tailscale` и переживает обновление Routeweave. Установщик не
+  переустанавливает уже установленный пакет и не логинит авторизованный узел
+  (`BackendState=Running`) — только применяет `tailscale set`.
+- Добавлять ключ авторизации в `/etc/routeweave/.env`: он там не хранится.
+  `TS_IFACE` и `TS_SUBNET` по умолчанию установщик в `.env` не пишет, но при
+  необходимости их можно добавить вручную: `tailscale0` и `100.64.0.0/10`.
+- Запускать `tailscale logout` или менять аккаунт.
+- Настраивать NAT/MASQUERADE для `tailscale0` вручную.
+- Хранить ключ авторизации: для `tailscale set --advertise-exit-node` и
+  `--netfilter-mode=nodivert` он не нужен — узел уже авторизован. При
+  повторном входе ключ передаётся разово в `sudo tailscale up --auth-key=...`
+  и не хранится в файлах проекта, включая `/etc/routeweave/.env`.
+
+Что делает установщик при `INSTALL_TAILSCALE=yes`:
+
+- ставит Tailscale из официального apt-репозитория Ubuntu/Debian, включает
+  `tailscaled` и применяет
+  `--advertise-exit-node --netfilter-mode=nodivert --accept-dns=false`;
+- если пакет уже установлен, не переустанавливает его; если узел авторизован,
+  применяет `tailscale set` с теми же флагами;
+- ключ авторизации (`TS_AUTHKEY_FILE` предпочтительно, либо `TS_AUTHKEY`)
+  использует только на время установки: временный файл `0600` удаляется, в
+  `/etc/routeweave/.env` ключ не пишется;
+- если узел не авторизован и ключа нет, не зависает: включает `tailscaled` и
+  печатает команду `sudo tailscale up ...` для ручного входа.
+
+Если Tailscale уже установлен, установщик добавляет firewall-правила, а при
+активном ufw — разрешения для tailnet, независимо от `INSTALL_TAILSCALE`.
+
+## 3. Настройка сервера
+
+### Вариант 1 — установщик
+
+```bash
+sudo env INSTALL_TAILSCALE=yes bash install.sh
+# ключ авторизации на время установки:
+sudo env INSTALL_TAILSCALE=yes TS_AUTHKEY_FILE=/root/ts-authkey bash install.sh
+```
+
+Установщик ставит пакет из официального apt-репозитория, включает
+`tailscaled` и применяет флаги ниже. Если узел не авторизован и ключа нет, он
+печатает команду для ручного `tailscale up`. `--defaults` соответствует
+`INSTALL_TAILSCALE=no`.
+
+### Вариант 2 — уже авторизованный узел
+
+```bash
+sudo tailscale set --advertise-exit-node --netfilter-mode=nodivert
+sudo tailscale set --accept-dns=false
+```
+
+### Вариант 3 — новый узел, который ещё не авторизован
+
+```bash
+sudo tailscale up --advertise-exit-node --netfilter-mode=nodivert --accept-dns=false
+```
+
+`--accept-dns=false` — рекомендация для самого шлюза: его DNS обслуживает
+mihomo, и Tailscale не должен переписывать `/etc/resolv.conf`. Клиентские
+устройства, наоборот, должны принимать DNS из tailnet (см. раздел 6).
+
+Проверка:
+
+```bash
+tailscale status
+tailscale ip -4
+sysctl net.ipv4.ip_forward
+```
+
+### Почему nodivert
+
+По умолчанию Tailscale работает с `--netfilter-mode=on`: создаёт цепочки
+`ts-input`, `ts-forward`, `ts-postrouting` и сам вставляет в них прыжки. В
+`ts-postrouting` есть MASQUERADE, а свои пакеты Tailscale помечает меткой
+`0x40000`. На шлюзе это конфликтует с двумя вещами:
+
+- policy-routing mihomo: трафик должен уходить в TUN и получать политику, а не
+  маскарадиться и идти напрямую;
+- `WAN_INGRESS_MARK`, у которого метка по умолчанию тоже `0x40000`.
+
+С `--netfilter-mode=nodivert` Tailscale создаёт свои цепочки, но не вызывает
+их: `ROUTEWEAVE-FWD` остаётся единственным хозяином forwarding. Поэтому
+Routeweave сам разрешает forwarding в TUN и обратный путь и закрывает
+CGNAT-спуфинг, а установщик открывает INPUT для нужных портов (если ufw
+активен).
+
+Проверить, что прыжков нет:
+
+```bash
+sudo iptables-save | grep -E -- '-j (ts-input|ts-forward|ts-postrouting)' || echo "прыжков нет"
+```
+
+Если в выводе есть `-j ts-...`, Tailscale всё ещё в режиме `on`: повторите
+`--netfilter-mode=nodivert` и перезапустите `tailscaled`:
+
+```bash
+sudo systemctl restart tailscaled
+```
+
+Подробнее о режимах — в документации Tailscale:
+[Netfilter modes](https://tailscale.com/docs/reference/netfilter-modes).
+
+## 4. Одобрение exit node и ACL
+
+Одного `--advertise-exit-node` мало: узел должен быть одобрен в admin console.
+
+1. Откройте **Machines** в
+   [admin console](https://console.tailscale.com/admin/machines).
+2. Найдите сервер, у которого в списке есть значок **Exit Node**.
+3. Меню узла → **Edit exit node** → **Use as exit node**.
+
+Пока exit node не одобрен, клиенты его не видят.
+
+По умолчанию в tailnet разрешено всё, и отдельный grant не нужен. Если ACL
+кастомизированы, добавьте grant на `autogroup:internet` — именно он разрешает
+использовать узел как интернет-шлюз:
+
+```json
+{
+  "grants": [
+    {
+      "src": ["autogroup:member"],
+      "dst": ["autogroup:internet"],
+      "ip": ["*"]
+    }
+  ]
+}
+```
+
+Grant, который разрешает подключения к самому узлу (SSH и другие сервисы), не
+даёт права использовать его как интернет-шлюз: для этого нужен именно
+`autogroup:internet`.
+
+Проверить, что узел анонсирует exit node, можно в `tailscale status` на
+сервере и в списке exit node на клиенте:
+
+```bash
+tailscale exit-node list
+```
+
+Внешние доки: [Exit nodes](https://tailscale.com/kb/1103/exit-nodes),
+[Grants](https://tailscale.com/docs/features/access-control/grants).
+
+## 5. Клиент
+
+Linux:
+
+```bash
+sudo tailscale set --exit-node=100.x.y.z --exit-node-allow-lan-access=true
+```
+
+`100.x.y.z` — tailscale-адрес шлюза (`tailscale ip -4` на сервере).
+`--exit-node-allow-lan-access=true` оставляет клиенту доступ к его локальной
+сети: без него при включённом exit node локальные устройства пропадут.
+
+Проверка:
+
+```bash
+tailscale status
+```
+
+В строке шлюза должно быть указано, что он используется как exit node;
+соединение может быть `direct` или `relay` — это нормально.
+
+Windows и Android: откройте приложение Tailscale → **Exit node** → выберите
+сервер; там же включите **Allow LAN access**. На Android тумблер **Use
+Tailscale DNS settings** должен быть включён (раздел 6).
+
+Выключить exit node:
+
+```bash
+sudo tailscale set --exit-node=
+```
+
+## 6. DNS и fake-ip
+
+Это самый важный шаг: без него exit node работает, но доменные правила
+geo/dpi/ru не применяются.
+
+Почему так. mihomo принимает решения по домену, а не по IP. Если клиент
+резолвит домен сам (через роутер, провайдера или DoH в браузере), шлюз видит
+только IP и не может сопоставить его с `geo.txt`/`dpi.txt`. Поэтому DNS
+tailnet-клиентов должен идти на `100.x.y.z:53` — в mihomo. Тот отвечает
+fake-ip из `198.18.0.0/16`, запоминает соответствие и применяет правила к
+соединению.
+
+Настройка в admin console:
+
+1. **DNS** → **Nameservers** → **Add nameserver** → **Custom**.
+2. Укажите `100.x.y.z` (tailscale-адрес шлюза).
+3. Включите **Use with exit node** — сразу в диалоге **Add nameserver** или
+   позже: три точки рядом с nameserver'ом → **Edit nameserver**. Без этого
+   тумблера при активном exit node Tailscale игнорирует кастомные
+   nameserver'ы и резолвит все домены через сам exit node, поэтому запросы
+   могут не попасть в mihomo и fake-ip.
+4. Выберите режим и сохраните:
+   - **Override local DNS** — все клиенты tailnet используют этот сервер для
+     всех доменов. Проще всего и даёт единую политику.
+   - **Split DNS** — сервер применяется только к выбранным доменам. Если нужны
+     все правила geo/dpi/ru, добавляйте домены, которые должны идти через
+     шлюз; остальные продолжат резолвиться локально.
+
+В приложении Tailscale на Android и Windows включите **Use Tailscale DNS
+settings**. Этот тумблер необходим, но сам по себе ничего не даёт: без
+nameserver в админке запросы не попадут в mihomo. На Linux-клиенте не
+отключайте `--accept-dns` (по умолчанию он включён).
+
+Проверка на клиенте:
+
+```bash
+nslookup youtube.com
+```
+
+Ожидаемый ответ — адрес из `198.18.0.0/16`, например `198.18.0.7`. Если
+вернулся реальный IP, клиент не использует DNS шлюза. На Windows при split DNS
+`nslookup` может игнорировать правила Tailscale — используйте
+`Resolve-DnsName youtube.com` в PowerShell.
+
+DoH в браузерах (Chrome, Edge, Firefox) и **Private DNS** на Android
+отключите. Иначе приложение резолвит домен само, получает реальный IP и идёт
+мимо политики, даже если системный DNS настроен правильно.
+
+Если шлюз недоступен, при **Override local DNS** ломается DNS всего tailnet:
+клиенты не смогут резолвить имена, пока шлюз не вернётся. Держите запасной
+доступ (LAN/SSH) и помните об этом; при split DNS проблема ограничена
+выбранными доменами.
+
+Внешняя документация: [DNS in Tailscale](https://tailscale.com/kb/1054/dns).
+
+## 7. Доступ к сервисам по tailscale-адресу
+
+С tailnet-клиента доступны те же сервисы, что из LAN, но по адресу
+`100.x.y.z`:
+
+- панель — `http://100.x.y.z:PANEL_PORT`;
+- zashboard — `http://100.x.y.z:9090/ui/`, backend `http://100.x.y.z:9090`,
+  секрет `MIHOMO_SECRET` из `/etc/routeweave/.env`;
+- DNS — `100.x.y.z:53` (его же указываем в admin console);
+- mixed-proxy — `100.x.y.z:7890`.
+
+Порты те же, что у LAN. При активном ufw `install.sh` добавляет:
+
+- `ufw route allow in on tailscale0` и `ufw route allow out on tailscale0`;
+- `ufw allow 41641/udp` — прямые соединения Tailscale;
+- `ufw insert 1 deny in on LAN_IFACE from 100.64.0.0/10` — защита от
+  CGNAT-спуфинга из LAN;
+- разрешения с `100.64.0.0/10` на `53/tcp+udp`, `7890`, `PANEL_PORT`, `9090`
+  (и `1443` при `INSTALL_TGWS=yes`) — тот же набор, что у LAN/WDTT.
+
+Если Tailscale установлен после Routeweave, повторите установщик:
+`sudo env INSTALL_TAILSCALE=yes bash install.sh` (поставит и настроит) или
+`sudo bash install.sh` (добавит ufw-правила, если `tailscale` уже есть).
+Повторный запуск идемпотентен.
+
+CGNAT-спуфинг закрыт и на уровне iptables: пакет с источником из
+`100.64.0.0/10`, пришедший не с `tailscale0`, дропается в `ROUTEWEAVE-FWD`.
+Поэтому LAN-клиент не может выдать себя за tailnet-узел.
+
+Доступ к панели по tailscale-адресу — это доступ внутри tailnet, а не
+публикация в интернет. Права регулируются ACL/grants; Basic-авторизация панели
+при этом остаётся.
+
+## 8. Диагностика
+
+Основное:
+
+```bash
+sudo /etc/routeweave/fw-tailscale.sh doctor
+sudo /etc/routeweave/fw-tailscale.sh status
+```
+
+Оба режима только читают состояние и ничего не меняют. `doctor` проверяет:
+
+- запущен ли `tailscaled`;
+- `net.ipv4.ip_forward=1`;
+- есть ли `ip rule` priority 8991 на `100.64.0.0/10` → `main`;
+- правила `ROUTEWEAVE-FWD` для `tailscale0`;
+- нет ли прыжков в `ts-input`, `ts-forward`, `ts-postrouting`;
+- анонсирован и одобрен ли exit node;
+- маршруты до tailnet;
+- правила ufw;
+- не конфликтует ли метка `0x40000` с `WAN_INGRESS_MARK`.
+
+Дополнительно:
+
+```bash
+tailscale status
+tailscale status --json
+tailscale netcheck
+ip rule show | grep 8991
+sudo iptables -S ROUTEWEAVE-FWD
+sudo iptables-save | grep -E -- '-j (ts-input|ts-forward|ts-postrouting)'
+journalctl -u tailscaled -n 50
+```
+
+Что смотреть:
+
+- `tailscale status` — узел `active`, соединение `direct` или `relay`;
+- `ip rule show` — строка `8991: from all to 100.64.0.0/10 lookup main`;
+- `iptables -S ROUTEWEAVE-FWD` — ACCEPT для `tailscale0` и DROP для
+  `100.64.0.0/10` не с `tailscale0`;
+- `tailscale status --json` — поля `ExitNode`/`ExitNodeOption` и
+  `PrimaryRoutes` у своего узла и пиров (формат JSON может меняться между
+  версиями);
+- `journalctl` — ошибки `tailscaled`, конфликты netfilter, проблемы с
+  маршрутами.
+
+Если exit node не работает, проверьте по порядку: одобрен ли он в admin
+console, выбран ли на клиенте, `--netfilter-mode=nodivert`, правило 8991,
+правила `ROUTEWEAVE-FWD` и ufw.
+
+## 9. Ограничения
+
+- Policy-режим: трафик tailnet-клиентов идёт через userspace-стек mihomo.
+  Пропускная способность ниже, чем при прямом NAT, и выше нагрузка на CPU.
+  Для гигабита это не решение.
+- `QUIC_DROP=yes` режет UDP/443 и у tailnet-клиентов: браузеры откатятся на
+  TCP и попадут в политику. Если QUIC нужен, придётся выключить `QUIC_DROP`,
+  но тогда часть трафика пойдёт мимо правил.
+- IPv6 не поддерживается: проект IPv4-only. Используйте tailscale-адрес
+  `100.x.y.z`; IPv6 в LAN и на клиентах лучше отключить.
+- `auto-redirect: true` в `/etc/routeweave/config.yaml` может перехватывать
+  входящий TCP раньше forwarding. Если exit node не работает, поставьте
+  `auto-redirect: false` и перезапустите mihomo — то же советует
+  `fw-wan.sh doctor`. Файл генерируется установщиком, ручная правка живёт до
+  следующего запуска `install.sh`.
+- fake-ip `198.18.0.0/16` может конфликтовать с другим прокси на клиенте,
+  который использует тот же диапазон (например, второй mihomo/Clash).
+  Оставьте один перехватчик или смените диапазон у второго.
+- При `WAN_INGRESS=yes` метка по умолчанию `0x40000` совпадает с меткой
+  Tailscale. Поставьте в `/etc/routeweave/.env`
+  `WAN_INGRESS_MARK="0x200000"` и выполните
+  `sudo systemctl restart routeweave-firewall`.
+- Прямого NAT-режима нет: отключить policy и пустить tailnet напрямую нельзя.
+
+## 10. Откат
+
+Перестать быть exit node:
+
+```bash
+sudo tailscale set --advertise-exit-node=false
+```
+
+Клиенты больше не смогут выбрать шлюз как exit node; остальной tailnet и
+доступ к сервисам по `100.x.y.z` продолжат работать.
+
+Полный откат firewall-правил:
+
+```bash
+sudo /etc/routeweave/fw-base.sh stop
+```
+
+`stop` снимает `ROUTEWEAVE-FWD` и правило 8991. Это выключает и остальные
+правила шлюза, поэтому в обычном сценарии достаточно первой команды;
+`fw-base.sh stop` нужен, только если выводите шлюз из работы или хотите убрать
+правила полностью. Чтобы вернуть базовый firewall, выполните
+`sudo systemctl restart routeweave-firewall`: правило 8991 вернётся вместе с
+базовым набором, но без `tailscale0` оно ни на что не влияет.
+
+`uninstall.sh` снимает свои ufw-правила (включая `tailscale0`, `41641/udp` и
+правила для `100.64.0.0/10`) и удаляет `/etc/routeweave/fw-tailscale.sh`, но
+не удаляет пакет Tailscale и состояние `/var/lib/tailscale`. Если Tailscale
+больше не нужен, удалите пакет вручную:
+
+```bash
+sudo apt remove tailscale
+```
+
+Состояние в `/var/lib/tailscale` при отключении exit node сохраняется; для
+полной очистки удалите каталог вручную.

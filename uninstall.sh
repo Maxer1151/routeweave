@@ -62,6 +62,7 @@ Routeweave — удаление шлюза.
   - не удаляет конфиги и списки в /etc/routeweave (удалить вручную: rm -rf
     /etc/routeweave);
   - не трогает WDTT-Plus (/etc/wdtt, systemd-юнит wdtt);
+  - не удаляет пакет Tailscale и состояние /var/lib/tailscale;
   - не сбрасывает ufw целиком и не удаляет чужие правила.
 EOF
 }
@@ -306,6 +307,7 @@ for helper in "${HELPERS[@]}"; do
   rm -f "$helper" || warn "не удалось удалить $helper"
 done
 rm -f "$ETC/nfqws-launch.sh" || warn "не удалось удалить $ETC/nfqws-launch.sh"
+rm -f "$ETC/fw-tailscale.sh" || warn "не удалось удалить $ETC/fw-tailscale.sh"
 rm -f "$ETC/.env.tgws" || warn "не удалось удалить $ETC/.env.tgws"
 ok "sudoers и helper-скрипты удалены"
 
@@ -354,7 +356,7 @@ fi
 # он снёс бы все правила пользователя, включая чужие.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   info "ufw активен — убираю правила Routeweave..."
-  for rule in 53/tcp 53/udp 7890/tcp 9090/tcp 1443/tcp 56000/udp 56001/udp; do
+  for rule in 53/tcp 53/udp 7890/tcp 9090/tcp 1443/tcp 41641/udp 56000/udp 56001/udp; do
     ufw delete allow "$rule" >/dev/null 2>&1 || true
   done
 
@@ -363,9 +365,15 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   LAN_CIDR=$(env_get LAN_CIDR)
   PANEL_PORT=$(env_get PANEL_PORT)
   PANEL_PORT=${PANEL_PORT:-8080}
+  TS_SUBNET=$(env_get TS_SUBNET)
+  TS_CIDR=${TS_SUBNET:-100.64.0.0/10}
+  TS_IFACE=$(env_get TS_IFACE)
+  TS_IFACE=${TS_IFACE:-tailscale0}
 
   if [ -n "$LAN_IFACE" ]; then
     ufw route delete allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
+    # install.sh ставил deny от CGNAT-спуфинга с LAN — снимаем только его.
+    ufw delete deny in on "$LAN_IFACE" from "$TS_CIDR" >/dev/null 2>&1 || true
   fi
 
   # Эти route-правила ставил install.sh при установке WDTT (INSTALL_WDTT=yes).
@@ -373,6 +381,11 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   # безопасен, если WDTT не устанавливался и правил нет.
   ufw route delete allow in on wdtt0 >/dev/null 2>&1 || true
   ufw route delete allow out on wdtt0 >/dev/null 2>&1 || true
+
+  # Tailscale-правила (если пакет был установлен на момент install.sh).
+  # Сам tailscale и его состояние не трогаем.
+  ufw route delete allow in on "$TS_IFACE" >/dev/null 2>&1 || true
+  ufw route delete allow out on "$TS_IFACE" >/dev/null 2>&1 || true
 
   # Подсеть LAN в .env не хранится (install.sh вычисляет её на месте) —
   # пробуем вывести из интерфейса.
@@ -382,7 +395,7 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
 
   # install.sh выдавал доступ не «всем на порт», а с конкретных подсетей —
   # снимаем именно эти правила, плюс общие (на случай ручных правок).
-  for src in "$WG_SUBNET" "$LAN_CIDR"; do
+  for src in "$WG_SUBNET" "$LAN_CIDR" "$TS_CIDR"; do
     [ -n "$src" ] || continue
     for p in 53 7890 9090 "$PANEL_PORT" 1443; do
       ufw delete allow from "$src" to any port "$p" proto tcp >/dev/null 2>&1 || true
@@ -412,7 +425,8 @@ echo "    routeweave-lists-update.service/.timer (+ правила firewall сн
 echo "    включая WAN-маркировку и ip rule 8993);"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"
 echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin;"
-echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws;"
+echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws,
+    /etc/routeweave/fw-tailscale.sh;"
 echo "  - $OPT_PANEL, $ZAPRET_DIR, $MIHOMO_BIN, /run/routeweave;"
 echo "  - пользователь и группа $SERVICE_USER (если не были заняты);"
 echo "  - добавленные установщиком правила ufw."
@@ -420,6 +434,7 @@ echo
 echo "Осталось (удаляется вручную):"
 echo "  - конфиги и списки: $ETC (полное удаление: rm -rf $ETC);"
 echo "  - WDTT-Plus не затрагивался: systemctl status wdtt, данные в /etc/wdtt;"
+echo "  - пакет Tailscale и состояние /var/lib/tailscale не удалялись;"
 echo "  - пакеты, поставленные установщиком (iptables, nftables, docker и т.д.),"
 echo "    не удалялись — они могут быть нужны другим сервисам."
 echo
