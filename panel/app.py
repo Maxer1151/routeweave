@@ -14,6 +14,7 @@ Basic-авторизации (PANEL_USER / PANEL_PASS).
 """
 
 import base64
+import json
 import logging
 import os
 import re
@@ -50,6 +51,7 @@ LISTS = {
 UPDATER = "/usr/local/sbin/routeweave-update-lists.sh"
 TGWS_RESTART = "/usr/local/sbin/routeweave-tgws-restart.sh"
 TGWS_STATE = "/usr/local/sbin/routeweave-tgws-state.sh"
+TAILSCALE_STATE = "/usr/local/sbin/routeweave-tailscale-state.sh"
 
 MIHOMO_API = "http://127.0.0.1:9090"
 MIXED_PORT = 7890
@@ -88,6 +90,23 @@ JOB: dict = {
     "finished_at": None,
     "ok": None,
     "detail": None,
+}
+
+# Оценка скорости Tailscale: счётчики и время предыдущего опроса /api/status.
+# Подмена _tailscale_now в тестах позволяет задать время без sleep.
+TAILSCALE_RATE_LOCK = threading.Lock()
+TAILSCALE_RATE_STATE: dict = {"rx": None, "tx": None, "at": None}
+_tailscale_now = time.monotonic
+
+TAILSCALE_DAEMON_STATES = {"active", "inactive", "failed", "activating", "absent", "unknown"}
+TAILSCALE_TYPES = {
+    "installed": bool,
+    "backend": str,
+    "self_ip": str,
+    "advertised": bool,
+    "approved": bool,
+    "iface": str,
+    "error": str,
 }
 
 
@@ -246,6 +265,101 @@ def tgws_state() -> str:
 
 def tgws_enabled() -> bool:
     return tgws_state() in ("running", "exited") or bool(TG_SECRET)
+
+
+def _tailscale_default(error: str = "") -> dict:
+    """Безопасный статус Tailscale полной формы (helper недоступен/сломан)."""
+    return {
+        "installed": False,
+        "daemon": "unknown",
+        "backend": "",
+        "self_ip": "",
+        "advertised": False,
+        "approved": False,
+        "peers": 0,
+        "iface": "",
+        "rx_bytes": 0,
+        "tx_bytes": 0,
+        "error": error,
+    }
+
+
+def _tailscale_parse(payload: object) -> dict | None:
+    """Строгая валидация ответа helper: поля неверного типа → значения по умолчанию."""
+    if not isinstance(payload, dict):
+        return None
+    state = _tailscale_default()
+    wrong: list[str] = []
+
+    for name, expected in TAILSCALE_TYPES.items():
+        if name not in payload:
+            continue
+        value = payload[name]
+        if isinstance(value, expected):
+            state[name] = value
+        else:
+            wrong.append(name)
+
+    daemon = payload.get("daemon")
+    if isinstance(daemon, str) and daemon in TAILSCALE_DAEMON_STATES:
+        state["daemon"] = daemon
+    elif daemon is not None:
+        wrong.append("daemon")
+
+    for name in ("peers", "rx_bytes", "tx_bytes"):
+        if name not in payload:
+            continue
+        value = payload[name]
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            state[name] = value
+        else:
+            wrong.append(name)
+
+    if wrong:
+        logger.warning("Helper Tailscale вернул поля неверного типа: %s", ", ".join(sorted(wrong)))
+    return state
+
+
+def tailscale_state() -> dict:
+    """Статус Tailscale через root-helper: сокет tailscaled панели недоступен."""
+    result = sudo_run([TAILSCALE_STATE], timeout=10)
+    if result.returncode != 0:
+        # Вывод helper'а не логируем: в нём могут быть имена устройств и
+        # адреса tailnet, а лог панели читают не только root.
+        logger.warning("routeweave-tailscale-state.sh вернул код %s", result.returncode)
+        return _tailscale_default(f"helper вернул код {result.returncode}")
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except json.JSONDecodeError:
+        logger.warning("routeweave-tailscale-state.sh вернул не JSON")
+        return _tailscale_default("некорректный ответ helper")
+    state = _tailscale_parse(payload)
+    if state is None:
+        logger.warning("routeweave-tailscale-state.sh вернул JSON не-объект")
+        return _tailscale_default("некорректный ответ helper")
+    return state
+
+
+def _tailscale_rates(rx: int, tx: int) -> tuple[int, int]:
+    """ОЦЕНКА скорости (байт/с) по дельте счётчиков между опросами панели.
+
+    Это не мгновенная скорость интерфейса: дельта делится на время между
+    двумя последовательными вызовами ``/api/status``, поэтому интервал равен
+    периоду опроса панели. Первый вызов, сброс счётчиков (новое значение
+    меньше предыдущего) и неположительный интервал дают ``(0, 0)``.
+    """
+    now = _tailscale_now()
+    with TAILSCALE_RATE_LOCK:
+        prev_rx = TAILSCALE_RATE_STATE["rx"]
+        prev_tx = TAILSCALE_RATE_STATE["tx"]
+        prev_at = TAILSCALE_RATE_STATE["at"]
+        TAILSCALE_RATE_STATE.update({"rx": rx, "tx": tx, "at": now})
+    if prev_rx is None or prev_tx is None or prev_at is None:
+        return 0, 0
+    elapsed = now - prev_at
+    if elapsed <= 0 or rx < prev_rx or tx < prev_tx:
+        return 0, 0
+    return int((rx - prev_rx) / elapsed), int((tx - prev_tx) / elapsed)
 
 
 def mihomo_api(path: str, method: str = "GET") -> tuple:
@@ -414,12 +528,17 @@ async def guard(request: Request, call_next):
 def api_status():
     status_code, version = mihomo_api("/version")
     tgws = tgws_state()
+    tailscale = tailscale_state()
+    rx_rate, tx_rate = _tailscale_rates(tailscale["rx_bytes"], tailscale["tx_bytes"])
+    tailscale["rx_rate"] = rx_rate
+    tailscale["tx_rate"] = tx_rate
     services = {
         "mihomo": svc_active("mihomo"),
         "zapret-nfqws": svc_active("zapret-nfqws"),
         "routeweave-firewall": svc_active("routeweave-firewall"),
         "routeweave-panel": svc_active("routeweave-panel"),
         "routeweave-tgwsproxy": tgws,
+        "tailscaled": tailscale["daemon"],
     }
     socks_set = bool(env_value("SOCKS_URL"))
     tg_link_ip = TG_LINK_IP or SERVER_IP
@@ -444,6 +563,7 @@ def api_status():
             "mihomo_api": mihomo_state,
         },
         "probes": PROBES_LAST,
+        "tailscale": tailscale,
     }
 
 

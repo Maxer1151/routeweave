@@ -21,6 +21,7 @@ BACKUP_DIR="$ETC/backup"
 SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
 TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
 TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
+TAILSCALE_STATE=/usr/local/sbin/routeweave-tailscale-state.sh
 MIHOMO_FALLBACK_VER="v1.19.13"
 TS_STATUS="не устанавливался"
 TS_REPO_KEYRING=/usr/share/keyrings/tailscale-archive-keyring.gpg
@@ -227,6 +228,7 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-update-lists.sh \
     templates/routeweave-tgws-restart.sh \
     templates/routeweave-tgws-state.sh \
+    templates/routeweave-tailscale-state.sh \
     templates/fw-base.sh \
     templates/fw-wan.sh \
     templates/fw-tailscale.sh \
@@ -545,9 +547,9 @@ write_panel_sudoers() {
   cat > "$tmp" <<EOF
 # Routeweave: минимальные права веб-панели. Файл генерируется install.sh.
 # Пользователь routeweave может только перезапускать перечисленные юниты и
-# запускать три helper-скрипта; is-active проверяется без root.
+# запускать четыре helper-скрипта; is-active проверяется без root.
 routeweave ALL=(root) NOPASSWD: $systemctl_bin restart mihomo, $systemctl_bin restart zapret-nfqws, $systemctl_bin restart routeweave-panel, $systemctl_bin start routeweave-lists-update.service
-routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh
+routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh, /usr/local/sbin/routeweave-tailscale-state.sh
 EOF
   chmod 0640 "$tmp"
   "$visudo_bin" -cf "$tmp" >/dev/null \
@@ -963,7 +965,8 @@ install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/system
 install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-restart.sh"      "$TGWS_RESTART"
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-state.sh"        "$TGWS_STATE"
-ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state}.sh"
+install -m 0755 "$APP_DIR/templates/routeweave-tailscale-state.sh"   "$TAILSCALE_STATE"
+ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh"
 
 # ---------- 9. Панель (venv + статика zashboard) ----------
 info "Установка веб-панели..."

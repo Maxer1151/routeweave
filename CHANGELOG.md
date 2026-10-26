@@ -79,6 +79,11 @@
 
 ### Добавлено
 
+- Панель: карточка Tailscale — статус `tailscaled`, tailnet-адрес,
+  анонсирование/одобрение exit node, суммарный трафик и оценка скорости, число
+  пиров; helper `routeweave-tailscale-state.sh` только читает состояние
+  (sudo-allowlist, без wildcard) и возвращает агрегаты без ключей и имён
+  устройств.
 - Firewall: `tailscale0` как третий вход (forwarding в TUN, возвратный путь,
   CGNAT-спуф-гард, `ip rule` 8991).
 - Диагностика: `fw-tailscale.sh status|doctor`.

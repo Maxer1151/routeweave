@@ -207,6 +207,15 @@ mihomo» запускает апдейтер (для `dpi` — перезапу�
 При заданном `TG_SECRET` панель показывает готовую ссылку
 `tg://proxy?server=<TG_LINK_IP|SERVER_IP>&port=1443&secret=<TG_SECRET>`.
 
+Если Tailscale установлен, в панели есть карточка **Tailscale**: статус
+`tailscaled`, tailnet-адрес, состояние exit node (анонсирован и одобрен / ждёт
+одобрения / не анонсирован), суммарный трафик `↓`/`↑`, оценка скорости и число
+пиров. Данные отдаёт helper `/usr/local/sbin/routeweave-tailscale-state.sh`: он
+только читает состояние (`systemctl`, `tailscale status --json`, счётчики
+sysfs), возвращает агрегаты без ключей и имён устройств и входит в
+sudo-allowlist панели без wildcard. Карточки нет, если Tailscale не установлен;
+одобрение exit node по-прежнему делается в admin console.
+
 ## DPI и fwmark
 
 Критично: в `EXTRA` в `/etc/routeweave/zapret.conf` обязателен
@@ -280,6 +289,10 @@ mihomo и `WAN_INGRESS_MARK` (тоже `0x40000`).
 
 Одобрение: admin console → **Machines** → у сервера **Edit exit node** →
 **Use as exit node**. При кастомных ACL нужен grant на `autogroup:internet`.
+В панели есть карточка Tailscale: helper
+`/usr/local/sbin/routeweave-tailscale-state.sh` только читает состояние и
+показывает `tailscaled`, адрес, флаги exit node и трафик; одобрение — только в
+admin console.
 
 Клиент (Linux):
 

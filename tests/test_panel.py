@@ -7,6 +7,7 @@
 
 import base64
 import importlib.util
+import json
 import logging
 import subprocess
 import sys
@@ -41,6 +42,22 @@ WG_SUBNET=10.66.66.0/24
 TG_LINK_IP=
 """
 
+# Компактный ответ helper'а Tailscale: CGNAT-адрес — заглушка из 100.64.0.0/10.
+TAILSCALE_FIELDS = {
+    "installed": True,
+    "daemon": "active",
+    "backend": "Running",
+    "self_ip": "100.64.0.10",
+    "advertised": True,
+    "approved": True,
+    "peers": 1,
+    "iface": "tailscale0",
+    "rx_bytes": 1000,
+    "tx_bytes": 2000,
+    "error": "",
+}
+TAILSCALE_JSON = json.dumps(TAILSCALE_FIELDS, separators=(",", ":"))
+
 
 def default_handler(args, timeout=60):
     """Стаб внешних команд: сервисы активны, helper'ы отвечают успехом."""
@@ -49,6 +66,8 @@ def default_handler(args, timeout=60):
         return subprocess.CompletedProcess(args, 0, "active\n", "")
     if joined.endswith("routeweave-tgws-state.sh"):
         return subprocess.CompletedProcess(args, 0, "running\n", "")
+    if joined.endswith("routeweave-tailscale-state.sh"):
+        return subprocess.CompletedProcess(args, 0, TAILSCALE_JSON + "\n", "")
     if joined.endswith("routeweave-update-lists.sh"):
         return subprocess.CompletedProcess(args, 0, "списки обновлены\n", "")
     return subprocess.CompletedProcess(args, 0, "", "")
@@ -418,6 +437,174 @@ def test_status_tg_link_with_secret(etc, monkeypatch):
     data = client.get("/api/status", auth=AUTH).json()
     assert data["config"]["tg_link_ip"] == "203.0.113.5"
     assert data["config"]["tg_link"] == "tg://proxy?server=203.0.113.5&port=1443&secret=deadbeef"
+
+
+# ---------------- Tailscale: статус, оценка скорости, отказ helper'а ----------------
+
+def _tailscale_calls(calls):
+    """Вызовы helper'а Tailscale (путь — отдельный элемент списка аргументов)."""
+    return [
+        call
+        for call in calls
+        if any("routeweave-tailscale-state.sh" in part for part in call)
+    ]
+
+
+def _safe_tailscale_handler(override):
+    """Обёртка default_handler: helper Tailscale отвечает через override."""
+
+    def handler(args, timeout=60):
+        if " ".join(args).endswith("routeweave-tailscale-state.sh"):
+            return override(args)
+        return default_handler(args, timeout)
+
+    return handler
+
+
+def _assert_tailscale_unknown(data):
+    tailscale = data["tailscale"]
+    assert tailscale["installed"] is False
+    assert tailscale["daemon"] == "unknown"
+    assert tailscale["error"]
+    assert data["services"]["tailscaled"] == "unknown"
+
+
+def test_status_reports_tailscale(panel):
+    response = panel.client.get("/api/status", auth=AUTH)
+    assert response.status_code == 200
+    data = response.json()
+
+    tailscale = data["tailscale"]
+    expected_types = {
+        "installed": bool,
+        "daemon": str,
+        "backend": str,
+        "self_ip": str,
+        "advertised": bool,
+        "approved": bool,
+        "peers": int,
+        "iface": str,
+        "rx_bytes": int,
+        "tx_bytes": int,
+        "error": str,
+        "rx_rate": int,
+        "tx_rate": int,
+    }
+    for name, expected in expected_types.items():
+        assert name in tailscale, name
+        assert isinstance(tailscale[name], expected), name
+
+    assert tailscale["installed"] is True
+    assert tailscale["daemon"] == "active"
+    assert tailscale["backend"] == "Running"
+    assert tailscale["self_ip"] == "100.64.0.10"
+    assert tailscale["advertised"] is True
+    assert tailscale["approved"] is True
+    assert tailscale["peers"] == 1
+    assert tailscale["iface"] == "tailscale0"
+    assert tailscale["rx_bytes"] == 1000
+    assert tailscale["tx_bytes"] == 2000
+    assert tailscale["error"] == ""
+    assert data["services"]["tailscaled"] == "active"
+
+    helper_calls = _tailscale_calls(panel.calls)
+    assert len(helper_calls) == 1
+    assert helper_calls[0][:2] == ["sudo", "-n"]
+
+    # Первый опрос: предыдущих счётчиков нет — скорость неизвестна, но не ошибка.
+    assert tailscale["rx_rate"] == 0
+    assert tailscale["tx_rate"] == 0
+
+
+def test_tailscale_rates_second_poll(etc, monkeypatch):
+    counters = {"rx": 1000, "tx": 2000}
+
+    def handler(args, timeout=60):
+        joined = " ".join(args)
+        if "is-active" in args:
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+        if joined.endswith("routeweave-tgws-state.sh"):
+            return subprocess.CompletedProcess(args, 0, "running\n", "")
+        if joined.endswith("routeweave-tailscale-state.sh"):
+            payload = dict(
+                TAILSCALE_FIELDS,
+                rx_bytes=counters["rx"],
+                tx_bytes=counters["tx"],
+            )
+            return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    module, client, _ = make_client(monkeypatch, handler=handler)
+    times = iter([100.0, 102.0, 106.0])
+    monkeypatch.setattr(module, "_tailscale_now", lambda: next(times))
+
+    first = client.get("/api/status", auth=AUTH).json()["tailscale"]
+    assert (first["rx_rate"], first["tx_rate"]) == (0, 0)
+
+    # +1000 Б за 2 с и +2000 Б за 2 с.
+    counters["rx"] += 1000
+    counters["tx"] += 2000
+    second = client.get("/api/status", auth=AUTH).json()["tailscale"]
+    assert second["rx_bytes"] == 2000
+    assert second["tx_bytes"] == 4000
+    assert (second["rx_rate"], second["tx_rate"]) == (500, 1000)
+
+    # Счётчики сброшены (интерфейс пересоздан) — деление на отрицательную
+    # дельту запрещено, скорость остаётся нулевой.
+    counters["rx"] = 500
+    counters["tx"] = 600
+    third = client.get("/api/status", auth=AUTH).json()["tailscale"]
+    assert (third["rx_rate"], third["tx_rate"]) == (0, 0)
+
+
+def test_tailscale_helper_failure_is_safe(etc, monkeypatch):
+    def failing(args):
+        return subprocess.CompletedProcess(args, 1, "", "helper: ошибка")
+
+    _module, client, _ = make_client(
+        monkeypatch, handler=_safe_tailscale_handler(failing)
+    )
+    response = client.get("/api/status", auth=AUTH)
+    assert response.status_code == 200
+    _assert_tailscale_unknown(response.json())
+
+
+def test_tailscale_helper_missing_127(etc, monkeypatch):
+    def missing(args):
+        return subprocess.CompletedProcess(args, 127, "", "FileNotFoundError")
+
+    _module, client, _ = make_client(
+        monkeypatch, handler=_safe_tailscale_handler(missing)
+    )
+    response = client.get("/api/status", auth=AUTH)
+    assert response.status_code == 200
+    _assert_tailscale_unknown(response.json())
+
+
+def test_tailscale_helper_garbage_json(etc, monkeypatch):
+    def garbage(args):
+        return subprocess.CompletedProcess(args, 0, "not json", "")
+
+    _module, client, _ = make_client(
+        monkeypatch, handler=_safe_tailscale_handler(garbage)
+    )
+    response = client.get("/api/status", auth=AUTH)
+    assert response.status_code == 200
+    _assert_tailscale_unknown(response.json())
+
+
+def test_tailscale_card_static_assets(panel):
+    html = panel.client.get("/", auth=AUTH).text
+    js = panel.client.get("/static/app.js", auth=AUTH).text
+
+    for token in ("tailscaled", "renderTailscale", "ts-card", "i-globe"):
+        assert token in js, token
+    for token in ('id="ts-card"', 'id="ts-list"', "i-globe"):
+        assert token in html, token
+
+    # Карточка строится через DOM API: inline-HTML и document.write запрещены.
+    for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+        assert forbidden not in js
 
 
 def test_privileged_calls_only_sudo(panel):

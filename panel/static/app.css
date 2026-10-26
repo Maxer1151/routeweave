@@ -565,6 +565,7 @@ a:hover { text-decoration: underline; }
 .badge .icon { width: 12px; height: 12px; stroke-width: 2.6; }
 .badge[data-tone="ok"] { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
 .badge[data-tone="bad"] { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-border); }
+.badge[data-tone="warn"] { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-border); }
 
 .sk-line {
   display: block;

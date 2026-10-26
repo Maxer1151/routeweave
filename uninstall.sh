@@ -32,6 +32,7 @@ UNITS=(
 HELPERS=(
   /usr/local/sbin/routeweave-tgws-restart.sh
   /usr/local/sbin/routeweave-tgws-state.sh
+  /usr/local/sbin/routeweave-tailscale-state.sh
   /usr/local/sbin/routeweave-update-lists.sh
 )
 
@@ -424,7 +425,8 @@ echo "  - systemd-юниты: routeweave-firewall, mihomo, zapret-nfqws, routewe
 echo "    routeweave-lists-update.service/.timer (+ правила firewall сняты,"
 echo "    включая WAN-маркировку и ip rule 8993);"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"
-echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin;"
+echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin,"
+echo "    включая routeweave-tailscale-state.sh;"
 echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws,
     /etc/routeweave/fw-tailscale.sh;"
 echo "  - $OPT_PANEL, $ZAPRET_DIR, $MIHOMO_BIN, /run/routeweave;"

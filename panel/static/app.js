@@ -38,6 +38,10 @@
       title: 'Firewall', unit: 'routeweave-firewall.service', hint: 'ip_forward · FORWARD · QUIC',
       api: null, required: true, icon: 'i-lock'
     },
+    tailscaled: {
+      title: 'Tailscale', unit: 'tailscaled.service', hint: 'exit node · tailnet · опционально',
+      api: null, required: false, icon: 'i-globe'
+    },
     'routeweave-panel': {
       title: 'Панель', unit: 'routeweave-panel.service', hint: 'FastAPI · Basic-auth',
       api: 'panel', required: true, icon: 'i-sliders'
@@ -48,7 +52,7 @@
     }
   };
 
-  const SERVICE_ORDER = ['mihomo', 'zapret-nfqws', 'routeweave-firewall', 'routeweave-panel', 'routeweave-tgwsproxy'];
+  const SERVICE_ORDER = ['mihomo', 'zapret-nfqws', 'routeweave-firewall', 'tailscaled', 'routeweave-panel', 'routeweave-tgwsproxy'];
 
   const PROBE_META = {
     chatgpt_via_socks: { label: 'ChatGPT через SOCKS' },
@@ -124,6 +128,8 @@
     tgList: null,
     tgOpen: null,
     tgSecretHint: null,
+    tsCard: null,
+    tsList: null,
     configList: null,
     gwIp: null,
     updatedAt: null,
@@ -215,11 +221,21 @@
   }
 
   function fmtBytes(n) {
-    if (typeof n !== 'number' || !isFinite(n)) return '';
-    if (n < 1024) return n + ' Б';
-    const kb = n / 1024;
-    if (kb < 1024) return kb.toFixed(1).replace('.', ',') + ' КБ';
-    return (kb / 1024).toFixed(2).replace('.', ',') + ' МБ';
+    if (typeof n !== 'number' || !isFinite(n) || n < 0) return '';
+    if (n < 1024) return Math.round(n) + ' Б';
+    const units = ['КБ', 'МБ', 'ГБ', 'ТБ'];
+    let value = n / 1024;
+    let index = 0;
+    while (value >= 1024 && index < units.length - 1) {
+      value /= 1024;
+      index++;
+    }
+    return value.toFixed(1).replace('.', ',') + ' ' + units[index];
+  }
+
+  function fmtBytesOrDash(n) {
+    const text = fmtBytes(n);
+    return text || '—';
   }
 
   function truncate(text, max) {
@@ -662,8 +678,13 @@
       if (key === 'routeweave-tgwsproxy') {
         if (raw === 'absent') { canRestart = false; noteText = 'контейнер не создан'; }
         else if (raw === 'no-docker-socket') { canRestart = false; noteText = 'нужен доступ к docker'; }
-      }
-      if (meta && !meta.api) {
+      } else if (key === 'tailscaled') {
+        /* tailscaled нет в sudo allowlist — перезапуск из панели недоступен. */
+        canRestart = false;
+        const ts = state.status && state.status.tailscale;
+        if (raw === 'absent') noteText = 'не установлен';
+        else if (raw === 'active' && !(ts && ts.approved === true)) noteText = 'exit node не одобрен';
+      } else if (meta && !meta.api) {
         noteText = 'systemctl restart ' + key;
       }
 
@@ -1279,7 +1300,9 @@
     if (wgHost) {
       items.push({ label: 'WDTT (расчётный адрес)', value: wgHost + ':1443' });
     }
-    items.push({ label: 'Tailscale', value: 'имя-сервера-в-tailscale:1443', copy: false });
+    const ts = state.status && state.status.tailscale;
+    const tsIp = ts && typeof ts.self_ip === 'string' ? ts.self_ip : '';
+    items.push({ label: 'Tailscale', value: tsIp ? tsIp + ':1443' : 'имя-сервера-в-tailscale:1443', copy: !!tsIp });
     items.push({ label: 'Секрет', value: 'docker logs routeweave-tgwsproxy', mono: true, copy: false });
 
     const deepLink = typeof cfg.tg_link === 'string' && cfg.tg_link.indexOf('tg://') === 0
@@ -1318,6 +1341,127 @@
     const match = subnet.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}(\/\d{1,2})?$/);
     if (!match) return '';
     return match[1] + '.' + match[2] + '.' + match[3] + '.1';
+  }
+
+  /* ---------------- Tailscale ---------------- */
+
+  /* Карточка #ts-card строится один раз: на каждом опросе обновляются только
+     textContent, dataset и hidden, поэтому список не мигает и не пересоздаётся. */
+  let tsView = null;
+
+  function tsRow(list, label, mono) {
+    const body = h('span', { class: mono ? 'copy-value' : undefined });
+    const btn = h('button', {
+      type: 'button', class: 'copy-btn', hidden: true,
+      'aria-label': 'Скопировать: ' + label,
+      on: { click: onCopyClick }
+    }, icon('i-copy'));
+    const li = h('li', { class: 'copy-item' },
+      h('div', null, h('span', { class: 'copy-label', text: label }), body),
+      btn
+    );
+    list.appendChild(li);
+    return { li: li, body: body, btn: btn };
+  }
+
+  function tsBadge() {
+    const badgeIcon = icon('i-help');
+    const badgeText = h('span', { text: '—' });
+    const node = h('span', { class: 'badge', dataset: { tone: 'idle' } }, badgeIcon, badgeText);
+    return { node: node, icon: badgeIcon, text: badgeText };
+  }
+
+  function ensureTailscaleView() {
+    if (tsView) return tsView;
+    const list = refs.tsList;
+    if (!list || !refs.tsCard) return null;
+
+    list.textContent = '';
+    const daemonRow = tsRow(list, 'tailscaled');
+    const daemon = tsBadge();
+    daemonRow.body.appendChild(daemon.node);
+
+    const ipRow = tsRow(list, 'tailnet-адрес', true);
+
+    const exitRow = tsRow(list, 'Exit node');
+    const exit = tsBadge();
+    exitRow.body.appendChild(exit.node);
+
+    const traffic = tsRow(list, 'Трафик', true);
+    const speed = tsRow(list, 'Скорость', true);
+    const peers = tsRow(list, 'Пиры', true);
+    const error = tsRow(list, 'Ошибка');
+
+    tsView = {
+      daemon: daemon,
+      ip: ipRow,
+      exit: exit,
+      traffic: traffic,
+      speed: speed,
+      peers: peers,
+      error: error
+    };
+    return tsView;
+  }
+
+  function renderTailscale() {
+    const card = refs.tsCard;
+    if (!card) return;
+
+    const status = state.status;
+    const ts = status && status.tailscale;
+    if (!ts || ts.installed !== true) {
+      card.hidden = true;
+      return;
+    }
+
+    const view = ensureTailscaleView();
+    if (!view) return;
+
+    const daemonKey = typeof ts.daemon === 'string' && ts.daemon ? ts.daemon : 'unknown';
+    const daemonState = serviceState(daemonKey);
+    view.daemon.node.dataset.tone = daemonState.tone;
+    setIcon(view.daemon.icon, daemonState.icon);
+    view.daemon.text.textContent = daemonState.label;
+
+    const selfIp = typeof ts.self_ip === 'string' ? ts.self_ip : '';
+    view.ip.body.textContent = selfIp || '—';
+    view.ip.btn.hidden = !selfIp;
+    view.ip.btn.dataset.copy = selfIp;
+    view.ip.btn.setAttribute('aria-label', selfIp ? 'Скопировать tailnet-адрес: ' + selfIp : 'Скопировать tailnet-адрес');
+
+    const advertised = ts.advertised === true;
+    const approved = ts.approved === true;
+    let exitLabel = 'не анонсирован';
+    let exitTone = 'idle';
+    let exitIcon = 'i-minus';
+    if (advertised && approved) {
+      exitLabel = 'анонсирован и одобрен';
+      exitTone = 'ok';
+      exitIcon = 'i-check';
+    } else if (advertised) {
+      exitLabel = 'ждёт одобрения';
+      exitTone = 'warn';
+      exitIcon = 'i-clock';
+    }
+    view.exit.node.dataset.tone = exitTone;
+    setIcon(view.exit.icon, exitIcon);
+    view.exit.text.textContent = exitLabel;
+
+    view.traffic.body.textContent = '↓ ' + fmtBytesOrDash(ts.rx_bytes) + ' · ↑ ' + fmtBytesOrDash(ts.tx_bytes);
+    view.speed.body.textContent = '↓ ' + fmtBytesOrDash(ts.rx_rate) + '/с · ↑ ' + fmtBytesOrDash(ts.tx_rate) + '/с';
+
+    const peers = typeof ts.peers === 'number' ? ts.peers : 0;
+    view.peers.li.hidden = !(peers > 0);
+    view.peers.body.textContent = peers > 0
+      ? String(peers) + ' ' + plural(peers, 'пир', 'пира', 'пиров')
+      : '';
+
+    const errorText = typeof ts.error === 'string' ? ts.error : '';
+    view.error.li.hidden = !errorText;
+    view.error.body.textContent = errorText ? truncate(errorText, 300) : '';
+
+    card.hidden = false;
   }
 
   function onCopyClick(event) {
@@ -1365,6 +1509,7 @@
       refs.updatedAt.textContent = 'обновлено в ' + timeNow();
       renderServices();
       renderConfig();
+      renderTailscale();
       renderProbes();
       renderHero();
     } catch (err) {
@@ -1547,6 +1692,8 @@
     refs.tgList = $('#tg-list');
     refs.tgOpen = $('#tg-open');
     refs.tgSecretHint = $('#tg-secret-hint');
+    refs.tsCard = $('#ts-card');
+    refs.tsList = $('#ts-list');
     refs.configList = $('#config-list');
     refs.gwIp = $('#gw-ip');
     refs.updatedAt = $('#updated-at');
@@ -1570,6 +1717,7 @@
     renderProbes();
     renderHero();
     renderConfig();
+    renderTailscale();
     renderTabs();
     renderEditor();
 

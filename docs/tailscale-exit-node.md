@@ -308,7 +308,53 @@ CGNAT-спуфинг закрыт и на уровне iptables: пакет с �
 публикация в интернет. Права регулируются ACL/grants; Basic-авторизация панели
 при этом остаётся.
 
-## 8. Диагностика
+## 8. Карточка в панели
+
+Если Tailscale установлен, панель показывает карточку **Tailscale**. Карточки
+нет, если пакет не установлен или панель не нашла helper
+`/usr/local/sbin/routeweave-tailscale-state.sh`: в этом случае
+`tailscale.installed` в `/api/status` равен `false`, и карточка скрыта.
+
+Что показывает карточка:
+
+- **tailscaled** — `active`, `inactive` или `failed`; значение `absent`
+  helper возвращает, когда пакета Tailscale нет (тогда карточка скрыта),
+  `activating`/`unknown` — пока демон стартует или `systemctl` недоступен;
+- **tailnet-адрес** — IPv4 из `Self.TailscaleIPs` (то же, что `tailscale ip -4`);
+- **Exit node** — `анонсирован и одобрен`, `ждёт одобрения` (анонсирован, но
+  не одобрен) или `не анонсирован`;
+- **Трафик** — суммарные счётчики `↓`/`↑` по интерфейсу;
+- **Скорость** — оценка `↓`/`↑` за интервал между опросами `/api/status`
+  (панель опрашивает его раз в 15 с), а не мгновенная скорость интерфейса;
+- **Пиры** — число пиров; строка показывается, только если оно больше нуля;
+- **Ошибка** — короткий текст, если helper не смог прочитать состояние.
+
+Данные готовит helper `/usr/local/sbin/routeweave-tailscale-state.sh`. Он
+только читает:
+
+- `systemctl is-active tailscaled`;
+- `tailscale status --json` — через `sudo`, поэтому доступен сокет
+  `tailscaled`, закрытый для непривилегированной панели;
+- счётчики `/sys/class/net/<TS_IFACE>/statistics/rx_bytes` и `tx_bytes`.
+
+Наружу helper отдаёт одну строку JSON с агрегатами: статус демона, tailnet-адрес,
+флаги exit node, счётчики трафика и число пиров. Ключей авторизации, имён
+устройств и списка пиров в ответе нет; вывод `tailscale status` и stderr в ответ
+и логи не попадают.
+
+`TS_IFACE` helper берёт из `/etc/routeweave/.env` (по умолчанию `tailscale0`);
+сам он в `.env` не пишет. Невалидное имя интерфейса заменяется на `tailscale0`.
+
+Одобрение exit node карточка не заменяет: оно по-прежнему делается только в
+admin console (**Machines** → **Edit exit node** → **Use as exit node**, см.
+раздел 4). Карточка лишь показывает `advertised`/`approved` из
+`tailscale status --json`; пока одобрения нет, будет `ждёт одобрения`.
+
+`install.sh` ставит helper в `/usr/local/sbin` и включает его в sudo-allowlist
+панели (`/etc/sudoers.d/routeweave-panel`, без wildcard). `uninstall.sh`
+удаляет helper, но не трогает пакет Tailscale и состояние `/var/lib/tailscale`.
+
+## 9. Диагностика
 
 Основное:
 
@@ -357,7 +403,7 @@ journalctl -u tailscaled -n 50
 console, выбран ли на клиенте, `--netfilter-mode=nodivert`, правило 8991,
 правила `ROUTEWEAVE-FWD` и ufw.
 
-## 9. Ограничения
+## 10. Ограничения
 
 - Policy-режим: трафик tailnet-клиентов идёт через userspace-стек mihomo.
   Пропускная способность ниже, чем при прямом NAT, и выше нагрузка на CPU.
@@ -381,7 +427,7 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
   `sudo systemctl restart routeweave-firewall`.
 - Прямого NAT-режима нет: отключить policy и пустить tailnet напрямую нельзя.
 
-## 10. Откат
+## 11. Откат
 
 Перестать быть exit node:
 
