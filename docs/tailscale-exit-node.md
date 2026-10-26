@@ -6,7 +6,9 @@
 
 Сервер Routeweave может быть exit node для tailnet: клиенты отправляют весь
 интернет-трафик на шлюз, а он разводит его по тем же правилам, что LAN и WDTT.
-Прямого NAT-режима нет — трафик проходит через mihomo TUN.
+Режимов два: `policy` (по умолчанию) — трафик проходит через mihomo TUN и
+получает geo/DPI-политику; `nat` — прямой MASQUERADE в WAN без mihomo
+(быстрее, но без политики).
 
 ## 1. Как это работает
 
@@ -26,8 +28,41 @@
 - Пакеты с источником из `100.64.0.0/10`, пришедшие не с `tailscale0`,
   дропаются в `ROUTEWEAVE-FWD`: это CGNAT-спуфинг.
 
-Порядок приоритетов `ip rule`: 8990 — WDTT, 8991 — tailnet, 8993 — WAN,
-9001/9002 — mihomo.
+Порядок приоритетов `ip rule`: 8990 — WDTT, 8991 — tailnet, 8992 — NAT-режим
+tailnet, 8993 — WAN, 9001/9002 — mihomo.
+
+### Режим exit node: policy и nat
+
+Режим задаётся `TS_EXIT_MODE` в `/etc/routeweave/.env`; по умолчанию `policy`.
+Оба режима сохраняют `ip rule` 8991 и CGNAT-спуф-гард, а правила policy-режима
+в NAT остаются на месте: они безвредны.
+
+`policy` — описан выше: `tailscale0 → Meta`, таблица 2022, политика mihomo.
+
+`nat` — трафик из `tailscale0`:
+
+- метится в mangle `PREROUTING` цепочкой `ROUTEWEAVE-TSMARK`:
+  `-i tailscale0 -j MARK --set-xmark 0x100000/0x100000`;
+- по правилу `ip rule ... fwmark 0x100000/0x100000 lookup main priority 8992`
+  уходит в `main`, то есть в WAN, минуя таблицу 2022;
+- маскарадится в nat `POSTROUTING` цепочкой `ROUTEWEAVE-TSNAT`:
+  `-s 100.64.0.0/10 -o LAN_IFACE -m mark --mark 0x100000/0x100000 -j MASQUERADE`.
+
+Что это значит:
+
+- geo/SOCKS/DPI-политика mihomo для tailnet не применяется: трафик идёт
+  напрямую. zapret на WAN-egress продолжает работать — он стоит на исходящем
+  интерфейсе, а не в TUN;
+- tailnet → LAN тоже маскарадится: LAN видит адрес шлюза, а не `100.x`
+  клиента. Это осознанно — обратный маршрут к CGNAT из LAN всё равно был бы
+  битым;
+- нужен корректный `LAN_IFACE`: если `LAN_IFACE`, `TS_IFACE` или `TS_SUBNET`
+  пусты, firewall не падает, пишет `warn` и работает как `policy`.
+
+Почему такие метка и приоритет: `0x100000` свободна (`0x40000` — tailscale и
+`WAN_INGRESS`, `0x80000` — zapret, `0x200000` рекомендуют для `WAN_INGRESS` при
+Tailscale), `8992` свободен (`8990` — WDTT, `8991` — tailnet, `8993` — WAN,
+`9001/9002` — mihomo).
 
 ## 2. Требования и что не нужно делать
 
@@ -147,6 +182,28 @@ sudo systemctl restart tailscaled
 
 Подробнее о режимах — в документации Tailscale:
 [Netfilter modes](https://tailscale.com/docs/reference/netfilter-modes).
+
+### Переключение режима exit node
+
+`TS_EXIT_MODE` установщик в `.env` не пишет — как `TS_IFACE` и `TS_SUBNET`,
+значение задаётся вручную. Включить прямой NAT:
+
+```bash
+sudo sed -i 's/^TS_EXIT_MODE=.*/TS_EXIT_MODE="nat"/' /etc/routeweave/.env
+# если строки ещё нет:
+echo 'TS_EXIT_MODE="nat"' | sudo tee -a /etc/routeweave/.env
+sudo systemctl restart routeweave-firewall
+sudo /etc/routeweave/fw-tailscale.sh doctor
+sudo /etc/routeweave/fw-tailscale.sh status
+```
+
+`start` идемпотентен: он сам снимает артефакты прежнего nat-режима (прыжки,
+цепочки `ROUTEWEAVE-TSMARK`/`ROUTEWEAVE-TSNAT`, правило 8992), поэтому
+переключение в обе стороны не оставляет дублей. Откат — вернуть `policy` и
+перезапустить юнит (см. раздел 11).
+
+Если `LAN_IFACE` (или `TS_IFACE`/`TS_SUBNET`) пуст, режим `nat` безопасно
+откатывается в `policy`: в логах будет `warn`, firewall продолжит работать.
 
 ## 4. Одобрение exit node и ACL
 
@@ -373,7 +430,10 @@ sudo /etc/routeweave/fw-tailscale.sh status
 - анонсирован и одобрен ли exit node;
 - маршруты до tailnet;
 - правила ufw;
-- не конфликтует ли метка `0x40000` с `WAN_INGRESS_MARK`.
+- не конфликтует ли метка `0x40000` с `WAN_INGRESS_MARK`;
+- в режиме `nat` — правило 8992, цепочки `ROUTEWEAVE-TSMARK` и
+  `ROUTEWEAVE-TSNAT`, MASQUERADE и маршрут помеченного пакета в WAN (а не в
+  TUN). Правила `tailscale0 ↔ Meta` в этом режиме не требуются.
 
 Дополнительно:
 
@@ -381,8 +441,10 @@ sudo /etc/routeweave/fw-tailscale.sh status
 tailscale status
 tailscale status --json
 tailscale netcheck
-ip rule show | grep 8991
+ip rule show | grep -E '8991|8992'
 sudo iptables -S ROUTEWEAVE-FWD
+sudo iptables -t mangle -S ROUTEWEAVE-TSMARK
+sudo iptables -t nat -S ROUTEWEAVE-TSNAT
 sudo iptables-save | grep -E -- '-j (ts-input|ts-forward|ts-postrouting)'
 journalctl -u tailscaled -n 50
 ```
@@ -405,9 +467,16 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
 
 ## 10. Ограничения
 
-- Policy-режим: трафик tailnet-клиентов идёт через userspace-стек mihomo.
+- В режиме `policy` трафик tailnet-клиентов идёт через userspace-стек mihomo.
   Пропускная способность ниже, чем при прямом NAT, и выше нагрузка на CPU.
-  Для гигабита это не решение.
+  Для гигабита используйте `TS_EXIT_MODE=nat`.
+- В режиме `nat` нет geo/SOCKS/DPI-политики mihomo: гео-блокировки и
+  DPI-фильтрация для tailnet не обходятся. zapret на WAN-egress продолжает
+  работать, но доменные правила mihomo не применяются.
+- В режиме `nat` источник в LAN маскарадится: LAN-устройства видят адрес
+  шлюза, а не `100.x` клиента, и логов с адресом клиента на них не будет.
+- Режиму `nat` нужен корректный `LAN_IFACE`: при пустом значении (как и при
+  пустых `TS_IFACE`/`TS_SUBNET`) firewall пишет `warn` и работает как `policy`.
 - `QUIC_DROP=yes` режет UDP/443 и у tailnet-клиентов: браузеры откатятся на
   TCP и попадут в политику. Если QUIC нужен, придётся выключить `QUIC_DROP`,
   но тогда часть трафика пойдёт мимо правил.
@@ -425,7 +494,6 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
   Tailscale. Поставьте в `/etc/routeweave/.env`
   `WAN_INGRESS_MARK="0x200000"` и выполните
   `sudo systemctl restart routeweave-firewall`.
-- Прямого NAT-режима нет: отключить policy и пустить tailnet напрямую нельзя.
 
 ## 11. Откат
 
@@ -438,13 +506,25 @@ sudo tailscale set --advertise-exit-node=false
 Клиенты больше не смогут выбрать шлюз как exit node; остальной tailnet и
 доступ к сервисам по `100.x.y.z` продолжат работать.
 
+Вернуть `policy` из `nat`:
+
+```bash
+sudo sed -i 's/^TS_EXIT_MODE=.*/TS_EXIT_MODE="policy"/' /etc/routeweave/.env
+sudo systemctl restart routeweave-firewall
+```
+
+`start` снимет прыжки и цепочки `ROUTEWEAVE-TSMARK`/`ROUTEWEAVE-TSNAT` и правило
+8992, и трафик tailnet снова пойдёт через TUN. `fw-tailscale.sh status` должен
+показать `TS_EXIT_MODE: policy`.
+
 Полный откат firewall-правил:
 
 ```bash
 sudo /etc/routeweave/fw-base.sh stop
 ```
 
-`stop` снимает `ROUTEWEAVE-FWD` и правило 8991. Это выключает и остальные
+`stop` снимает `ROUTEWEAVE-FWD`, правило 8991 и артефакты nat-режима (цепочки
+`ROUTEWEAVE-TSMARK`/`ROUTEWEAVE-TSNAT`, правило 8992). Это выключает и остальные
 правила шлюза, поэтому в обычном сценарии достаточно первой команды;
 `fw-base.sh stop` нужен, только если выводите шлюз из работы или хотите убрать
 правила полностью. Чтобы вернуть базовый firewall, выполните

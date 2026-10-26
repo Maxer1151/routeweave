@@ -108,6 +108,7 @@ forwarding разрешён для tailnet. Правила добавляютс�
 | `WG_SUBNET` | Подсеть клиентов WDTT (`wdtt0`), по умолчанию `10.66.66.0/24`; policy-routing — `ip rule` priority 8990 |
 | `TS_IFACE` | Интерфейс Tailscale, по умолчанию `tailscale0`; установщик не пишет, можно добавить вручную |
 | `TS_SUBNET` | Подсеть tailnet, по умолчанию `100.64.0.0/10`; установщик не пишет, можно добавить вручную |
+| `TS_EXIT_MODE` | Режим exit node: `policy` — трафик tailnet идёт через TUN mihomo (geo/DPI), `nat` — прямой NAT в WAN (быстрее, но без geo/DPI, источник маскарадится); по умолчанию `policy`, установщик не пишет |
 | `WAN_INGRESS` | `yes` — включить доступ из WAN к опубликованным портам; по умолчанию `no` |
 | `WAN_PORTS` | Порты для WAN-доступа: `8081`, `8081/tcp`, `51820/udp`, диапазоны `8000:8100/tcp` / `8000-8100/tcp`; голое число = tcp |
 | `WAN_INGRESS_MARK` | Метка connmark для WAN-доступа, по умолчанию `0x40000`; не должна пересекаться с метками mihomo/docker; при Tailscale задайте `0x200000` |
@@ -253,9 +254,16 @@ WDTT-Plus включается `INSTALL_WDTT=yes`, только amd64. DTLS `560
 
 Tailscale ставится установщиком при `INSTALL_TAILSCALE=yes` (интерактивный
 вопрос, по умолчанию `no`; `--defaults` — `no`). Без него шлюз работает как
-обычно. Сервер работает как exit node, а `tailscale0` — третий вход шлюза:
-трафик клиентов уходит в TUN mihomo и получает ту же политику, что LAN и WDTT
-(geo → SOCKS, dpi → zapret, RU → direct). Прямого NAT-режима нет.
+обычно. Сервер работает как exit node, а `tailscale0` — третий вход шлюза.
+Режим задаёт `TS_EXIT_MODE`:
+
+- `policy` (по умолчанию) — трафик клиентов уходит в TUN mihomo и получает
+  ту же политику, что LAN и WDTT (geo → SOCKS, dpi → zapret, RU → direct);
+- `nat` — прямой MASQUERADE в WAN: быстрее (нет userspace-стека mihomo), но
+  geo/SOCKS/DPI-политика для tailnet не применяется, а источник в LAN
+  маскарадится (LAN видит адрес шлюза). Включать осознанно.
+
+Подробнее — в [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md).
 
 Что делает установщик:
 
@@ -339,12 +347,13 @@ tailscale status
 journalctl -u tailscaled -n 50
 ```
 
-Ограничения: policy-режим через userspace-стек mihomo (ниже пропускная
-способность, выше нагрузка на CPU); IPv6 не поддерживается; `QUIC_DROP=yes`
-режет UDP/443 и у tailnet-клиентов; fake-ip `198.18.0.0/16` может
-конфликтовать с другим прокси на клиенте. При `WAN_INGRESS=yes` метка по
-умолчанию `0x40000` совпадает с меткой Tailscale — задайте
-`WAN_INGRESS_MARK="0x200000"`.
+Ограничения: policy-режим идёт через userspace-стек mihomo (ниже пропускная
+способность, выше нагрузка на CPU); в режиме `nat` нет geo/SOCKS/DPI-политики
+mihomo для tailnet (zapret на WAN-egress продолжает работать), а источник в
+LAN маскарадится; IPv6 не поддерживается; `QUIC_DROP=yes` режет UDP/443 и у
+tailnet-клиентов; fake-ip `198.18.0.0/16` может конфликтовать с другим прокси
+на клиенте. При `WAN_INGRESS=yes` метка по умолчанию `0x40000` совпадает с
+меткой Tailscale — задайте `WAN_INGRESS_MARK="0x200000"`.
 
 Подробности, DNS и ограничения — в
 [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md).

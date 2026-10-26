@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Диагностика входа Tailscale (tailscale0) в RouteWeave.
 #
-# Сервер работает exit node: forwarded-трафик из tailnet приходит на
-# tailscale0 и должен уходить в mihomo TUN (Meta) по policy-routing table
-# 2022 — так же, как трафик wdtt0. Ответы exit-node-клиентам, наоборот,
-# должны резолвиться через main: это обеспечивает ip rule priority 8991 из
-# fw-base.sh.
+# Сервер работает exit node. В режиме policy (дефолт) forwarded-трафик из
+# tailnet приходит на tailscale0 и уходит в mihomo TUN (Meta) по
+# policy-routing table 2022 — так же, как трафик wdtt0. В режиме nat трафик
+# метится 0x100000 в mangle PREROUTING и уходит в main (WAN) правилом
+# priority 8992, а затем маскарадится; TUN-правила при этом не используются.
+# Ответы exit-node-клиентам в обоих режимах резолвятся через main: это
+# обеспечивает ip rule priority 8991 из fw-base.sh.
 #
 # Скрипт только читает состояние (status|doctor): сам Tailscale он не устанавливает,
 # не авторизует и не меняет — ни iptables, ни ip rule, ни настройки tailscaled.
@@ -19,6 +21,8 @@ ETC="${ROUTEWEAVE_ETC:-/etc/routeweave}"
 # shellcheck disable=SC1091
 if [ -f "$ETC/.env" ]; then . "$ETC/.env"; fi
 
+warn() { echo "warn: $*" >&2; }
+
 TS_IFACE="${TS_IFACE:-tailscale0}"
 TS_SUBNET="${TS_SUBNET:-100.64.0.0/10}"
 TUN_IFACE="${TUN_IFACE:-Meta}"
@@ -26,10 +30,35 @@ PANEL_PORT="${PANEL_PORT:-8080}"
 WAN_INGRESS="${WAN_INGRESS:-no}"
 WAN_INGRESS="${WAN_INGRESS,,}"
 WAN_INGRESS_MARK="${WAN_INGRESS_MARK:-0x40000}"
+LAN_IFACE="${LAN_IFACE:-}"
 FWD_CHAIN="ROUTEWEAVE-FWD"
 TS_RULE_PRIO=8991
 # Метка, которую tailscale использует для subnet-route в netfilter-mode=off.
 TS_MARK="0x40000"
+
+# Режим exit node нормализуем так же, как fw-base.sh: мусор -> policy, чтобы
+# диагностика не расходилась с фактическим поведением firewall.
+TS_EXIT_MODE="${TS_EXIT_MODE:-policy}"
+TS_EXIT_MODE="${TS_EXIT_MODE,,}"
+case "$TS_EXIT_MODE" in
+  policy | nat) ;;
+  *)
+    warn "TS_EXIT_MODE='${TS_EXIT_MODE}' не policy/nat, считаю policy"
+    TS_EXIT_MODE="policy"
+    ;;
+esac
+
+# Артефакты NAT-режима (см. fw-base.sh).
+TS_NAT_MARK="0x100000"
+TS_NAT_RULE_PRIO=8992
+TS_MARK_CHAIN="ROUTEWEAVE-TSMARK"
+TS_NAT_CHAIN="ROUTEWEAVE-TSNAT"
+
+# chain_exists — есть ли цепочка в таблице (без прав iptables -> нет).
+chain_exists() { # chain_exists <таблица> <цепочка>
+  iptables -t "$1" -nL "$2" >/dev/null 2>&1
+}
+
 
 # route_dev — имя dev из вывода `ip route get`.
 route_dev() {
@@ -109,10 +138,12 @@ fwd_flags() {
 status() {
   local ts_active ts_kv ts_state ts_ip advertised approved
   local rules fwd_rules rule_count has_in has_out has_spoof
+  local nat_rules nat_mangle nat_mangle_hook nat_chain nat_nat_hook
 
   echo "TS_IFACE: $TS_IFACE"
   echo "TS_SUBNET: $TS_SUBNET"
   echo "TUN_IFACE: $TUN_IFACE"
+  echo "TS_EXIT_MODE: $TS_EXIT_MODE"
 
   if command -v tailscale >/dev/null 2>&1; then
     echo "tailscale: установлен ($(command -v tailscale))"
@@ -144,6 +175,57 @@ status() {
   echo "правило $TS_IFACE -> $TUN_IFACE: $(yes_no "$has_in")"
   echo "правило $TUN_IFACE -> $TS_IFACE: $(yes_no "$has_out")"
   echo "CGNAT-спуф DROP (src $TS_SUBNET не из $TS_IFACE): $(yes_no "$has_spoof")"
+
+  if [ "$TS_EXIT_MODE" = "nat" ]; then
+    nat_rules=$(ip rule show 2>/dev/null || true)
+    if [[ "$nat_rules" == *"$TS_NAT_RULE_PRIO:"*"fwmark $TS_NAT_MARK/$TS_NAT_MARK lookup main"* ]]; then
+      echo "ip rule $TS_NAT_RULE_PRIO (fwmark $TS_NAT_MARK/$TS_NAT_MARK lookup main): есть"
+    else
+      echo "ip rule $TS_NAT_RULE_PRIO (fwmark $TS_NAT_MARK/$TS_NAT_MARK lookup main): нет"
+    fi
+
+    nat_mangle=$(iptables -t mangle -S "$TS_MARK_CHAIN" 2>/dev/null || true)
+    nat_mangle_hook=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+    if chain_exists mangle "$TS_MARK_CHAIN"; then
+      echo "chain mangle $TS_MARK_CHAIN: есть"
+    else
+      echo "chain mangle $TS_MARK_CHAIN: нет"
+    fi
+    if [[ "$nat_mangle_hook" == *"-j $TS_MARK_CHAIN"* ]]; then
+      echo "jump PREROUTING -> $TS_MARK_CHAIN: есть"
+    else
+      echo "jump PREROUTING -> $TS_MARK_CHAIN: нет"
+    fi
+    if [[ "$nat_mangle" == *"-i $TS_IFACE"* \
+      && "$nat_mangle" == *"--set-xmark $TS_NAT_MARK/$TS_NAT_MARK"* ]]; then
+      echo "правило MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE: есть"
+    else
+      echo "правило MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE: нет"
+    fi
+
+    nat_chain=$(iptables -t nat -S "$TS_NAT_CHAIN" 2>/dev/null || true)
+    nat_nat_hook=$(iptables -t nat -S POSTROUTING 2>/dev/null || true)
+    if chain_exists nat "$TS_NAT_CHAIN"; then
+      echo "chain nat $TS_NAT_CHAIN: есть"
+    else
+      echo "chain nat $TS_NAT_CHAIN: нет"
+    fi
+    if [[ "$nat_nat_hook" == *"-j $TS_NAT_CHAIN"* ]]; then
+      echo "jump POSTROUTING -> $TS_NAT_CHAIN: есть"
+    else
+      echo "jump POSTROUTING -> $TS_NAT_CHAIN: нет"
+    fi
+    if [[ "$nat_chain" == *"-s $TS_SUBNET"* && "$nat_chain" == *"-o $LAN_IFACE"* \
+      && "$nat_chain" == *"--mark $TS_NAT_MARK/$TS_NAT_MARK"* \
+      && "$nat_chain" == *"MASQUERADE"* ]]; then
+      echo "правило MASQUERADE -s $TS_SUBNET -o $LAN_IFACE: есть"
+    else
+      echo "правило MASQUERADE -s $TS_SUBNET -o $LAN_IFACE: нет"
+    fi
+
+    echo "режим nat: трафик tailnet идёт напрямую в WAN (main), правила $TS_IFACE -> $TUN_IFACE и $TUN_IFACE -> $TS_IFACE не используются"
+    echo "geo/SOCKS/DPI-политика mihomo для tailnet не применяется; zapret на WAN-egress продолжает работать"
+  fi
   return 0
 }
 
@@ -152,8 +234,10 @@ doctor() {
   local ts_kv="" ts_state="" ts_ip="" advertised="" approved=""
   local fwd_rules has_in has_out has_spoof jumps_ts ufw_out route_out dev_if
   local missing_ports="" p found route_ok mark_lc
+  local nat_mangle nat_mangle_hook nat_chain nat_nat_hook nat_rules
 
   echo "== Tailscale exit node: диагностика =="
+  echo "TS_EXIT_MODE: $TS_EXIT_MODE"
 
   # 1. Пакет и демон.
   if command -v tailscale >/dev/null 2>&1; then
@@ -207,7 +291,9 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 4. Правила в цепочке ROUTEWEAVE-FWD.
+  # 4. Правила в цепочке ROUTEWEAVE-FWD. CGNAT-спуф нужен в обоих режимах,
+  #    а ACCEPT в TUN — только в policy: в nat трафик уходит в WAN и эти
+  #    правила не используются (могут оставаться, это не ошибка).
   fwd_rules=$(iptables -S "$FWD_CHAIN" 2>/dev/null || true)
   if [ -z "$fwd_rules" ]; then
     echo "FAIL: нет цепочки $FWD_CHAIN (или нет прав на iptables) — выполните systemctl restart routeweave-firewall"
@@ -216,12 +302,16 @@ doctor() {
     read -r has_in has_out has_spoof <<< "$(fwd_flags <<< "$fwd_rules")"
     if [ "$has_in" = "1" ]; then
       echo "OK: в $FWD_CHAIN есть ACCEPT $TS_IFACE -> $TUN_IFACE"
+    elif [ "$TS_EXIT_MODE" = "nat" ]; then
+      echo "инфо: ACCEPT $TS_IFACE -> $TUN_IFACE отсутствует — в nat-режиме не требуется"
     else
       echo "FAIL: в $FWD_CHAIN нет ACCEPT $TS_IFACE -> $TUN_IFACE — exit-node-трафик не пойдёт в mihomo"
       fails=$((fails + 1))
     fi
     if [ "$has_out" = "1" ]; then
       echo "OK: в $FWD_CHAIN есть ACCEPT $TUN_IFACE -> $TS_IFACE (возвратный путь)"
+    elif [ "$TS_EXIT_MODE" = "nat" ]; then
+      echo "инфо: ACCEPT $TUN_IFACE -> $TS_IFACE отсутствует — в nat-режиме не требуется"
     else
       echo "FAIL: в $FWD_CHAIN нет ACCEPT $TUN_IFACE -> $TS_IFACE — ответы exit-node-клиентам потеряются"
       fails=$((fails + 1))
@@ -290,8 +380,109 @@ doctor() {
     echo "WARN: проверка статуса tailscale пропущена (команды нет)"
   fi
 
-  # 7. Реальные маршруты.
-  if ! ip link show "$TS_IFACE" >/dev/null 2>&1; then
+  # 7. Реальные маршруты и артефакты выбранного режима.
+  if [ "$TS_EXIT_MODE" = "nat" ]; then
+    # 7a. Правило 8992 и его место относительно mihomo.
+    nat_rules=$(ip rule show 2>/dev/null || true)
+    if [[ "$nat_rules" == *"$TS_NAT_RULE_PRIO:"*"fwmark $TS_NAT_MARK/$TS_NAT_MARK lookup main"* ]]; then
+      echo "OK: ip rule priority $TS_NAT_RULE_PRIO: fwmark $TS_NAT_MARK/$TS_NAT_MARK lookup main есть"
+    else
+      echo "FAIL: нет ip rule priority $TS_NAT_RULE_PRIO с fwmark $TS_NAT_MARK/$TS_NAT_MARK -> main — помеченный трафик уйдёт в TUN; выполните systemctl restart routeweave-firewall"
+      fails=$((fails + 1))
+    fi
+    if [ -n "$min_2022" ] && [ "$TS_NAT_RULE_PRIO" -ge "$min_2022" ]; then
+      echo "FAIL: priority $TS_NAT_RULE_PRIO >= $min_2022 (правила таблицы 2022) — помеченный трафик не успеет уйти в main"
+      fails=$((fails + 1))
+    fi
+
+    # 7b. mangle: цепочка, прыжок, правило MARK.
+    nat_mangle_hook=$(iptables -t mangle -S PREROUTING 2>/dev/null || true)
+    nat_mangle=$(iptables -t mangle -S "$TS_MARK_CHAIN" 2>/dev/null || true)
+    if chain_exists mangle "$TS_MARK_CHAIN" \
+      && [[ "$nat_mangle_hook" == *"-j $TS_MARK_CHAIN"* ]]; then
+      echo "OK: цепочка mangle $TS_MARK_CHAIN есть, прыжок из PREROUTING есть"
+    else
+      echo "FAIL: нет цепочки mangle $TS_MARK_CHAIN или прыжка из PREROUTING — трафик tailnet не помечается; выполните systemctl restart routeweave-firewall"
+      fails=$((fails + 1))
+    fi
+    if [[ "$nat_mangle" == *"-i $TS_IFACE"* \
+      && "$nat_mangle" == *"--set-xmark $TS_NAT_MARK/$TS_NAT_MARK"* ]]; then
+      echo "OK: в $TS_MARK_CHAIN есть MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE"
+    else
+      echo "FAIL: в $TS_MARK_CHAIN нет MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE"
+      fails=$((fails + 1))
+    fi
+
+    # 7c. nat: цепочка, прыжок, MASQUERADE.
+    nat_nat_hook=$(iptables -t nat -S POSTROUTING 2>/dev/null || true)
+    nat_chain=$(iptables -t nat -S "$TS_NAT_CHAIN" 2>/dev/null || true)
+    if chain_exists nat "$TS_NAT_CHAIN" \
+      && [[ "$nat_nat_hook" == *"-j $TS_NAT_CHAIN"* ]]; then
+      echo "OK: цепочка nat $TS_NAT_CHAIN есть, прыжок из POSTROUTING есть"
+    else
+      echo "FAIL: нет цепочки nat $TS_NAT_CHAIN или прыжка из POSTROUTING — трафик tailnet уйдёт в WAN без подмены источника; выполните systemctl restart routeweave-firewall"
+      fails=$((fails + 1))
+    fi
+    if [[ "$nat_chain" == *"-s $TS_SUBNET"* && "$nat_chain" == *"-o $LAN_IFACE"* \
+      && "$nat_chain" == *"--mark $TS_NAT_MARK/$TS_NAT_MARK"* \
+      && "$nat_chain" == *"MASQUERADE"* ]]; then
+      echo "OK: в $TS_NAT_CHAIN есть MASQUERADE для -s $TS_SUBNET -o $LAN_IFACE с меткой $TS_NAT_MARK"
+    else
+      echo "FAIL: в $TS_NAT_CHAIN нет MASQUERADE для -s $TS_SUBNET -o $LAN_IFACE с меткой $TS_NAT_MARK — проверьте LAN_IFACE='$LAN_IFACE'"
+      fails=$((fails + 1))
+    fi
+
+    # 7d. Помеченный пакет обязан уходить не в TUN. LAN_IFACE — ожидание, а не
+    #     догма: при нескольких NIC маршрут может идти через другой WAN.
+    if route_out=$(ip route get 1.1.1.1 mark "$TS_NAT_MARK" 2>&1); then
+      dev_if=$(route_dev <<< "$route_out")
+      if [ -n "$TUN_IFACE" ] && [ "$dev_if" = "$TUN_IFACE" ]; then
+        echo "FAIL: ip route get 1.1.1.1 mark $TS_NAT_MARK уходит в $dev_if (TUN) — метка или правило $TS_NAT_RULE_PRIO не работают"
+        fails=$((fails + 1))
+      elif [ -n "$LAN_IFACE" ] && [ "$dev_if" != "$LAN_IFACE" ]; then
+        echo "WARN: помеченный маршрут идёт через ${dev_if:-неизвестный интерфейс}, а LAN_IFACE=$LAN_IFACE — проверьте маршруты (при нескольких NIC это не обязательно ошибка)"
+      else
+        echo "OK: ip route get 1.1.1.1 mark $TS_NAT_MARK -> dev ${dev_if:-?}"
+      fi
+    else
+      echo "FAIL: ip route get 1.1.1.1 mark $TS_NAT_MARK завершился ошибкой: $route_out"
+      fails=$((fails + 1))
+    fi
+
+    if ! ip link show "$TS_IFACE" >/dev/null 2>&1; then
+      echo "WARN: интерфейса $TS_IFACE нет — проверка маршрута exit-node-трафика пропущена"
+    elif [ -z "$ts_ip" ]; then
+      echo "WARN: IPv4 tailscale неизвестен — проверка маршрута exit-node-трафика пропущена"
+    elif route_out=$(ip route get 1.1.1.1 from "$ts_ip" iif "$TS_IFACE" mark "$TS_NAT_MARK" 2>&1); then
+      dev_if=$(route_dev <<< "$route_out")
+      if [ -n "$TUN_IFACE" ] && [ "$dev_if" = "$TUN_IFACE" ]; then
+        echo "FAIL: exit-node-трафик (from $ts_ip iif $TS_IFACE mark $TS_NAT_MARK) идёт в dev $dev_if (TUN), а должен в WAN — проверьте правило $TS_NAT_RULE_PRIO"
+        fails=$((fails + 1))
+      else
+        echo "OK: exit-node-трафик (from $ts_ip iif $TS_IFACE mark $TS_NAT_MARK) идёт в dev ${dev_if:-?}, не в TUN"
+      fi
+    else
+      # На части ядер ip route get с локальным src и iif отдаёт EINVAL:
+      # это ограничение проверки, а не обязательно поломка маршрутизации.
+      echo "WARN: не удалось проверить exit-node-маршрут: $route_out"
+      echo "WARN: проверьте вручную с адресом клиента: ip route get 1.1.1.1 from <TS-IP клиента> iif $TS_IFACE mark $TS_NAT_MARK (ожидается не $TUN_IFACE)"
+    fi
+
+    if route_out=$(ip route get 100.64.0.1 2>&1); then
+      dev_if=$(route_dev <<< "$route_out")
+      if [ -n "$TUN_IFACE" ] && [ "$dev_if" = "$TUN_IFACE" ]; then
+        echo "FAIL: маршрут к 100.64.0.1 уходит в dev $dev_if (TUN) — ответы exit-node-клиентам потеряются, проверьте ip rule $TS_RULE_PRIO"
+        fails=$((fails + 1))
+      else
+        echo "OK: маршрут к 100.64.0.1 идёт в dev ${dev_if:-?}, а не в TUN"
+      fi
+    else
+      echo "FAIL: ip route get 100.64.0.1 завершился ошибкой: $route_out"
+      fails=$((fails + 1))
+    fi
+
+    echo "WARN: TS_EXIT_MODE=nat: geo/SOCKS/DPI-политика mihomo для tailnet не применяется; zapret на WAN-egress продолжает работать"
+  elif ! ip link show "$TS_IFACE" >/dev/null 2>&1; then
     echo "WARN: интерфейса $TS_IFACE нет — проверка маршрутов пропущена"
   elif [ -z "$ts_ip" ]; then
     echo "WARN: IPv4 tailscale неизвестен — проверка маршрутов пропущена"
@@ -366,9 +557,15 @@ doctor() {
     echo "OK: ufw не активен — проверка ufw не требуется"
   fi
 
-  # 9. Конфликт метки WAN_INGRESS с subnet-route mark tailscale.
+  # 9. Конфликт метки WAN_INGRESS с меткой, которую использует exit node.
   mark_lc="${WAN_INGRESS_MARK,,}"
-  if [ "$WAN_INGRESS" = "yes" ] && [ "$mark_lc" = "$TS_MARK" ]; then
+  if [ "$TS_EXIT_MODE" = "nat" ]; then
+    if [ "$WAN_INGRESS" = "yes" ] && [ "$mark_lc" = "$TS_NAT_MARK" ]; then
+      echo "WARN: WAN_INGRESS_MARK=$WAN_INGRESS_MARK совпадает с меткой NAT-режима tailnet ($TS_NAT_MARK) — выберите другую, например 0x200000"
+    else
+      echo "OK: WAN_INGRESS_MARK=$WAN_INGRESS_MARK с меткой NAT-режима tailnet ($TS_NAT_MARK) не конфликтует"
+    fi
+  elif [ "$WAN_INGRESS" = "yes" ] && [ "$mark_lc" = "$TS_MARK" ]; then
     echo "WARN: WAN_INGRESS_MARK=$WAN_INGRESS_MARK совпадает с меткой subnet-route tailscale ($TS_MARK) — выберите другую, например 0x200000"
   else
     echo "OK: WAN_INGRESS_MARK=$WAN_INGRESS_MARK с меткой tailscale ($TS_MARK) не конфликтует"

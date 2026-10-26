@@ -47,17 +47,17 @@ DNS-01. Это отдельная работа: затрагивает уста�
 
 ## Отложенные функции
 
-### Tailscale: NAT и IPv6
+### Tailscale: IPv6
 
 Базовый вход `tailscale0` и режим exit node сделаны: forwarding в TUN,
 возвратный путь, CGNAT-спуф-гард, `ip rule` 8991, диагностика
 `fw-tailscale.sh status|doctor` и ufw-правила для прямых соединений и
 tailnet-портов. Автоустановка (`INSTALL_TAILSCALE=yes`) сделана. Сделана и
 карточка Tailscale в панели: статус `tailscaled`, tailnet-адрес, флаги exit
-node, трафик и число пиров. Отложено:
+node, трафик и число пиров. Сделаны оба режима exit node: `policy` (через TUN
+mihomo, geo/DPI-политика) и `nat` (прямой MASQUERADE в WAN, метка `0x100000`,
+`ip rule` 8992). Отложено:
 
-- прямой NAT-режим для exit node, без заворота в TUN mihomo; сейчас доступен
-  только policy-режим.
 - IPv6: проект IPv4-only, tailnet-адреса `100.x.y.z` — только IPv4.
 
 ## Не проверено на живом стенде

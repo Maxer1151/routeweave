@@ -20,6 +20,21 @@
 # Tailnet-адреса (TS_SUBNET) уходят в main правилом priority 8991: иначе
 # policy-routing mihomo (table 2022) заворачивает ответы exit-node-клиентам
 # обратно в TUN. 8991 свободен: 8990 — WDTT, 8993 — WAN, 9001/9002 — mihomo.
+#
+# Exit node работает в одном из двух режимов (TS_EXIT_MODE):
+#   policy (дефолт) — forwarded-трафик из tailscale0 уходит в TUN Meta
+#     (table 2022) и получает ту же политику mihomo, что LAN и WDTT:
+#     geo -> SOCKS, dpi -> zapret, RU -> direct;
+#   nat — трафик из tailscale0 метится в mangle PREROUTING меткой 0x100000
+#     и по правилу priority 8992 уходит в main (WAN), затем маскарадится в
+#     LAN_IFACE. Быстрее (нет userspace-стека mihomo), но geo/SOCKS/DPI-
+#     политика для tailnet не применяется, а источник в LAN маскарадится
+#     (LAN видит адрес шлюза). Правила policy-режима остаются на месте —
+#     в NAT они безвредны.
+# Метка 0x100000 свободна: 0x40000 — tailscale subnet-route/WAN_INGRESS,
+# 0x80000 — zapret, 0x200000 — рекомендуемая замена WAN_INGRESS при
+# Tailscale. Приоритет 8992 свободен: 8990 — WDTT, 8991 — tailnet,
+# 8993 — WAN, 9001/9002 — mihomo.
 # Использование: fw-base.sh start|stop
 set -Eeuo pipefail
 
@@ -54,6 +69,27 @@ WG_SUBNET="${WG_SUBNET:-10.66.66.0/24}"
 TS_IFACE="${TS_IFACE:-tailscale0}"
 TS_SUBNET="${TS_SUBNET:-100.64.0.0/10}"
 
+# Режим exit node нормализуем сами: в .env его пишут руками, и "Nat" или
+# опечатка не должны молча оставить другой режим. Мусор -> policy: это
+# историческое поведение, где tailnet получает политику mihomo.
+TS_EXIT_MODE="${TS_EXIT_MODE:-policy}"
+TS_EXIT_MODE="${TS_EXIT_MODE,,}"
+case "$TS_EXIT_MODE" in
+  policy | nat) ;;
+  *)
+    warn "TS_EXIT_MODE='${TS_EXIT_MODE}' не policy/nat, считаю policy"
+    TS_EXIT_MODE="policy"
+    ;;
+esac
+
+# Артефакты NAT-режима. Метка и приоритет не настраиваются: 0x100000 и 8992
+# не заняты другими компонентами (см. шапку), а смена метки ломала бы
+# диагностику fw-tailscale.sh.
+TS_NAT_MARK="0x100000"
+TS_NAT_RULE_PRIO=8992
+TS_MARK_CHAIN="ROUTEWEAVE-TSMARK"
+TS_NAT_CHAIN="ROUTEWEAVE-TSNAT"
+
 # Список VPN-интерфейсов собираем динамически: жёсткий "wg+" не матчит wdtt0
 # (это не wg-интерфейс по имени), а имена wg* зависят от установки.
 VPN_IFACES=()
@@ -73,8 +109,27 @@ while read -r if; do
   ip link show "${if%%@*}" >/dev/null 2>&1 && add_vpn "$if"
 done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^wg' || true)
 
+# ts_nat_cleanup — идемпотентно снимает всё, что создаёт NAT-режим: прыжки,
+# цепочки и правило 8992. Вызывается в начале start (переключение режимов и
+# повторный запуск не должны оставлять дублей) и в stop. Ошибки глушим: при
+# первом запуске цепочек/правил ещё нет, и это не должно валить скрипт.
+ts_nat_cleanup() {
+  while iptables -t mangle -D PREROUTING -j "$TS_MARK_CHAIN" 2>/dev/null; do :; done
+  while iptables -t nat -D POSTROUTING -j "$TS_NAT_CHAIN" 2>/dev/null; do :; done
+  iptables -t mangle -F "$TS_MARK_CHAIN" 2>/dev/null || true
+  iptables -t mangle -X "$TS_MARK_CHAIN" 2>/dev/null || true
+  iptables -t nat -F "$TS_NAT_CHAIN" 2>/dev/null || true
+  iptables -t nat -X "$TS_NAT_CHAIN" 2>/dev/null || true
+  # 8992 — только наше правило; сносим по priority, не завязываясь на метку.
+  while ip rule del priority "$TS_NAT_RULE_PRIO" 2>/dev/null; do :; done
+}
+
 start() {
   sysctl -qw net.ipv4.ip_forward=1
+
+  # Сначала всегда снимаем артефакты NAT-режима: start зовут повторно, а
+  # режим могли переключить правкой .env + restart.
+  ts_nat_cleanup
 
   # Цепочку создаём идемпотентно и сразу чистим: start зовут повторно
   # (systemd restart, повторный запуск установщика), дубли не нужны.
@@ -166,10 +221,45 @@ start() {
     ip rule add to "$TS_SUBNET" lookup main priority 8991
   fi
 
-  echo "ok: firewall started (QUIC_DROP=$QUIC_DROP, LAN=$LAN_IFACE, VPN=${VPN_IFACES[*]-нет}, TS=$TS_IFACE)"
+  # NAT-режим exit node: без LAN_IFACE/TS_IFACE/TS_SUBNET он не имеет смысла
+  # (нечего метить и некуда маскарадить). Не отказываем — warn и policy:
+  # шлюз продолжает работать, а не падает из-за одной переменной в .env.
+  if [ "$TS_EXIT_MODE" = "nat" ] \
+    && { [ -z "$LAN_IFACE" ] || [ -z "$TS_IFACE" ] || [ -z "$TS_SUBNET" ]; }; then
+    warn "TS_EXIT_MODE=nat, но LAN_IFACE='$LAN_IFACE'/TS_IFACE='$TS_IFACE'/TS_SUBNET='$TS_SUBNET' пусты — работаю как policy"
+    TS_EXIT_MODE="policy"
+  fi
+
+  if [ "$TS_EXIT_MODE" = "nat" ]; then
+    # 1. Метка на всём, что пришло из tailscale0. Метка ставится в PREROUTING
+    #    до выбора таблицы маршрутизации, поэтому правило 8992 ниже успевает
+    #    увести пакет в main.
+    iptables -t mangle -N "$TS_MARK_CHAIN"
+    iptables -t mangle -A "$TS_MARK_CHAIN" -i "$TS_IFACE" \
+      -j MARK --set-xmark "$TS_NAT_MARK/$TS_NAT_MARK"
+    iptables -t mangle -I PREROUTING 1 -j "$TS_MARK_CHAIN"
+
+    # 2. MASQUERADE в WAN. Под -s TS_SUBNET попадает и tailnet -> LAN: LAN
+    #    увидит адрес шлюза, а не 100.x клиента. Это осознанно: обратный
+    #    маршрут к CGNAT из LAN всё равно был бы битым.
+    iptables -t nat -N "$TS_NAT_CHAIN"
+    iptables -t nat -A "$TS_NAT_CHAIN" -s "$TS_SUBNET" -o "$LAN_IFACE" \
+      -m mark --mark "$TS_NAT_MARK/$TS_NAT_MARK" -j MASQUERADE
+    iptables -t nat -I POSTROUTING 1 -j "$TS_NAT_CHAIN"
+
+    # 3. Помеченные пакеты — в main (WAN), мимо table 2022. Приоритет 8992
+    #    ниже 8991, поэтому адреса tailnet по-прежнему резолвятся в main
+    #    напрямую, а не через это правило.
+    ip rule add fwmark "$TS_NAT_MARK/$TS_NAT_MARK" lookup main priority "$TS_NAT_RULE_PRIO"
+  fi
+
+  echo "ok: firewall started (QUIC_DROP=$QUIC_DROP, LAN=$LAN_IFACE, VPN=${VPN_IFACES[*]-нет}, TS=$TS_IFACE, TS_MODE=$TS_EXIT_MODE)"
 }
 
 stop() {
+  # NAT-режим: снимаем прыжки/цепочки/8992, даже если режим уже переключён
+  # на policy — иначе останется мусор от прошлой конфигурации.
+  ts_nat_cleanup
   # Прыжков может быть несколько (наследие старых версий) — снимаем все.
   while iptables -D FORWARD -j "$FWD_CHAIN" 2>/dev/null; do :; done
   # Цепочки может уже не быть (stop дважды подряд) — это не ошибка.

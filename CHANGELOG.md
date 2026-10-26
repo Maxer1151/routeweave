@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### Добавлено
+
+- Прямой NAT-режим exit node Tailscale (`TS_EXIT_MODE=nat`): трафик из
+  `tailscale0` метится в mangle (`0x100000`), уходит в WAN по `ip rule`
+  priority 8992 и маскарадится в `LAN_IFACE` — без userspace-стека mihomo.
+  Режим `policy` остаётся дефолтом: в `nat` для tailnet не действуют
+  geo/SOCKS/DPI-политика mihomo, а источник в LAN маскарадится.
+
 ### Исправлено
 
 - tg-ws-proxy: при заданном CF Worker он теперь ставится первым в
