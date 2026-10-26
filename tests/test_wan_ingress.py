@@ -12,6 +12,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,8 +68,27 @@ def route_dev(*extra):
     return ""
 
 
+MARK_OR = re.compile(r"\b(?P<target>CONNMARK|MARK) or (?P<value>0x[0-9a-fA-F]+)")
+
+
+def normalize_rule(rule):
+    """Привести правило к одной форме записи независимо от бэкенда iptables.
+
+    nf_tables печатает `--set-xmark` там, где legacy печатал `--set-mark`, а
+    `-L -v` — `MARK or 0x…` вместо `MARK --set-mark 0x…/0x…`. Значения и маски
+    при этом те же, поэтому нормализуется только форма записи: проверка
+    «правило маркировки есть» не ослабляется.
+    """
+    rule = rule.replace("--set-xmark", "--set-mark")
+    return MARK_OR.sub(
+        lambda m: f"{m.group('target')} --set-mark {m.group('value')}/{m.group('value')}",
+        rule,
+    )
+
+
 def chain_rules(chain):
-    return [ln for ln in ns_ok("iptables", "-t", "mangle", "-S", chain).splitlines()
+    return [normalize_rule(ln)
+            for ln in ns_ok("iptables", "-t", "mangle", "-S", chain).splitlines()
             if ln.startswith("-A ")]
 
 
@@ -166,8 +186,7 @@ def test_prerouting_chain_order(started):
     assert "ESTABLISHED" in first and "RELATED" in first, first
 
     tun_return = [i for i, r in enumerate(rules) if "-i Meta" in r and "-j RETURN" in r]
-    set_marks = [i for i, r in enumerate(rules)
-                 if "--set-mark" in r or "--set-xmark" in r]
+    set_marks = [i for i, r in enumerate(rules) if "--set-mark" in r]
     assert tun_return, "нет RETURN для TUN_IFACE=Meta"
     assert set_marks, "нет правил set-mark"
     assert tun_return[0] < set_marks[0], "RETURN для Meta ниже set-mark"
@@ -178,10 +197,10 @@ def test_prerouting_chain_order(started):
             f"нет RETURN для приватной сети {net}"
 
     assert any("-p tcp" in r and "--dport 8081" in r
-               and ("--set-mark" in r or "--set-xmark" in r)
+               and "--set-mark" in r
                for r in rules), "нет set-mark для tcp/8081"
     assert any("-p udp" in r and "--dport 51820" in r
-               and ("--set-mark" in r or "--set-xmark" in r)
+               and "--set-mark" in r
                for r in rules), "нет set-mark для udp/51820"
 
 
@@ -192,10 +211,10 @@ def test_new_connection_gets_both_mark_and_connmark(started):
                     if f"-p {proto}" in r and f"--dport {port}" in r
                     and "--ctstate NEW" in r]
         packet_mark = [r for r in matching
-                       if "-j MARK" in r and f"--set-xmark {MARK}/{MARK}" in r]
+                       if "-j MARK" in r and f"--set-mark {MARK}/{MARK}" in r]
         conn_mark = [r for r in matching
                      if "-j CONNMARK" in r and f"--set-mark {MARK}/{MARK}" in r]
-        assert packet_mark, f"нет MARK --set-xmark для {proto}/{port}"
+        assert packet_mark, f"нет MARK --set-mark для {proto}/{port}"
         assert conn_mark, f"нет CONNMARK --set-mark для {proto}/{port}"
         # MARK должен идти раньше CONNMARK: CONNMARK копирует метку пакета.
         assert rules.index(packet_mark[0]) < rules.index(conn_mark[0])
@@ -228,7 +247,7 @@ def test_output_chain_restore_only(started):
     rules = chain_rules("ROUTEWEAVE-WANMARK-OUT")
     assert len(rules) == 1, rules
     assert "--restore-mark" in rules[0], rules[0]
-    assert "--set-mark" not in rules[0] and "--set-xmark" not in rules[0], rules[0]
+    assert "--set-mark" not in rules[0], rules[0]
 
     jumps = hook_jumps("OUTPUT", "ROUTEWEAVE-WANMARK-OUT")
     assert len(jumps) == 1, jumps

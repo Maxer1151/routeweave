@@ -303,6 +303,10 @@ def test_every_iptables_call_uses_wait():
 
 # --- Привилегированные тесты: реальные пакеты в netns ---------------------
 
+# Счётчики читаем «до/после» и проверяем прирост. На обнуление через
+# `iptables -Z` не полагаемся: его поведение зависит от бэкенда и версии
+# iptables, а прирост виден одинаково и на legacy, и на nf_tables.
+
 NS = "rwin"
 PEER = "rwpeer"
 WAN_IP = "198.51.100.1"
@@ -382,10 +386,6 @@ def connect_from(namespace, host, port):
     return ns_run(namespace, sys.executable, "-c", CONNECT, host, str(port))
 
 
-def zero_counters():
-    ns_ok(NS, "iptables", "-Z", "ROUTEWEAVE-IN")
-
-
 def rule_counters():
     """[(pkts, tokens)] по правилам ROUTEWEAVE-IN."""
     out = ns_ok(NS, "iptables", "-vnx", "-L", "ROUTEWEAVE-IN")
@@ -398,13 +398,24 @@ def rule_counters():
     return result
 
 
+# -vnx -L печатает протокол числом под iptables-nft (6/17) и именем под
+# iptables-legacy (tcp/udp): тест должен работать на обоих бэкендах.
+PROTO_ALIASES = {
+    "tcp": {"tcp", "6"},
+    "udp": {"udp", "17"},
+    "icmp": {"icmp", "1"},
+}
+
+
 def counter(target, dpt=None, proto=None, iface=None, ctstate=None):
     total = 0
     for pkts, tokens in rule_counters():
         # tokens: pkts bytes target prot opt in out src dst [match...]
         if tokens[2] != target:
             continue
-        if proto and not any(tok == proto for tok in tokens[3:5]):
+        if proto and not any(
+            tok in PROTO_ALIASES.get(proto, {proto}) for tok in tokens[3:5]
+        ):
             continue
         if dpt and f"dpt:{dpt}" not in tokens:
             continue
@@ -513,45 +524,64 @@ class TestInputPolicy:
 
     @pytest.mark.parametrize("port", GUARD_TCP)
     def test_untrusted_tcp_is_dropped(self, input_ns, port):
-        zero_counters()
+        before = counter("DROP", dpt=port, proto="tcp")
         connect_from(PEER, WAN_IP, port)
-        assert counter("DROP", dpt=port, proto="tcp") > 0, (
-            f"tcp/{port} с адреса {PEER_WAN_IP} (iif wan0) не попал в DROP"
+        after = counter("DROP", dpt=port, proto="tcp")
+        assert after > before, (
+            f"tcp/{port} с адреса {PEER_WAN_IP} (iif wan0) не попал в DROP "
+            f"(счётчик не вырос: {before} -> {after})"
         )
 
     def test_untrusted_udp_dns_is_dropped(self, input_ns):
-        zero_counters()
+        before = counter("DROP", dpt="53", proto="udp")
         ns_run(PEER, sys.executable, "-c", SEND_UDP, WAN_IP, "53")
-        assert counter("DROP", dpt="53", proto="udp") > 0, (
-            "udp/53 с адреса WAN не попал в DROP"
+        after = counter("DROP", dpt="53", proto="udp")
+        assert after > before, (
+            f"udp/53 с адреса WAN не попал в DROP (счётчик не вырос: {before} -> {after})"
         )
 
     def test_lan_is_allowed(self, input_ns):
-        zero_counters()
+        before_accept = counter("ACCEPT", dpt=PANEL_PORT, iface="lan0")
+        before_drop = counter("DROP", dpt=PANEL_PORT)
         res = connect_from(PEER, LAN_IP, PANEL_PORT)
         assert "ok" in res.stdout, res.stdout + res.stderr
-        assert counter("ACCEPT", dpt=PANEL_PORT, iface="lan0") > 0
-        assert counter("DROP", dpt=PANEL_PORT) == 0
+        after_accept = counter("ACCEPT", dpt=PANEL_PORT, iface="lan0")
+        assert after_accept > before_accept, (
+            f"tcp/{PANEL_PORT} из LAN не попал в ACCEPT (счётчик не вырос: "
+            f"{before_accept} -> {after_accept})"
+        )
+        assert counter("DROP", dpt=PANEL_PORT) == before_drop
 
     def test_loopback_is_allowed(self, input_ns):
-        zero_counters()
+        # Правило lo — `-i lo -j ACCEPT` без --dport: разрешён весь вход с
+        # loopback. Поэтому проверяем счётчик этого правила, а факт доставки —
+        # самим соединением (иначе тест требует несуществующий dpt и ломается
+        # на любом бэкенде).
+        before = counter("ACCEPT", iface="lo")
         res = connect_from(NS, "127.0.0.1", PANEL_PORT)
         assert "ok" in res.stdout, res.stdout + res.stderr
-        assert counter("ACCEPT", dpt=PANEL_PORT, iface="lo") > 0
+        after = counter("ACCEPT", iface="lo")
+        assert after > before, (
+            f"вход с lo на tcp/{PANEL_PORT} не попал в ACCEPT (счётчик не вырос: "
+            f"{before} -> {after})"
+        )
 
     def test_ssh_is_allowed_from_wan(self, input_ns):
-        zero_counters()
+        before = counter("ACCEPT", dpt=SSH_PORT)
         connect_from(PEER, WAN_IP, SSH_PORT)
-        assert counter("ACCEPT", dpt=SSH_PORT) > 0, (
-            "SSH с адреса WAN не попал в ACCEPT"
+        after = counter("ACCEPT", dpt=SSH_PORT)
+        assert after > before, (
+            f"SSH с адреса WAN не попал в ACCEPT (счётчик не вырос: {before} -> {after})"
         )
 
     def test_established_is_allowed(self, input_ns):
-        zero_counters()
+        before = counter("ACCEPT", ctstate="ESTABLISHED")
         res = connect_from(PEER, LAN_IP, PANEL_PORT)
         assert "ok" in res.stdout, res.stdout + res.stderr
-        assert counter("ACCEPT", ctstate="ESTABLISHED") > 0, (
-            "ответный/установленный трафик не попал в ACCEPT ESTABLISHED,RELATED"
+        after = counter("ACCEPT", ctstate="ESTABLISHED")
+        assert after > before, (
+            "ответный/установленный трафик не попал в ACCEPT ESTABLISHED,RELATED "
+            f"(счётчик не вырос: {before} -> {after})"
         )
 
     def test_doctor_passes(self, input_ns):

@@ -378,6 +378,50 @@ chain_exists() {
   iptables -w 5 -t mangle -nL "$1" >/dev/null 2>&1
 }
 
+# mark_value_matches <0x…[/маска]> <ожидаемая метка> — числовое сравнение:
+# iptables может напечатать метку с ведущими нулями или в другом регистре.
+mark_value_matches() {
+  local got="${1%%/*}" want="$2"
+  [[ "$got" =~ ^0x[0-9a-fA-F]{1,8}$ ]] || return 1
+  [ "$((got))" -eq "$((want))" ]
+}
+
+# mark_rule_present <текст> <MARK|CONNMARK> <метка> — в тексте есть правило,
+# которое ставит эту метку. Форма записи зависит от бэкенда и команды:
+#   -S:      -j MARK --set-xmark 0x…/0x…   (iptables-nft и legacy)
+#            -j CONNMARK --set-mark 0x…/0x…  (то, что пишет сам скрипт)
+#   -L -v:   MARK or 0x…, CONNMARK or 0x…  (nf_tables)
+# Правило restore-mark ставит метку из conntrack, а не заданную, и под эти
+# шаблоны не попадает. Значение сверяется с ожидаемым, поэтому doctor ругается
+# и на пропавшее правило, и на правило с чужой меткой.
+mark_rule_present() {
+  local text="$1" target="$2" mark="$3" line value form
+  while IFS= read -r line; do
+    case "$line" in
+      *"-j $target "*) ;;
+      *" $target or "*) ;;
+      *) continue ;;
+    esac
+    for form in "--set-mark" "--set-xmark"; do
+      case "$line" in
+        *"$form "*)
+          value="${line##*"$form "}"
+          value="${value%% *}"
+          mark_value_matches "$value" "$mark" && return 0
+          ;;
+      esac
+    done
+    case "$line" in
+      *" $target or "*)
+        value="${line##*" $target or "}"
+        value="${value%% *}"
+        mark_value_matches "$value" "$mark" && return 0
+        ;;
+    esac
+  done <<< "$text"
+  return 1
+}
+
 # route_dev — имя dev из вывода `ip route get`.
 route_dev() {
   awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
@@ -507,11 +551,11 @@ doctor() {
   #     (ответы) должны быть в цепочке — одного CONNMARK мало: решение о
   #     маршруте принимается по метке пакета.
   chain_rules=$(iptables -w 5 -t mangle -S "$CHAIN" 2>/dev/null || true)
-  if [[ "$chain_rules" == *"-j MARK --set-xmark"* \
-    && "$chain_rules" == *"-j CONNMARK --set-mark"* ]]; then
-    echo "OK: в $CHAIN есть MARK --set-xmark и CONNMARK --set-mark для NEW"
+  if mark_rule_present "$chain_rules" MARK "$WAN_INGRESS_MARK" \
+    && mark_rule_present "$chain_rules" CONNMARK "$WAN_INGRESS_MARK"; then
+    echo "OK: в $CHAIN есть MARK (метка пакета) и CONNMARK (метка соединения) $WAN_INGRESS_MARK для NEW"
   else
-    echo "FAIL: в $CHAIN нет MARK --set-xmark и/или CONNMARK --set-mark — помеченные пакеты и их ответы не уйдут в main; выполните systemctl restart routeweave-firewall"
+    echo "FAIL: в $CHAIN нет MARK (метка пакета) и/или CONNMARK (метка соединения) $WAN_INGRESS_MARK — помеченные пакеты и их ответы не уйдут в main; выполните systemctl restart routeweave-firewall"
     fails=$((fails + 1))
   fi
 

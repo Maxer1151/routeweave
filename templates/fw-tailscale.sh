@@ -63,6 +63,42 @@ chain_exists() { # chain_exists <таблица> <цепочка>
   iptables -t "$1" -nL "$2" >/dev/null 2>&1
 }
 
+# mark_value_matches / mark_rule_present — те же помощники, что в fw-wan.sh:
+# -S печатает --set-xmark (а не --set-mark), -L -v под nf_tables — "MARK or 0x…".
+# Без нормализации doctor/status показывали «правила нет» при живом правиле.
+mark_value_matches() {
+  local got="${1%%/*}" want="$2"
+  [[ "$got" =~ ^0x[0-9a-fA-F]{1,8}$ ]] || return 1
+  [ "$((got))" -eq "$((want))" ]
+}
+
+mark_rule_present() { # mark_rule_present <текст> <MARK|CONNMARK> <метка>
+  local text="$1" target="$2" mark="$3" line value form
+  while IFS= read -r line; do
+    case "$line" in
+      *"-j $target "*) ;;
+      *" $target or "*) ;;
+      *) continue ;;
+    esac
+    for form in "--set-mark" "--set-xmark"; do
+      case "$line" in
+        *"$form "*)
+          value="${line##*"$form "}"
+          value="${value%% *}"
+          mark_value_matches "$value" "$mark" && return 0
+          ;;
+      esac
+    done
+    case "$line" in
+      *" $target or "*)
+        value="${line##*" $target or "}"
+        value="${value%% *}"
+        mark_value_matches "$value" "$mark" && return 0
+        ;;
+    esac
+  done <<< "$text"
+  return 1
+}
 
 # route_dev — имя dev из вывода `ip route get`.
 route_dev() {
@@ -224,11 +260,11 @@ status() {
     else
       echo "jump PREROUTING -> $TS_MARK_CHAIN: нет"
     fi
-    if [[ "$nat_mangle" == *"-i $TS_IFACE"* \
-      && "$nat_mangle" == *"--set-xmark $TS_NAT_MARK/$TS_NAT_MARK"* ]]; then
-      echo "правило MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE: есть"
+    if [[ "$nat_mangle" == *"-i $TS_IFACE"* ]] \
+      && mark_rule_present "$nat_mangle" MARK "$TS_NAT_MARK"; then
+      echo "правило MARK (метка $TS_NAT_MARK) для -i $TS_IFACE: есть"
     else
-      echo "правило MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE: нет"
+      echo "правило MARK (метка $TS_NAT_MARK) для -i $TS_IFACE: нет"
     fi
 
     nat_chain=$(iptables -t nat -S "$TS_NAT_CHAIN" 2>/dev/null || true)
@@ -433,11 +469,11 @@ doctor() {
       echo "FAIL: нет цепочки mangle $TS_MARK_CHAIN или прыжка из PREROUTING — трафик tailnet не помечается; выполните systemctl restart routeweave-firewall"
       fails=$((fails + 1))
     fi
-    if [[ "$nat_mangle" == *"-i $TS_IFACE"* \
-      && "$nat_mangle" == *"--set-xmark $TS_NAT_MARK/$TS_NAT_MARK"* ]]; then
-      echo "OK: в $TS_MARK_CHAIN есть MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE"
+    if [[ "$nat_mangle" == *"-i $TS_IFACE"* ]] \
+      && mark_rule_present "$nat_mangle" MARK "$TS_NAT_MARK"; then
+      echo "OK: в $TS_MARK_CHAIN есть MARK с меткой $TS_NAT_MARK для -i $TS_IFACE"
     else
-      echo "FAIL: в $TS_MARK_CHAIN нет MARK --set-xmark $TS_NAT_MARK/$TS_NAT_MARK для -i $TS_IFACE"
+      echo "FAIL: в $TS_MARK_CHAIN нет MARK с меткой $TS_NAT_MARK для -i $TS_IFACE"
       fails=$((fails + 1))
     fi
 

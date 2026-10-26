@@ -223,6 +223,50 @@ has_all() {
   return 0
 }
 
+# ctstates_in_line <строка> <состояние>... — в строке есть --ctstate со всеми
+# перечисленными состояниями. Порядок состояний в выводе iptables не фиксирован:
+# iptables-nft печатает RELATED,ESTABLISHED там, где iptables-legacy печатал
+# ESTABLISHED,RELATED. Сравнение подстрокой из-за этого давало ложный FAIL
+# в doctor на современной системе, поэтому список разбирается и сверяется
+# поэлементно.
+ctstates_in_line() {
+  local line="$1" state found item
+  shift
+  local states
+  states="$(printf '%s\n' "$line" \
+    | grep -oE '(--ctstate|ctstate)[[:space:]]+[A-Z_,]+' \
+    | sed -E 's/^(--ctstate|ctstate)[[:space:]]+//' \
+    | tr ',' '\n' || true)"
+  for state in "$@"; do
+    found=0
+    while IFS= read -r item; do
+      if [ "$item" = "$state" ]; then
+        found=1
+        break
+      fi
+    done <<< "$states"
+    [ "$found" -eq 1 ] || return 1
+  done
+  return 0
+}
+
+# has_ctstate_rule <текст> <подстрока той же строки> <состояние>... — правило,
+# в котором совпали и подстрока (например "-j ACCEPT"), и набор состояний.
+# Проверка идёт по строке, а не по всему выводу: иначе ACCEPT из одного
+# правила и INVALID из другого складывались бы в ложное OK.
+has_ctstate_rule() {
+  local text="$1" needle="$2" line
+  shift 2
+  while IFS= read -r line; do
+    case "$line" in
+      *"$needle"*) ;;
+      *) continue ;;
+    esac
+    ctstates_in_line "$line" "$@" && return 0
+  done <<< "$text"
+  return 1
+}
+
 # fwd_jump_on_top — прыжок ROUTEWEAVE-FWD в FORWARD стоит выше чужих прыжков
 # (ufw-before-forward/ufw-reject-forward/DOCKER-USER). При -I 1 это всегда так,
 # но проверяем: ufw reload и docker могут вставить своё правило в начало уже
@@ -518,7 +562,7 @@ doctor() {
       fails=$((fails + 1))
     fi
 
-    if has_all "$fwd_rules" "INVALID" "-j DROP"; then
+    if has_ctstate_rule "$fwd_rules" "-j DROP" INVALID; then
       echo "OK: в $FWD_CHAIN есть DROP для INVALID"
     else
       echo "FAIL: в $FWD_CHAIN нет DROP для INVALID — битые пакеты доходят до ACCEPT"
@@ -577,7 +621,7 @@ doctor() {
       echo "FAIL: нет ACCEPT для -i lo — локальные сервисы (панель, DNS) не работают"
       fails=$((fails + 1))
     fi
-    if has_all "$in_rules" "--ctstate ESTABLISHED,RELATED" "-j ACCEPT"; then
+    if has_ctstate_rule "$in_rules" "-j ACCEPT" ESTABLISHED RELATED; then
       echo "OK: ответный трафик (ESTABLISHED,RELATED) разрешён"
     else
       echo "FAIL: нет ACCEPT для ESTABLISHED,RELATED — установленные соединения рвутся на входе"
