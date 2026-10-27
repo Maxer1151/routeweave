@@ -661,7 +661,8 @@ sudo /etc/routeweave/fw-wan.sh status
 `config.yaml` выключен `auto-redirect` или если при заданном `SOCKS_URL`
 селектор `GEO` стоит на `DIRECT` — выбор группы хранится в `cache.db`
 (`profile.store-selected: true`), а не в конфиге, и `geo.txt` в этом случае
-идёт напрямую мимо апстрима.
+идёт напрямую мимо апстрима. Проверка селектора выполняется и при
+`WAN_INGRESS=no`.
 
 `auto-redirect` включён штатно и WAN-доступу не мешает: nft-таблица mihomo
 исключает из redirect адреса из `inet4_local_address_set` (локальные и

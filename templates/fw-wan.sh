@@ -530,6 +530,36 @@ doctor() {
   local fails=0 line prio min_2022="" route_out dev_if client=""
   local rules jumps_pre jumps_out chain_rules geo_now=""
 
+  # 1. Селектор GEO. mihomo хранит выбор группы в cache.db
+  #    (profile.store-selected: true), поэтому config.yaml может выглядеть
+  #    правильно, а geo-домены уходить в DIRECT мимо SOCKS_URL:
+  #    заблокированные домены молча не откроются.
+  #    Это предупреждение, а не FAIL: остальной шлюз от селектора не зависит.
+  #    Проверка не зависит от WAN_INGRESS — geo-политика работает и без него.
+  if [ -z "${SOCKS_URL:-}" ]; then
+    echo "OK: SOCKS_URL не задан — geo-домены идут напрямую"
+  elif [ -z "${MIHOMO_SECRET:-}" ]; then
+    echo "WARN: MIHOMO_SECRET пуст — проверка селектора GEO пропущена"
+  elif ! command -v curl >/dev/null 2>&1; then
+    echo "WARN: curl не найден — проверка селектора GEO пропущена"
+  else
+    # jq может отсутствовать: значение "now" вытаскиваем sed'ом.
+    geo_now=$(curl -sS --max-time 3 \
+      -H "Authorization: Bearer $MIHOMO_SECRET" \
+      "http://127.0.0.1:9090/proxies/GEO" 2>/dev/null \
+      | sed -n 's/.*"now"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
+    if [ -z "$geo_now" ]; then
+      echo "WARN: mihomo API не отвечает — проверка селектора GEO пропущена"
+    elif [ "$geo_now" = "socks-out" ]; then
+      echo "OK: селектор GEO = socks-out (geo-домены идут через SOCKS)"
+    elif [ "$geo_now" = "DIRECT" ]; then
+      echo "WARN: селектор GEO = DIRECT — домены из geo.txt идут напрямую мимо SOCKS_URL, заблокированные не откроются; переключите в zashboard или: curl -sS -X PUT http://127.0.0.1:9090/proxies/GEO -H \"Authorization: Bearer \$MIHOMO_SECRET\" -H 'Content-Type: application/json' -d '{\"name\":\"socks-out\"}'"
+    else
+      echo "WARN: селектор GEO = $geo_now, ожидался socks-out"
+    fi
+  fi
+
+  # 2. WAN_INGRESS: при no остальные проверки не нужны.
   if [ "$WAN_INGRESS" != "yes" ]; then
     echo "OK: WAN_INGRESS=no, доступ из WAN выключен (настраивать нечего)"
     return 0
@@ -541,7 +571,7 @@ doctor() {
     echo "WARN: WAN_PORTS содержит 443/udp при QUIC_DROP=yes — fw-base.sh не режет UDP/443 только для помеченного WAN_INGRESS трафика (mark $WAN_INGRESS_MARK); проверьте, что fw-base.sh запущен и метка в .env совпадает"
   fi
 
-  # 2-3. Цепочки и прыжки.
+  # 3-4. Цепочки и прыжки.
   jumps_pre=$(iptables -w 5 -t mangle -S PREROUTING 2>/dev/null || true)
   if chain_exists "$CHAIN" && [[ "$jumps_pre" == *"-j $CHAIN"* ]]; then
     echo "OK: цепочка $CHAIN есть, прыжок из PREROUTING есть"
@@ -558,7 +588,7 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 3a. Метки: MARK на пакет (маршрутизация) и CONNMARK на соединение
+  # 5. Метки: MARK на пакет (маршрутизация) и CONNMARK на соединение
   #     (ответы) должны быть в цепочке — одного CONNMARK мало: решение о
   #     маршруте принимается по метке пакета.
   chain_rules=$(iptables -w 5 -t mangle -S "$CHAIN" 2>/dev/null || true)
@@ -570,7 +600,7 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 4. Наше правило должно существовать ровно с той меткой и приоритетом.
+  # 6. Наше правило должно существовать ровно с той меткой и приоритетом.
   rules=$(ip rule show 2>/dev/null || true)
   if [[ "$rules" == *"$WAN_INGRESS_RULE_PRIO:"*"fwmark $WAN_INGRESS_MARK/$WAN_INGRESS_MARK lookup main"* ]]; then
     echo "OK: ip rule priority $WAN_INGRESS_RULE_PRIO с fwmark $WAN_INGRESS_MARK/$WAN_INGRESS_MARK -> main есть"
@@ -579,7 +609,7 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 5. Приоритет должен быть численно меньше правил mihomo на таблицу 2022:
+  # 7. Приоритет должен быть численно меньше правил mihomo на таблицу 2022:
   #    ip rule смотрит правила по возрастанию priority, иначе мы просто не
   #    успеем увести пакет в main.
   while IFS= read -r line; do
@@ -601,8 +631,8 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  # 6. Маршрут помеченного пакета.
-  #    6a. Локальный путь (без from/iif) — так ходит трафик самого шлюза.
+  # 8. Маршрут помеченного пакета.
+  #    8a. Локальный путь (без from/iif) — так ходит трафик самого шлюза.
   #        Это НЕ проверка forwarded-трафика, и в отчёте это сказано явно.
   if route_out=$(ip route get 1.1.1.1 mark "$WAN_INGRESS_MARK" 2>&1); then
     dev_if=$(route_dev <<< "$route_out")
@@ -619,7 +649,7 @@ doctor() {
     fails=$((fails + 1))
   fi
 
-  #    6b. Forwarded-путь: пакет пришёл на LAN_IFACE от клиента (не от шлюза)
+  #    8b. Forwarded-путь: пакет пришёл на LAN_IFACE от клиента (не от шлюза)
   #        и должен уйти в WAN. from "$SERVER_IP" здесь не годится — это адрес
   #        самого шлюза, то есть локальный путь; вместо него подставляем адрес
   #        клиента из подсети LAN_IFACE.
@@ -644,7 +674,7 @@ doctor() {
     echo "WARN: не удалось проверить forwarded-путь: $route_out"
   fi
 
-  # 7. auto-redirect в config.yaml штатно включён: nft-таблица mihomo исключает
+  # 9. auto-redirect в config.yaml штатно включён: nft-таблица mihomo исключает
   #    из redirect адреса из inet4_local_address_set, поэтому входящий
   #    WAN-трафик к SERVER_IP не перехватывается. Выключение auto-redirect
   #    ломает локальный TCP (петля в TUN) и DNS на loopback; WAN-доступу оно
@@ -659,35 +689,7 @@ doctor() {
     echo "WARN: $ETC/config.yaml не найден — проверка auto-redirect пропущена"
   fi
 
-  # 8. Селектор GEO. mihomo хранит выбор группы в cache.db
-  #    (profile.store-selected: true), поэтому config.yaml может выглядеть
-  #    правильно, а geo-домены уходить в DIRECT мимо SOCKS_URL: RU-правило
-  #    сработает раньше, и заблокированные домены молча не откроются.
-  #    Это предупреждение, а не FAIL: WAN-доступ от селектора не зависит.
-  if [ -z "${SOCKS_URL:-}" ]; then
-    echo "OK: SOCKS_URL не задан — geo-домены идут напрямую"
-  elif [ -z "${MIHOMO_SECRET:-}" ]; then
-    echo "WARN: MIHOMO_SECRET пуст — проверка селектора GEO пропущена"
-  elif ! command -v curl >/dev/null 2>&1; then
-    echo "WARN: curl не найден — проверка селектора GEO пропущена"
-  else
-    # jq может отсутствовать: значение "now" вытаскиваем sed'ом.
-    geo_now=$(curl -sS --max-time 3 \
-      -H "Authorization: Bearer $MIHOMO_SECRET" \
-      "http://127.0.0.1:9090/proxies/GEO" 2>/dev/null \
-      | sed -n 's/.*"now"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
-    if [ -z "$geo_now" ]; then
-      echo "WARN: mihomo API не отвечает — проверка селектора GEO пропущена"
-    elif [ "$geo_now" = "socks-out" ]; then
-      echo "OK: селектор GEO = socks-out (geo-домены идут через SOCKS)"
-    elif [ "$geo_now" = "DIRECT" ]; then
-      echo "WARN: селектор GEO = DIRECT — домены из geo.txt идут напрямую мимо SOCKS_URL, заблокированные не откроются; переключите в zashboard или: curl -sS -X PUT http://127.0.0.1:9090/proxies/GEO -H \"Authorization: Bearer \$MIHOMO_SECRET\" -H 'Content-Type: application/json' -d '{\"name\":\"socks-out\"}'"
-    else
-      echo "WARN: селектор GEO = $geo_now, ожидался socks-out"
-    fi
-  fi
-
-  # 9. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
+  # 10. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
   if chain_exists "$CHAIN"; then
     echo "--- counters $CHAIN ---"
     iptables -w 5 -t mangle -L "$CHAIN" -vn 2>/dev/null || true

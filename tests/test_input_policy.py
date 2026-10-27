@@ -350,9 +350,17 @@ def test_fw_wan_doctor_checks_geo_selector():
 
     # Это WARN, а не FAIL: doctor по-прежнему возвращает 0, когда всё
     # остальное в порядке.
-    geo = doctor.split('if [ -z "${SOCKS_URL:-}" ]')[1].split("# 9.")[0]
+    geo = doctor.split('if [ -z "${SOCKS_URL:-}" ]')[1].split(
+        'if [ "$WAN_INGRESS" != "yes" ]'
+    )[0]
     assert geo, "блок проверки GEO не найден"
     assert "fails=" not in geo, "проверка селектора GEO не должна менять fails"
+    # Селектор не зависит от WAN-доступа: блок стоит выше раннего return 0
+    # для WAN_INGRESS=no, иначе на таких установках он не выполняется.
+    gate = doctor.index('if [ "$WAN_INGRESS" != "yes" ]')
+    assert doctor.index("/proxies/GEO") < doctor.index("return 0")
+    assert doctor.index("/proxies/GEO") < gate
+    assert "return 0" in doctor[gate : gate + 200]
     # Секрет в вывод не попадает: в WARN-подсказке печатается имя
     # переменной, а не её значение (то есть $ экранирован).
     for line in code_lines(geo):
