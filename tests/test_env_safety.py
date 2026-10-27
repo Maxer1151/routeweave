@@ -385,6 +385,7 @@ def test_install_reads_env_only_through_env_get():
         "PANEL_PASS",
         "PANEL_BIND",
         "MIHOMO_API",
+        "MIHOMO_AUTO_REDIRECT",
         "SSH_PORT",
         "WAN_INGRESS",
         "WAN_PORTS",
@@ -414,6 +415,7 @@ def test_managed_keys_are_upserted_on_reinstall():
         "QUIC_DROP",
         "PANEL_BIND",
         "MIHOMO_API",
+        "MIHOMO_AUTO_REDIRECT",
         "SSH_PORT",
     ):
         assert re.search(rf"\b{key}\b", branch), f"{key} не обновляется при переустановке"

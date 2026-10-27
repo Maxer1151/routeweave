@@ -15,12 +15,16 @@
   * MIHOMO_BIND — адрес external-controller и bind-address (по умолчанию
     SERVER_IP, если он пуст — 127.0.0.1). 0.0.0.0 разрешён, но с
     предупреждением: API окажется доступен из WAN.
-  * DNS_BIND — адрес DNS-листенера (по умолчанию SERVER_IP, иначе 127.0.0.1).
+  * DNS_BIND — адрес DNS-листенера (по умолчанию 0.0.0.0:53: DNS нужен и
+    LAN, и `127.0.0.1` — через него резолвит Tailscale MagicDNS, и wdtt0).
   * MIHOMO_ALLOW_LAN=yes — включить allow-lan (по умолчанию false: mixed-port
     слушает только доверенные адреса, доступ из LAN не открывается сам).
   * MIHOMO_TUN_MTU — MTU TUN (по умолчанию 1280, допустимо 576..9000).
-  * WAN_INGRESS=yes — auto-redirect принудительно выключается: он перехватывает
-    входящий TCP раньше маркировки WAN-трафика.
+  * MIHOMO_AUTO_REDIRECT=no — выключить auto-redirect mihomo (по умолчанию
+    включён). Отключение ломает локальный TCP: трафик шлюза уходит в TUN и
+    зацикливается, а DNS на loopback перестаёт отвечать. Оставляйте `no`
+    только для отладки: WAN-доступ от него не зависит (метка 0x200000 и
+    `ip rule` 8993).
 
 Коды возврата: 0 — успех, 1 — ошибка разбора/записи, 2 — ошибка аргументов
 (argparse).
@@ -61,8 +65,13 @@ BASE_FAKEIP_FILTER = [
 DEFAULT_ENV_FILE = "/etc/routeweave/.env"
 DEFAULT_OUT_FILE = "/etc/routeweave/config.yaml"
 # Адрес по умолчанию, если SERVER_IP не задан: слушаем только localhost,
-# а не 0.0.0.0. Иначе панель/API/DNS видны из WAN при INPUT policy ACCEPT.
+# а не 0.0.0.0. Иначе панель/API видны из WAN при INPUT policy ACCEPT.
+# (DNS — исключение, см. DEFAULT_DNS_BIND ниже.)
 DEFAULT_BIND = "127.0.0.1"
+# DNS по умолчанию слушает все адреса: его спрашивают LAN и wdtt0, а
+# Tailscale MagicDNS форвардит на 127.0.0.1:53. Привязка к SERVER_IP ломала
+# loopback-резолв и DNS шлюза. Доступ из WAN закрывает ROUTEWEAVE-IN.
+DEFAULT_DNS_BIND = "0.0.0.0"
 # MTU TUN: 1280 — минимум IPv6 и безопасное значение для инкапсуляции
 # (WireGuard/Tailscale сверху не любят 1500 без PMTU).
 DEFAULT_TUN_MTU = 1280
@@ -315,15 +324,20 @@ def parse_flag(data: dict, key: str, *, default: bool) -> bool:
     return default
 
 
-def resolve_bind(data: dict, key: str, what: str) -> str:
-    """Адрес прослушивания: <key> -> SERVER_IP -> 127.0.0.1.
+def resolve_bind(data: dict, key: str, what: str, default=None) -> str:
+    """Адрес прослушивания: <key> -> default -> SERVER_IP -> 127.0.0.1.
 
-    Допускаем IPv4 и localhost: 0.0.0.0 разрешён, но с предупреждением (сервис
-    окажется доступен из WAN). Имя хоста не принимаем: mihomo ждёт IP, а
-    SERVER_IP в .env — адрес интерфейса, не DNS-имя.
+    Допускаем IPv4 и localhost: 0.0.0.0 разрешён, но предупреждаем только
+    когда его задали явно. Штатный wildcard-дефолт (DNS слушает все
+    интерфейсы) не должен шуметь в stderr: иначе любой рендер на рабочей
+    установке выглядел бы как ошибка. Имя хоста не принимаем: mihomo ждёт
+    IP, а SERVER_IP в .env — адрес интерфейса, не DNS-имя.
     """
     server_ip = (data.get("SERVER_IP") or "").strip()
-    raw = (data.get(key) or "").strip() or server_ip or DEFAULT_BIND
+    raw_value = (data.get(key) or "").strip()
+    explicit = bool(raw_value)
+    fallback = default or server_ip or DEFAULT_BIND
+    raw = raw_value or fallback
     if raw == "localhost":
         return raw
     try:
@@ -331,9 +345,9 @@ def resolve_bind(data: dict, key: str, what: str) -> str:
     except ValueError:
         raise EnvValueError(
             f"{key}={raw!r} должен быть IPv4-адресом или "
-            f"localhost (например {server_ip or DEFAULT_BIND})"
+            f"localhost (например {fallback})"
         ) from None
-    if addr.is_unspecified:
+    if addr.is_unspecified and explicit:
         print(
             f"warn: {key}={raw} — {what} будет слушать все "
             "интерфейсы, включая WAN; ограничьте доступ firewall'ом "
@@ -425,18 +439,23 @@ def main(argv=None) -> int:
         mihomo_bind = resolve_bind(
             data, "MIHOMO_BIND", "external-controller/API mihomo"
         )
-        dns_bind = resolve_bind(data, "DNS_BIND", "DNS mihomo")
+        dns_bind = resolve_bind(
+            data, "DNS_BIND", "DNS mihomo", default=DEFAULT_DNS_BIND
+        )
         tun_mtu = parse_tun_mtu(data)
     except EnvValueError as exc:
         print(f"ошибка: {exc}", file=sys.stderr)
         return 1
 
     # allow-lan по умолчанию выключен: mixed-port не должен быть доступен из
-    # LAN без явного согласия (MIHOMO_ALLOW_LAN=yes). WAN_INGRESS=yes
-    # выключает auto-redirect: он перехватывает входящий TCP раньше нашей
-    # маркировки в mangle PREROUTING и ломает доступ из WAN.
+    # LAN без явного согласия (MIHOMO_ALLOW_LAN=yes). WAN_INGRESS auto-redirect
+    # больше не выключает: nft-таблица mihomo исключает из redirect адреса из
+    # inet4_local_address_set (локальные/LAN), поэтому входящий WAN-трафик к
+    # SERVER_IP не перехватывается, а ответы помеченных пакетов уходят по
+    # `ip rule` 8993. Отключение auto-redirect ломает локальный TCP и DNS:
+    # трафик шлюза заворачивается в TUN и зацикливается.
     allow_lan = parse_flag(data, "MIHOMO_ALLOW_LAN", default=False)
-    wan_ingress = parse_flag(data, "WAN_INGRESS", default=False)
+    auto_redirect = parse_flag(data, "MIHOMO_AUTO_REDIRECT", default=True)
 
     secret = (data.get("MIHOMO_SECRET") or "").strip()
     if not secret:
@@ -473,7 +492,7 @@ def main(argv=None) -> int:
             "enable": True,
             "stack": "mixed",
             "auto-route": True,
-            "auto-redirect": not wan_ingress,
+            "auto-redirect": auto_redirect,
             "auto-detect-interface": True,
             "strict-route": False,
             "mtu": tun_mtu,

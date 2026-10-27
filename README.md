@@ -150,8 +150,9 @@ forwarding разрешён для tailnet. Независимо от ufw вхо
 | `MIHOMO_API` | Адрес API mihomo для панели и апдейтера; по умолчанию `http://MIHOMO_BIND:9090` (пустой `MIHOMO_BIND` = `SERVER_IP`, `0.0.0.0` заменяется на `127.0.0.1`); при смене `MIHOMO_BIND` обновите `MIHOMO_API` вручную — установщик не пересчитывает уже записанное значение |
 | `MIHOMO_BIND` | Адрес external-controller и `bind-address` mihomo, по умолчанию `SERVER_IP`; `0.0.0.0` допустим только осознанно (установщик предупреждает) |
 | `MIHOMO_ALLOW_LAN` | `no` по умолчанию: mixed-port `7890` не доступен из LAN; `yes` включает `allow-lan` |
+| `MIHOMO_AUTO_REDIRECT` | `yes` по умолчанию: auto-redirect mihomo перехватывает локальный TCP (nft redirect в mixed-port). `no` — только для отладки: ломает локальный TCP/DNS (трафик шлюза зацикливается), WAN-доступу не нужен |
 | `MIHOMO_TUN_MTU` | MTU TUN mihomo, по умолчанию `1280`; допустимо 576..9000 |
-| `DNS_BIND` | Адрес DNS-листенера mihomo (порт 53), по умолчанию `SERVER_IP` |
+| `DNS_BIND` | Адрес DNS-листенера mihomo (порт 53), по умолчанию `0.0.0.0:53`: DNS нужен LAN, wdtt0 и Tailscale MagicDNS (форвардит на `127.0.0.1:53`). Явный IP ограничивает листенер и может сломать loopback-резолв; доступ из WAN закрывает firewall |
 | `SSH_PORT` | Порт SSH хоста, по умолчанию `22`; 1..65535. Используется правилом firewall и подсказками панели |
 | `MIHOMO_SECRET` | Секрет API mihomo; генерируется установщиком |
 | `BASE_DOMAIN` | Домен CF Worker для tg-ws-proxy |
@@ -423,9 +424,10 @@ WDTT-Plus включается `INSTALL_WDTT=yes`, только amd64. DTLS `560
 добавляется `ip rule` priority 8990. Firewall учитывает `wdtt0` и
 существующие `wg*`; `tailscale0` — в разделе ниже.
 
-Если WDTT-клиенты используют DNS шлюза, `DNS_BIND` должен быть `10.66.66.1`
-(адрес шлюза в `WG_SUBNET`) или `0.0.0.0`: по умолчанию DNS слушает только
-`SERVER_IP`, и запросы с `wdtt0` до него не дойдут.
+Если WDTT-клиенты используют DNS шлюза, менять `DNS_BIND` не нужно: по
+умолчанию DNS слушает `0.0.0.0:53` и покрывает `wdtt0`. `10.66.66.1` (адрес
+шлюза в `WG_SUBNET`) задавайте, только если хотите ограничить листенер
+этим адресом.
 
 ## Опционально: Tailscale (exit node)
 
@@ -516,15 +518,16 @@ mihomo. С nameserver клиент получает fake-ip `198.18.x.x`, и р�
 `100.x.y.z:7890` (последний доступен только при `MIHOMO_ALLOW_LAN=yes`).
 Порты те же, что у LAN.
 
-**Сначала о bind-адресах.** По умолчанию `PANEL_BIND`, `MIHOMO_BIND` и
-`DNS_BIND` равны `SERVER_IP` (LAN-адресу), поэтому по `100.x.y.z` сервисы
-**не** отвечают, даже когда firewall их разрешает. Чтобы доступ по
-tailscale-адресу заработал, задайте в `/etc/routeweave/.env`:
+**Сначала о bind-адресах.** `DNS_BIND` по умолчанию `0.0.0.0:53`, поэтому DNS
+по `100.x.y.z` уже отвечает (доступ ограничивает `ROUTEWEAVE-IN`); менять его
+для tailnet не нужно. А `PANEL_BIND` и `MIHOMO_BIND` по умолчанию равны
+`SERVER_IP` (LAN-адресу), поэтому по `100.x.y.z` панель и API **не** отвечают,
+даже когда firewall их разрешает. Чтобы доступ по tailscale-адресу заработал,
+задайте в `/etc/routeweave/.env`:
 
-- `PANEL_BIND`, `MIHOMO_BIND`, `DNS_BIND` — tailscale-адрес шлюза
+- `PANEL_BIND`, `MIHOMO_BIND` — tailscale-адрес шлюза
   (`100.x.y.z`, безопаснее: сервис не слушает другие интерфейсы) либо
-  `0.0.0.0` (осознанный opt-in: все интерфейсы, границей остаётся firewall;
-  для DNS с fake-ip `0.0.0.0` нужен только при работающем `ROUTEWEAVE-IN`);
+  `0.0.0.0` (осознанный opt-in: все интерфейсы, границей остаётся firewall);
 - `PANEL_ALLOWED_HOSTS` — добавьте tailscale-IP и/или MagicDNS-имя, иначе
   панель ответит `421` на незнакомый `Host`;
 - `MIHOMO_API` — при смене `MIHOMO_BIND` на tailscale-адрес укажите
@@ -580,7 +583,7 @@ fake-ip `198.18.0.0/16` может конфликтовать с другим п
 
 | Порт | Протокол | Назначение | Откуда доступен |
 |---|---|---|---|
-| 53 | TCP + UDP | DNS mihomo (fake-ip), `DNS_BIND` | LAN (`LAN_IFACE`+`LAN_CIDR`), tailnet, WDTT |
+| 53 | TCP + UDP | DNS mihomo (fake-ip); слушает все интерфейсы (`DNS_BIND`, по умолчанию `0.0.0.0:53`), доступ ограничивает firewall | LAN (`LAN_IFACE`+`LAN_CIDR`), tailnet, WDTT |
 | 8080 | TCP | Веб-панель (`PANEL_PORT`, слушает `PANEL_BIND`) | LAN (`LAN_IFACE`+`LAN_CIDR`), tailnet, WDTT |
 | 9090 | TCP | mihomo API и zashboard (`MIHOMO_BIND`) | LAN (`LAN_IFACE`+`LAN_CIDR`), tailnet, WDTT |
 | 7890 | TCP | mixed-proxy mihomo; из LAN только при `MIHOMO_ALLOW_LAN=yes` | LAN/tailnet/WDTT при `MIHOMO_ALLOW_LAN=yes` |
@@ -654,23 +657,18 @@ sudo /etc/routeweave/fw-wan.sh status
 Диагностика — `sudo /etc/routeweave/fw-wan.sh doctor`: проверяет цепочки и
 прыжки, наличие правила `8993`, что его приоритет меньше правил таблицы
 `2022`, что forwarded-путь помеченного пакета (от адреса клиента в `LAN_IFACE`,
-а не от `SERVER_IP`) уходит не в TUN, а также предупреждает о `redirect` в
-nftables и `auto-redirect: true` в `config.yaml`. При `auto-redirect` mihomo
-перехватывает входящий TCP ещё до маркировки; если WAN-доступ не работает,
-поставьте `auto-redirect: false` и перезапустите mihomo.
+а не от `SERVER_IP`) уходит не в TUN, а также конфиг mihomo: предупреждает,
+только если в `config.yaml` выключен `auto-redirect`.
 
-Оба WARN, про `redirect` и `auto-redirect`, — ожидаемая картина на рабочей
-установке, а не признак поломки. Таблица `2022` и правила `9001`/`9002`,
-которые создаёт `auto-route`, нужны для работы шлюза; правила `redirect` от
-`auto-redirect: true` ограничены множеством локальных адресов
-(`ip daddr @inet4_local_address_set ... return`), поэтому входящий на
-LAN-адрес сервера трафик они не перехватывают. Если доступ из WAN
-действительно не работает, а `doctor` при этом заканчивается строкой
-`OK: проверки пройдены`, сначала поставьте `auto-redirect: false` в
-`/etc/routeweave/config.yaml`, выполните `sudo systemctl restart mihomo` и
-повторите проверку. `config.yaml` генерируется установщиком из `.env`, так
-что ручная правка живёт до следующего запуска установщика; чтобы изменить
-поведение навсегда, нужно править шаблон/генератор.
+`auto-redirect` включён штатно и WAN-доступу не мешает: nft-таблица mihomo
+исключает из redirect адреса из `inet4_local_address_set` (локальные и
+LAN-адреса), поэтому входящий на `SERVER_IP` трафик не перехватывается, а
+ответы помеченных пакетов уходят в `main` по `ip rule` 8993. Выключение
+`auto-redirect` ломает локальный TCP (трафик шлюза заворачивается в TUN и
+зацикливается) и DNS на loopback. Для отладки это можно сделать через
+`MIHOMO_AUTO_REDIRECT=no`, но на рабочей установке не нужно. `config.yaml`
+генерируется установщиком из `.env`, поэтому поведение меняется через `.env`,
+а не ручной правкой файла.
 
 Доступ из WAN не отменяет DNAT/docker-правила и не заменяет TLS или
 reverse-proxy: открывайте только те порты, которые действительно должны быть

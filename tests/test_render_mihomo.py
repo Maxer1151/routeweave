@@ -314,8 +314,8 @@ def test_full_config_structure(tmp_path):
         "MIHOMO_SECRET=topsecret\n",
     )
     assert cfg["tun"]["enable"] is True
-    # Без SERVER_IP/MIHOMO_BIND/DNS_BIND слушаем только localhost, а не 0.0.0.0.
-    assert cfg["dns"]["listen"] == "127.0.0.1:53"
+    # DNS по умолчанию слушает все интерфейсы, API mihomo — только localhost.
+    assert cfg["dns"]["listen"] == "0.0.0.0:53"
     assert cfg["external-controller"] == "127.0.0.1:9090"
     assert cfg["bind-address"] == "127.0.0.1"
     assert cfg["allow-lan"] is False
@@ -372,7 +372,30 @@ def test_bind_addresses_from_server_ip(tmp_path):
     cfg = load_ok(tmp_path, "SERVER_IP=192.168.1.10\nMIHOMO_SECRET=s\n")
     assert cfg["external-controller"] == "192.168.1.10:9090"
     assert cfg["bind-address"] == "192.168.1.10"
-    assert cfg["dns"]["listen"] == "192.168.1.10:53"
+    # SERVER_IP больше не влияет на DNS: листенер слушает все интерфейсы.
+    assert cfg["dns"]["listen"] == "0.0.0.0:53"
+
+
+def test_dns_default_wildcard_does_not_warn(tmp_path):
+    # 0.0.0.0 — штатный дефолт DNS, а не осознанный opt-in: предупреждения нет.
+    proc, out_file = run_render(
+        tmp_path, "SERVER_IP=192.168.1.10\nMIHOMO_SECRET=s\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert cfg["dns"]["listen"] == "0.0.0.0:53"
+
+
+def test_dns_explicit_wildcard_warns(tmp_path):
+    proc, out_file = run_render(
+        tmp_path, "DNS_BIND=0.0.0.0\nMIHOMO_SECRET=s\n"
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "DNS_BIND" in proc.stderr
+    assert "0.0.0.0" in proc.stderr
+    cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert cfg["dns"]["listen"] == "0.0.0.0:53"
 
 
 def test_bind_addresses_overridden_by_env(tmp_path):
@@ -427,12 +450,27 @@ def test_allow_lan_garbage_is_off_and_warns(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "wan_ingress, expected",
-    [("yes", False), ("no", True), ("YES", False), ("", True), ("garbage", True)],
+    "env_text, expected",
+    [
+        ("", True),
+        ("WAN_INGRESS=yes\n", True),
+        ("MIHOMO_AUTO_REDIRECT=no\n", False),
+        ("MIHOMO_AUTO_REDIRECT=yes\n", True),
+    ],
 )
-def test_auto_redirect_disabled_for_wan_ingress(tmp_path, wan_ingress, expected):
-    cfg = load_ok(tmp_path, f"WAN_INGRESS={wan_ingress}\n")
+def test_auto_redirect_env(tmp_path, env_text, expected):
+    # WAN_INGRESS больше не выключает auto-redirect: redirect не трогает
+    # локальные адреса, а его отключение ломает локальный TCP и DNS.
+    cfg = load_ok(tmp_path, env_text)
     assert cfg["tun"]["auto-redirect"] is expected
+
+
+def test_auto_redirect_garbage_is_on_and_warns(tmp_path):
+    proc, out_file = run_render(tmp_path, "MIHOMO_AUTO_REDIRECT=maybe\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "MIHOMO_AUTO_REDIRECT" in proc.stderr
+    cfg = yaml.safe_load(out_file.read_text(encoding="utf-8"))
+    assert cfg["tun"]["auto-redirect"] is True
 
 
 def test_tun_mtu_default_and_custom(tmp_path):

@@ -374,11 +374,13 @@ DoH в браузерах (Chrome, Edge, Firefox) и **Private DNS** на Androi
   не добавляются, а установщик предупреждает.
 
 **Bind-адреса.** Порты в firewall — необходимое, но не достаточное условие:
-по умолчанию `PANEL_BIND`, `MIHOMO_BIND` и `DNS_BIND` равны `SERVER_IP`, и по
-`100.x.y.z` сервисы не отвечают. Для прямого доступа из tailnet задайте в
+`DNS_BIND` по умолчанию `0.0.0.0:53`, поэтому DNS по `100.x.y.z` уже отвечает
+(доступ ограничивает `ROUTEWEAVE-IN`), и менять его для tailnet не нужно. А
+`PANEL_BIND` и `MIHOMO_BIND` по умолчанию равны `SERVER_IP`, и по `100.x.y.z`
+панель и API не отвечают. Для прямого доступа из tailnet задайте в
 `/etc/routeweave/.env`:
 
-- `PANEL_BIND`, `MIHOMO_BIND`, `DNS_BIND` — tailscale-адрес шлюза (`100.x.y.z`,
+- `PANEL_BIND`, `MIHOMO_BIND` — tailscale-адрес шлюза (`100.x.y.z`,
   безопаснее) или `0.0.0.0` (осознанный opt-in: все интерфейсы, границей
   остаётся `ROUTEWEAVE-IN`);
 - `PANEL_ALLOWED_HOSTS` — tailscale-IP и/или MagicDNS-имя, иначе панель
@@ -545,11 +547,12 @@ console, выбран ли на клиенте, `--netfilter-mode=nodivert`, п�
   но тогда часть трафика пойдёт мимо правил.
 - IPv6 не поддерживается: проект IPv4-only. Используйте tailscale-адрес
   `100.x.y.z`; IPv6 в LAN и на клиентах лучше отключить.
-- `auto-redirect: true` в `/etc/routeweave/config.yaml` может перехватывать
-  входящий TCP раньше forwarding. Если exit node не работает, поставьте
-  `auto-redirect: false` и перезапустите mihomo — то же советует
-  `fw-wan.sh doctor`. Файл генерируется установщиком, ручная правка живёт до
-  следующего запуска `install.sh`.
+- `auto-redirect` mihomo включён штатно и exit node не ломает: nft-таблица
+  исключает из redirect локальные адреса (`inet4_local_address_set`).
+  Отключать его не нужно: без auto-redirect локальный TCP уходит в TUN и
+  зацикливается, а DNS на loopback перестаёт отвечать. Для отладки есть
+  `MIHOMO_AUTO_REDIRECT=no` в `.env`; `fw-wan.sh doctor` предупреждает именно
+  о выключенном auto-redirect.
 - fake-ip `198.18.0.0/16` может конфликтовать с другим прокси на клиенте,
   который использует тот же диапазон (например, второй mihomo/Clash).
   Оставьте один перехватчик или смените диапазон у второго.

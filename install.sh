@@ -963,6 +963,7 @@ MIHOMO_BIND=$(env_get MIHOMO_BIND "${MIHOMO_BIND:-}")
 DNS_BIND=$(env_get DNS_BIND "${DNS_BIND:-}")
 MIHOMO_TUN_MTU=$(env_get MIHOMO_TUN_MTU "${MIHOMO_TUN_MTU:-}")
 MIHOMO_ALLOW_LAN=$(env_get MIHOMO_ALLOW_LAN "${MIHOMO_ALLOW_LAN:-}")
+MIHOMO_AUTO_REDIRECT=$(env_get MIHOMO_AUTO_REDIRECT "${MIHOMO_AUTO_REDIRECT:-}")
 PANEL_RATE_LIMIT=$(env_get PANEL_RATE_LIMIT "${PANEL_RATE_LIMIT:-}")
 WAN_INGRESS=$(env_get WAN_INGRESS "${WAN_INGRESS:-}")
 # Различаем источник метки: если 0x40000 пришла из старого .env (в окружении
@@ -1189,7 +1190,7 @@ require_valid_optional WAN_PORTS "$WAN_PORTS" valid_wan_ports \
   "ожидается «порт/tcp|udp» через запятую, например 1443/tcp,51820/udp"
 
 # yes/no нормализуем к строчному виду (как QUIC_DROP выше).
-for __yn in MIHOMO_ALLOW_LAN WAN_INGRESS; do
+for __yn in MIHOMO_ALLOW_LAN WAN_INGRESS MIHOMO_AUTO_REDIRECT; do
   [ -n "${!__yn}" ] || continue
   __norm=$(normalize_yn "${!__yn}") \
     || die "$__yn: ожидается yes или no, получено «${!__yn}»"
@@ -1395,7 +1396,7 @@ write_optional_env_lines() {
     env_line MIHOMO_BIND "$MIHOMO_BIND"
   fi
   if [ -n "$DNS_BIND" ]; then
-    echo "# Адрес DNS-листенера mihomo"
+    echo "# Адрес DNS-листенера mihomo (по умолчанию 0.0.0.0:53: нужен LAN, wdtt0 и loopback для Tailscale MagicDNS; конкретный адрес ограничивает и может сломать loopback-резолв)"
     env_line DNS_BIND "$DNS_BIND"
   fi
   if [ -n "$MIHOMO_TUN_MTU" ]; then
@@ -1405,6 +1406,10 @@ write_optional_env_lines() {
   if [ -n "$MIHOMO_ALLOW_LAN" ]; then
     echo "# Разрешить DNS/API mihomo из LAN (yes/no)"
     env_line MIHOMO_ALLOW_LAN "$MIHOMO_ALLOW_LAN"
+  fi
+  if [ -n "$MIHOMO_AUTO_REDIRECT" ]; then
+    echo "# auto-redirect mihomo: yes по умолчанию; no только для отладки — ломает локальный TCP/DNS, WAN-доступу не нужен"
+    env_line MIHOMO_AUTO_REDIRECT "$MIHOMO_AUTO_REDIRECT"
   fi
   if [ -n "$PANEL_RATE_LIMIT" ]; then
     echo "# Лимит запросов панели в формате N/M (например 60/60)"
@@ -1521,8 +1526,8 @@ else
   done
   # Необязательные ключи: пишем только заданные, отсутствующие не трогаем.
   for key in PANEL_ALLOWED_HOSTS MIHOMO_BIND DNS_BIND MIHOMO_TUN_MTU \
-             MIHOMO_ALLOW_LAN PANEL_RATE_LIMIT WAN_INGRESS WAN_INGRESS_MARK \
-             WAN_INGRESS_RULE_PRIO WAN_PORTS; do
+             MIHOMO_ALLOW_LAN MIHOMO_AUTO_REDIRECT PANEL_RATE_LIMIT \
+             WAN_INGRESS WAN_INGRESS_MARK WAN_INGRESS_RULE_PRIO WAN_PORTS; do
     [ -n "${!key:-}" ] || continue
     env_upsert "$ETC/.env" "$key" "${!key:-}"
   done

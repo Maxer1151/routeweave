@@ -527,7 +527,7 @@ status() {
 }
 
 doctor() {
-  local fails=0 line prio min_2022="" route_out dev_if nft_out client=""
+  local fails=0 line prio min_2022="" route_out dev_if client=""
   local rules jumps_pre jumps_out chain_rules
 
   if [ "$WAN_INGRESS" != "yes" ]; then
@@ -644,31 +644,22 @@ doctor() {
     echo "WARN: не удалось проверить forwarded-путь: $route_out"
   fi
 
-  # 7. auto-redirect mihomo заворачивает входящий TCP в TUN ещё в PREROUTING
-  #    (nat/mangle), до нашей маркировки в mangle: тогда метка не спасёт.
-  if command -v nft >/dev/null 2>&1; then
-    if nft_out=$(nft list ruleset 2>/dev/null); then
-      if grep -i redirect <<< "$nft_out" >/dev/null; then
-        echo "WARN: в nft ruleset есть правила redirect — при auto-redirect mihomo входящий трафик может перехватываться до маркировки; проверьте auto-redirect в config.yaml"
-      else
-        echo "OK: правил redirect в nft ruleset не найдено"
-      fi
-    else
-      echo "WARN: nft list ruleset недоступен — проверка redirect пропущена"
-    fi
-  fi
-
-  # 8. Явный auto-redirect: true в конфиге — частая причина неработающего
-  #    WAN-доступа даже при корректной маркировке.
+  # 7. auto-redirect в config.yaml штатно включён: nft-таблица mihomo исключает
+  #    из redirect адреса из inet4_local_address_set, поэтому входящий
+  #    WAN-трафик к SERVER_IP не перехватывается. Выключение auto-redirect
+  #    ломает локальный TCP (петля в TUN) и DNS на loopback; WAN-доступу оно
+  #    не нужно.
   if [ -f "$ETC/config.yaml" ]; then
-    if grep -Eq '^[[:space:]]*auto-redirect:[[:space:]]*true([[:space:]]|$)' "$ETC/config.yaml"; then
-      echo "WARN: в $ETC/config.yaml включён auto-redirect: true — если WAN-доступ не работает, поставьте false и перезапустите mihomo"
+    if grep -Eq '^[[:space:]]*auto-redirect:[[:space:]]*false([[:space:]]|$)' "$ETC/config.yaml"; then
+      echo "WARN: в $ETC/config.yaml выключен auto-redirect — локальный TCP/DNS может сломаться (трафик уйдёт в TUN и зациклится); WAN-доступу это не нужно, включайте только для отладки"
     else
-      echo "OK: auto-redirect в $ETC/config.yaml не включён"
+      echo "OK: auto-redirect включён (штатно)"
     fi
+  else
+    echo "WARN: $ETC/config.yaml не найден — проверка auto-redirect пропущена"
   fi
 
-  # 9. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
+  # 8. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
   if chain_exists "$CHAIN"; then
     echo "--- counters $CHAIN ---"
     iptables -w 5 -t mangle -L "$CHAIN" -vn 2>/dev/null || true
