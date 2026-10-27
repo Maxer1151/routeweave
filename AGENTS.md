@@ -142,8 +142,10 @@ uninstall.sh templates/*.sh`, `ruff check panel templates tests`,
 `make lint` сам ищет `shellcheck` и `ruff` в PATH, затем в репозиторном
 `.venv/bin`; если инструмента нет нигде — падает с подсказкой. Пути
 переопределяются явно: `make lint SHELLCHECK=... RUFF=... PYTHON=...`. В CI
-ruff закреплён версией **0.17.2** — держите локально ту же, иначе новые правила
-дадут расхождение. Каталог `tools/` в Makefile не входит и
+закреплены обе версии: shellcheck (shellcheck-py **0.11.0.1** → ShellCheck
+0.11.0) и ruff **0.17.2** — держите локально те же, иначе замечания
+разойдутся (старые версии shellcheck строже к необязательным `$1`).
+Каталог `tools/` в Makefile не входит и
 проверяется в CI отдельно (`ruff check tools`, `compileall`).
 
 ## CI

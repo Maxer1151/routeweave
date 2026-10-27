@@ -21,9 +21,9 @@ jobs:
 
       - name: Установить shellcheck и ruff
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
-          python -m pip install ruff==0.17.2
+          python -m pip install shellcheck-py==0.11.0.1 ruff==0.17.2
+          shellcheck --version
+          ruff --version
 
       - name: make lint
         run: make lint SHELLCHECK=shellcheck RUFF=ruff
