@@ -310,6 +310,31 @@ def test_static_uninstall_invariants():
     assert "exit 1" in text
 
 
+def test_static_uninstall_removes_guard_and_dump_state():
+    """Сторож и снимки диагностики — наши файлы, их надо убрать."""
+    text = UNINSTALL.read_text(encoding="utf-8")
+
+    units = re.search(r"^UNITS=\(\n(.*?)^\)\n", text, re.MULTILINE | re.DOTALL)
+    assert units, "не найден массив UNITS"
+    unit_names = units.group(1).split()
+    assert "routeweave-guard.timer" in unit_names
+    assert "routeweave-guard.service" in unit_names
+    # Таймер останавливается раньше сервиса.
+    assert unit_names.index("routeweave-guard.timer") < unit_names.index(
+        "routeweave-guard.service"
+    )
+
+    helpers = re.search(r"^HELPERS=\(\n(.*?)^\)\n", text, re.MULTILINE | re.DOTALL)
+    assert helpers, "не найден массив HELPERS"
+    helper_paths = helpers.group(1).split()
+    assert "/usr/local/sbin/routeweave-guard.sh" in helper_paths
+    assert "/usr/local/sbin/routeweave-diag-dump.sh" in helper_paths
+
+    # Снимки: только состояние маршрутизации, секретов нет, каталог наш.
+    assert "do_rm_rf /var/log/routeweave" in text
+    assert "включая routeweave-tailscale-state.sh;" in text
+
+
 MESSAGE_PREFIXES = ("printf", "echo", "err", "warn", "info", "ok")
 
 

@@ -608,6 +608,10 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-panel.service
     templates/routeweave-lists-update.service
     templates/routeweave-lists-update.timer
+    templates/routeweave-guard.sh
+    templates/routeweave-guard.service
+    templates/routeweave-guard.timer
+    templates/routeweave-diag-dump.sh
     panel/app.py
     panel/requirements.txt
     panel/static/index.html
@@ -1056,12 +1060,15 @@ write_panel_sudoers() {
     || die "visudo не найден даже после установки пакета sudo — проверьте apt и повторите"
 
   tmp="$WORK_DIR/sudoers.routeweave-panel"
+  # routeweave-guard.sh в sudoers НЕ добавляется: сторож маршрутизации
+  # запускается только systemd (routeweave-guard.timer) от root и панели
+  # не нужен.
   cat > "$tmp" <<EOF
 # Routeweave: минимальные права веб-панели. Файл генерируется install.sh.
 # Пользователь routeweave может только перезапускать перечисленные юниты и
-# запускать четыре helper-скрипта; is-active проверяется без root.
+# запускать пять helper-скриптов; is-active проверяется без root.
 routeweave ALL=(root) NOPASSWD: $systemctl_bin restart mihomo, $systemctl_bin restart zapret-nfqws, $systemctl_bin restart routeweave-panel, $systemctl_bin start routeweave-lists-update.service
-routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh, /usr/local/sbin/routeweave-tailscale-state.sh
+routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh, /usr/local/sbin/routeweave-tailscale-state.sh, /usr/local/sbin/routeweave-diag-dump.sh
 EOF
   chmod 0640 "$tmp"
   "$visudo_bin" -cf "$tmp" >/dev/null \
@@ -1702,12 +1709,22 @@ install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"            /etc/system
 install -m 0644 "$APP_DIR/templates/routeweave-panel.service"        /etc/systemd/system/routeweave-panel.service
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.service" /etc/systemd/system/routeweave-lists-update.service
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/systemd/system/routeweave-lists-update.timer
+install -m 0644 "$APP_DIR/templates/routeweave-guard.service"        /etc/systemd/system/routeweave-guard.service
+install -m 0644 "$APP_DIR/templates/routeweave-guard.timer"          /etc/systemd/system/routeweave-guard.timer
 
 install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-restart.sh"      "$TGWS_RESTART"
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-state.sh"        "$TGWS_STATE"
 install -m 0755 "$APP_DIR/templates/routeweave-tailscale-state.sh"   "$TAILSCALE_STATE"
-ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh"
+install -m 0755 "$APP_DIR/templates/routeweave-guard.sh"             /usr/local/sbin/routeweave-guard.sh
+install -m 0755 "$APP_DIR/templates/routeweave-diag-dump.sh"         /usr/local/sbin/routeweave-diag-dump.sh
+ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh, guard.sh, diag-dump.sh"
+
+# Снимки диагностики: helper пишет их от root через sudo из панели, панель
+# читает как группа routeweave. Каталог создаётся здесь, потому что юнит
+# панели держит /var/log/routeweave в ReadWritePaths, а группа routeweave уже
+# существует (ensure_routeweave_user выше).
+install -d -m 0750 -o root -g routeweave /var/log/routeweave
 
 # ---------- 9. Панель (venv + статика zashboard) ----------
 info "Установка веб-панели..."
@@ -2013,9 +2030,11 @@ systemctl restart routeweave-firewall >/dev/null 2>&1 || true
 systemctl restart mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
 systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
+systemctl enable --now routeweave-guard.timer >/dev/null 2>&1 \
+  || warn "не удалось включить routeweave-guard.timer — проверьте: systemctl status routeweave-guard.timer"
 sleep 3
 
-for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lists-update.timer; do
+for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lists-update.timer routeweave-guard.timer; do
   st=$(systemctl is-active "$u" || true)
   if [ "$st" = "active" ]; then ok "$u: active"; else warn "$u: $st (journalctl -u $u -n 30)"; FAIL=1; fi
 done
@@ -2091,6 +2110,7 @@ else
 fi
 echo -e "Zashboard:     ${C_B}http://$SERVER_IP:9090/ui/${C_N}  (backend: http://$SERVER_IP:9090, секрет: $ETC/.env → MIHOMO_SECRET)"
 echo -e "Конфиг:        $ETC/.env (0640 root:routeweave)"
+echo -e "Сторож:        routeweave-guard.timer (раз в 60 с; journalctl -u routeweave-guard)"
 echo -e "Sudoers:       $SUDOERS_PANEL (панель работает от пользователя routeweave)"
 if [ "$INSTALL_TGWS" = "yes" ]; then
   echo -e "TG MTProto:    секрет — ${C_B}docker logs routeweave-tgwsproxy${C_N}"

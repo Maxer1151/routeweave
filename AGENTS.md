@@ -8,7 +8,7 @@
 |---|---|
 | `install.sh` | Установка и идемпотентный апдейт: пакеты, юниты, `.env`, firewall, опциональные компоненты. Запиненные версии mihomo/zashboard/WDTT и их sha256, коммит zapret. |
 | `uninstall.sh` | Удаление с `--purge`/`--dry-run`; удаляет только свои файлы (маркер владения `owned` и бэкапы). |
-| `templates/` | `mihomo.service`, `routeweave-panel.service`, `routeweave-firewall.service`, `zapret-nfqws.service`, `routeweave-lists-update.{service,timer}`; `fw-base.sh`, `fw-wan.sh`, `fw-nfq.sh`, `fw-tailscale.sh`, `nfqws-launch.sh`, `render_mihomo.py`, `routeweave-update-lists.sh`, `routeweave-tailscale-state.sh`, `routeweave-tgws-state.sh`, `routeweave-tgws-restart.sh`, `zapret.conf.tpl`. |
+| `templates/` | `mihomo.service`, `routeweave-panel.service`, `routeweave-firewall.service`, `zapret-nfqws.service`, `routeweave-lists-update.{service,timer}`, `routeweave-guard.{sh,service,timer}`, `routeweave-diag-dump.sh`; `fw-base.sh`, `fw-wan.sh`, `fw-nfq.sh`, `fw-tailscale.sh`, `nfqws-launch.sh`, `render_mihomo.py`, `routeweave-update-lists.sh`, `routeweave-tailscale-state.sh`, `routeweave-tgws-state.sh`, `routeweave-tgws-restart.sh`, `zapret.conf.tpl`. |
 | `panel/` | FastAPI-панель: `app.py`, `static/` (HTML/CSS/JS без inline), `requirements.txt` с точными пинами. Один воркер, состояние в памяти. |
 | `lists/` | Исходные custom-списки; `geo.txt`/`ru-direct.txt` — генерируемые, руками не правятся. |
 | `tests/` | pytest: статические проверки, юнит-тесты и netns-тесты firewall под root. |
@@ -85,6 +85,27 @@ Policy-routing (`ip rule`, приоритеты по возрастанию):
    Секреты не печатаются: `PANEL_PASS` выводится только когда stdout — TTY.
    IPv6 не фильтруется осознанно. Проверки: `tests/test_unit_hardening.py`,
    `tests/test_panel_unit.py`.
+9. **Сторож маршрутизации.** `routeweave-guard.sh` запускается только
+   `routeweave-guard.timer` от root (в sudoers его нет) и проверяет
+   `ip_forward`, таблицу `inet mihomo` с цепочками `prerouting`/`redirect`,
+   `default` в таблице 2022, правило NFQUEUE на `QNUM` в `mangle POSTROUTING`,
+   привязку очереди к `nfqws` и `ip rule` 8993 при `WAN_INGRESS=yes`. Чинит
+   только это, соблюдая кулдаун и предохранитель (не больше четырёх действий
+   в час), и НЕ трогает чужие nft-таблицы, conntrack и правила mihomo с
+   приоритетами 9000–9002. Состояние — `/run/routeweave/guard`.
+   После структурных проверок при активном `zapret-nfqws` сторож делает
+   функциональные пробы (ICMP до `1.1.1.1` и `curl` до обычного сайта и
+   домена из `dpi.txt`; адреса — в необязательном `/etc/routeweave/guard.env`)
+   и перезапускает `zapret-nfqws` при сломанном TCP-пути сразу, а при
+   сломанном десинке — со второй неудачи подряд. Если рестарт не восстановил
+   трафик, повторный рестарт того же вида откладывается на `GUARD_STUCK_TTL`
+   (6 часов, маркеры `probe-*.stuck`), чтобы не рвать очередь; успешная проба
+   снимает паузу. При `plain fail + ping fail`
+   сторож бездействует и не считает это проблемой: внешняя сеть вне его зоны
+   ответственности. Если структурные проверки не прошли, пробы пропускаются.
+   Снимок диагностики (`routeweave-diag-dump.sh`, `sudo -n` из панели) пишет
+   только в `/var/log/routeweave` и не содержит `.env`/`config.yaml`.
+   Проверки: `tests/test_guard.py`, `tests/test_diag_dump.py`.
 
 ## Тесты
 

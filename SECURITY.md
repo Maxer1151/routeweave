@@ -51,11 +51,28 @@ Routeweave — домашний шлюз, который по своей при�
 - Панель работает от системного пользователя `routeweave`, а не от root.
   Все привилегированные операции выполняются через `sudo -n` строго по
   allowlist из `/etc/sudoers.d/routeweave-panel`: перезапуск конкретных
-  юнитов и четыре helper-скрипта, без wildcard и без произвольных команд.
+  юнитов и пять helper-скриптов, без wildcard и без произвольных команд.
 - Helper `routeweave-tailscale-state.sh` только читает состояние Tailscale
   (`systemctl is-active`, `tailscale status --json`, счётчики sysfs) и
   возвращает агрегаты — статус, tailnet-адрес, флаги exit node, счётчики и
   число пиров — без ключей, имён устройств и списка пиров.
+- Helper `routeweave-diag-dump.sh` в allowlist только читает состояние
+  (`ip`, `nft`, `iptables`, `ss`, `sysctl`, `journalctl`) и пишет
+  исключительно в свой каталог `/var/log/routeweave` (файлы
+  `0640 root:routeweave`). Секреты — `/etc/routeweave/config.yaml` и `.env` —
+  в снимок не попадают, поэтому выдача helper'а через sudo не расширяет
+  права панели: он не выполняет произвольные команды и не пишет вне
+  каталога снимков.
+- Сторож `routeweave-guard.sh` в sudoers отсутствует: его запускает только
+  systemd (`routeweave-guard.timer`) от root. Он чинит исключительно
+  инварианты Routeweave — `ip_forward`, таблицу `inet mihomo`, `default` в
+  таблице `2022`, правило NFQUEUE и `ip rule` 8993 — и не трогает чужие
+  nft-таблицы, conntrack и правила mihomo с приоритетами 9000–9002.
+  Для проверки работоспособности сторож делает исходящие запросы
+  (`ping` до `1.1.1.1` и два `curl` до адресов из настроек). Адреса задаются
+  только root в необязательном `/etc/routeweave/guard.env`, значения
+  валидируются (только `https://`), поэтому подставить произвольную команду
+  через настройку нельзя; пробы выключаются `GUARD_PROBE=no`.
 - В юните панели осознанно стоит `NoNewPrivileges=no`: иначе setuid-`sudo`
   не сможет повысить привилегии и кнопки перезапуска перестанут работать.
   `CapabilityBoundingSet` при этом не пустой: в нём минимальный набор

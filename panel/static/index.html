@@ -148,6 +148,30 @@
       </div>
     </section>
 
+    <section class="section" aria-labelledby="h-diag">
+      <div class="section-head">
+        <h2 id="h-diag">Диагностика</h2>
+        <div class="section-tools">
+          <button type="button" class="btn btn--ghost" id="diag-last">
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-clock"/></svg>
+            <span>Показать последний</span>
+          </button>
+          <button type="button" class="btn btn--primary" id="diag-dump">
+            <span class="btn-icon" id="diag-dump-icon" aria-hidden="true"><svg class="icon"><use href="#i-save"/></svg></span>
+            <span id="diag-dump-label">Снять дамп состояния</span>
+          </button>
+        </div>
+      </div>
+      <p class="section-hint">Снимок содержит маршруты, правила firewall, счётчики и журнал за 10 минут. Файлы <code>.env</code> и <code>config.yaml</code> в него не попадают — секретов в снимке нет.</p>
+      <div class="diag-view" id="diag-view" hidden>
+        <div class="diag-head">
+          <code id="diag-path"></code>
+          <button type="button" class="btn btn--ghost btn--sm" id="diag-close">Скрыть</button>
+        </div>
+        <pre class="diag-text" id="diag-text" tabindex="0" aria-label="Содержимое снимка состояния"></pre>
+      </div>
+    </section>
+
     <section class="section" aria-labelledby="h-lists">
       <div class="section-head">
         <h2 id="h-lists">Списки доменов</h2>

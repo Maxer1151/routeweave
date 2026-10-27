@@ -103,6 +103,36 @@ def test_lists_update_hardening():
     assert directive(text, "LockPersonality") == "yes"
 
 
+def test_guard_hardening():
+    text = service("routeweave-guard.service")
+    # Сторож — oneshot без setuid: всё нужное даёт bounding set, поэтому
+    # NoNewPrivileges=yes (в отличие от юнита панели).
+    assert directive(text, "NoNewPrivileges") == "yes"
+    assert directive(text, "Type") == "oneshot"
+    assert directive(text, "ProtectSystem") == "strict"
+    assert directive(text, "ProtectHome") == "yes"
+    assert directive(text, "PrivateTmp") == "yes"
+    assert directive(text, "CapabilityBoundingSet") == "CAP_NET_ADMIN CAP_NET_RAW"
+    assert "AF_NETLINK" in directive(text, "RestrictAddressFamilies")
+    # /run/routeweave общий с zapret-nfqws: состояние сторожа и hostlist nfqws
+    # должны пережить остановку oneshot-юнита.
+    assert "/run/routeweave" in directive(text, "ReadWritePaths").split()
+    assert directive(text, "RuntimeDirectoryPreserve") == "yes"
+    assert (
+        directive(text, "ExecStart")
+        == "/usr/local/sbin/routeweave-guard.sh repair"
+    )
+
+    timer = service("routeweave-guard.timer")
+    assert directive(timer, "OnActiveSec") == "60"
+    assert directive(timer, "OnUnitActiveSec") == "60"
+    assert directive(timer, "AccuracySec") == "5s"
+    # Сторож смотрит только текущее состояние: пропущенный запуск ничего не
+    # значит, поэтому Persistent=no.
+    assert directive(timer, "Persistent") == "no"
+    assert directive(timer, "WantedBy") == "timers.target"
+
+
 def test_panel_unit_keeps_its_exceptions():
     text = service("routeweave-panel.service")
     # Панель слушает PANEL_BIND из .env, а не 0.0.0.0, и работает ровно в один
@@ -137,6 +167,8 @@ def is_foreign_unit_diagnostic(line, unit):
         "zapret-nfqws.service",
         "routeweave-firewall.service",
         "routeweave-lists-update.service",
+        "routeweave-guard.service",
+        "routeweave-guard.timer",
         "routeweave-panel.service",
     ],
 )

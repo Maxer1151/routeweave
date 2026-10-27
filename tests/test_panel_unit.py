@@ -65,6 +65,17 @@ def test_lists_directory_is_writable():
     assert "/etc/routeweave/lists" in paths
 
 
+def test_diagnostics_directory_is_writable():
+    """Снимок пишет root-helper через sudo в namespace панели.
+
+    Без /var/log/routeweave в ReadWritePaths ProtectSystem=strict не даст
+    записать снимок. Префикс "-" допустим: на старых установках каталога
+    может не быть, и юнит не должен из-за этого не стартовать.
+    """
+    paths = service_value("ReadWritePaths").split()
+    assert "/var/log/routeweave" in paths or "-/var/log/routeweave" in paths
+
+
 def test_exec_start_has_no_wildcard_host_and_single_worker():
     """0.0.0.0 в ExecStart — регресс: адрес задаёт PANEL_BIND.
 

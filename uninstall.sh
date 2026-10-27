@@ -33,6 +33,8 @@ IP_FORWARD_ORIG="$ETC/ip_forward.orig"
 # лежат рядом в /etc/systemd/system. mihomo/zapret обрабатываются отдельно:
 # они могли существовать до установки Routeweave.
 UNITS=(
+  routeweave-guard.timer
+  routeweave-guard.service
   routeweave-lists-update.timer
   routeweave-lists-update.service
   routeweave-firewall.service
@@ -45,6 +47,8 @@ HELPERS=(
   /usr/local/sbin/routeweave-tgws-state.sh
   /usr/local/sbin/routeweave-tailscale-state.sh
   /usr/local/sbin/routeweave-update-lists.sh
+  /usr/local/sbin/routeweave-guard.sh
+  /usr/local/sbin/routeweave-diag-dump.sh
 )
 
 C_R='\033[0;31m'; C_G='\033[0;32m'; C_Y='\033[1;33m'; C_B='\033[1;34m'; C_N='\033[0m'
@@ -898,6 +902,9 @@ do_rm_rf "$OPT_PANEL" || true
 remove_owned_path "$ZAPRET_DIR"
 remove_owned_path "$MIHOMO_BIN"
 do_rm_rf /run/routeweave || true
+# Снимки диагностики: каталог наш (его создаёт install.sh), секретов в них нет —
+# только состояние маршрутизации, правила и журнал.
+do_rm_rf /var/log/routeweave || true
 do_rm_rf "$ETC/.staging" || true
 do_rm_rf "$ETC/zashboard" || true
 do_rm "$ETC/zapret.commit" || true
@@ -933,15 +940,15 @@ fi
 echo
 echo "Удалено:"
 echo "  - systemd-юниты: routeweave-firewall, routeweave-panel,"
-echo "    routeweave-lists-update.service/.timer; mihomo/zapret-nfqws — только"
-echo "    если не были чужими; scoped-правила firewall сняты, включая"
-echo "    WAN-маркировку и ip rule 8993;"
+echo "    routeweave-lists-update.service/.timer, routeweave-guard.service/.timer;"
+echo "    mihomo/zapret-nfqws — только если не были чужими; scoped-правила"
+echo "    firewall сняты, включая WAN-маркировку и ip rule 8993;"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"
 echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin,"
 echo "    включая routeweave-tailscale-state.sh;"
 echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws,"
 echo "    /etc/routeweave/fw-tailscale.sh, .staging, zapret.commit, zashboard;"
-echo "  - /opt/routeweave-panel, /run/routeweave;"
+echo "  - /opt/routeweave-panel, /run/routeweave, /var/log/routeweave;"
 echo "  - /opt/zapret и /usr/local/bin/mihomo — только при маркере routeweave;"
 echo "  - пользователь и группа $SERVICE_USER (если не были заняты);"
 echo "  - scoped-правила ufw, добавленные установщиком."

@@ -417,6 +417,48 @@ def test_preflight_rejects_symlinks_and_checks_compose():
     assert "checkout доступен на запись другим пользователям" in text
 
 
+def test_install_wires_guard_and_diag():
+    """Сторож и снимок диагностики: preflight, установка, таймер, sudoers."""
+    text = INSTALL.read_text(encoding="utf-8")
+
+    start = text.find("preflight() {")
+    end = text.find('\npreflight "$APP_DIR"', start)
+    assert start != -1 and end > start, "не найден блок preflight"
+    preflight = text[start:end]
+    for template in (
+        "templates/routeweave-guard.sh",
+        "templates/routeweave-guard.service",
+        "templates/routeweave-guard.timer",
+        "templates/routeweave-diag-dump.sh",
+    ):
+        assert template in preflight, f"preflight не проверяет {template}"
+
+    # Helper'ы ставятся в /usr/local/sbin с правами 0755 — как update-lists.
+    for name in ("routeweave-guard.sh", "routeweave-diag-dump.sh"):
+        pattern = (
+            rf'^install -m 0755 "\$APP_DIR/templates/{re.escape(name)}"\s+'
+            rf"/usr/local/sbin/{re.escape(name)}$"
+        )
+        assert re.search(pattern, text, re.MULTILINE), name
+
+    # Таймер включается идемпотентно; сам oneshot-сервис в health-check не
+    # попадает (после запуска он inactive).
+    assert "systemctl enable --now routeweave-guard.timer" in text
+
+    # Каталог снимков: helper пишет от root, панель читает как группа.
+    assert (
+        "install -d -m 0750 -o root -g routeweave /var/log/routeweave" in text
+    )
+
+    # sudoers: helper снимка — без wildcard; сторож панели не нужен вовсе.
+    sudoers = [line for line in text.splitlines() if "NOPASSWD" in line]
+    diag = [line for line in sudoers if "routeweave-diag-dump.sh" in line]
+    assert len(diag) == 1, sudoers
+    assert "*" not in diag[0], diag[0]
+    for line in sudoers:
+        assert "routeweave-guard.sh" not in line, line
+
+
 def test_install_claims_ownership_before_overwrite():
     text = INSTALL.read_text(encoding="utf-8")
     for path in (

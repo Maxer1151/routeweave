@@ -12,6 +12,7 @@
   const SYNC_TIMEOUT_MS = 180000;
   const PROBE_TIMEOUT_MS = 120000;
   const APPLY_TIMEOUT_MS = 200000;
+  const DIAG_TIMEOUT_MS = 70000;
   const THEME_KEY = 'routeweave-theme';
   const MAX_TOASTS = 3;
   const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -22,7 +23,9 @@
     job: '/api/jobs/apply',
     list: (name) => '/api/lists/' + encodeURIComponent(name),
     apply: (name) => '/api/lists/' + encodeURIComponent(name) + '/apply',
-    restart: (name) => '/api/restart/' + encodeURIComponent(name)
+    restart: (name) => '/api/restart/' + encodeURIComponent(name),
+    diagDump: '/api/diagnostics/dump',
+    diagLast: '/api/diagnostics/dump/last'
   };
 
   const SERVICE_META = {
@@ -92,6 +95,7 @@
     probing: false,
     applying: false,
     saving: false,
+    diagBusy: false,
     authFailed: false,
     netFailed: false,
     offline: false,
@@ -130,6 +134,14 @@
     tgSecretHint: null,
     tsCard: null,
     tsList: null,
+    diagView: null,
+    diagPath: null,
+    diagText: null,
+    diagDumpBtn: null,
+    diagDumpLabel: null,
+    diagDumpIcon: null,
+    diagLastBtn: null,
+    diagCloseBtn: null,
     configList: null,
     gwIp: null,
     updatedAt: null,
@@ -904,6 +916,64 @@
       stopProbeTicker();
       renderProbes();
       renderHero();
+    }
+  }
+
+  /* ---------------- Диагностика ---------------- */
+
+  function showDiagnostic(text, path) {
+    refs.diagPath.textContent = path || 'путь неизвестен';
+    refs.diagText.textContent = text || '';
+    refs.diagView.hidden = false;
+    refs.diagText.scrollTop = 0;
+    say('Снимок состояния открыт');
+  }
+
+  function setDiagBusy(busy, label) {
+    state.diagBusy = busy;
+    refs.diagDumpBtn.disabled = busy;
+    refs.diagDumpBtn.classList.toggle('is-busy', busy);
+    setIcon(refs.diagDumpIcon ? refs.diagDumpIcon.querySelector('svg') : null, busy ? 'i-spinner' : 'i-save');
+    if (label) refs.diagDumpLabel.textContent = label;
+    refs.diagLastBtn.disabled = busy;
+  }
+
+  async function dumpDiagnostics() {
+    if (state.diagBusy) return;
+    setDiagBusy(true, 'Снимаем снимок…');
+
+    try {
+      const res = await api(API.diagDump, { method: 'POST', timeout: DIAG_TIMEOUT_MS });
+      const text = res && typeof res.text === 'string' ? res.text : '';
+      const path = res && typeof res.path === 'string' ? res.path : '';
+      showDiagnostic(text, path);
+      const size = res && typeof res.size === 'number' ? fmtBytes(res.size) : '';
+      toast('ok', 'Снимок состояния готов', size ? 'Размер: ' + size : 'Панель не сообщила размер.');
+    } catch (err) {
+      if (err.status !== 401) {
+        toast('bad', 'Не удалось снять снимок', err.message);
+      }
+    } finally {
+      setDiagBusy(false, 'Снять дамп состояния');
+    }
+  }
+
+  async function showLastDiagnostics() {
+    if (state.diagBusy) return;
+    refs.diagLastBtn.disabled = true;
+    try {
+      const res = await api(API.diagLast, { timeout: 20000 });
+      const text = res && typeof res.text === 'string' ? res.text : '';
+      const path = res && typeof res.path === 'string' ? res.path : '';
+      showDiagnostic(text, path);
+    } catch (err) {
+      if (err.status === 404) {
+        toast('warn', 'Снимков ещё нет', 'Сначала нажмите «Снять дамп состояния».');
+      } else if (err.status !== 401) {
+        toast('bad', 'Не удалось открыть последний снимок', err.message);
+      }
+    } finally {
+      refs.diagLastBtn.disabled = false;
     }
   }
 
@@ -1691,6 +1761,12 @@
     $('#auth-reload').addEventListener('click', () => { window.location.reload(); });
 
     refs.probeBtn.addEventListener('click', runProbes);
+    refs.diagDumpBtn.addEventListener('click', dumpDiagnostics);
+    refs.diagLastBtn.addEventListener('click', showLastDiagnostics);
+    refs.diagCloseBtn.addEventListener('click', () => {
+      refs.diagView.hidden = true;
+      refs.diagDumpBtn.focus();
+    });
     refs.saveBtn.addEventListener('click', () => { saveList(); });
     refs.applyBtn.addEventListener('click', applyList);
     refs.editor.addEventListener('input', onEditorInput);
@@ -1746,6 +1822,14 @@
     refs.tgSecretHint = $('#tg-secret-hint');
     refs.tsCard = $('#ts-card');
     refs.tsList = $('#ts-list');
+    refs.diagView = $('#diag-view');
+    refs.diagPath = $('#diag-path');
+    refs.diagText = $('#diag-text');
+    refs.diagDumpBtn = $('#diag-dump');
+    refs.diagDumpLabel = $('#diag-dump-label');
+    refs.diagDumpIcon = $('#diag-dump-icon');
+    refs.diagLastBtn = $('#diag-last');
+    refs.diagCloseBtn = $('#diag-close');
     refs.configList = $('#config-list');
     refs.gwIp = $('#gw-ip');
     refs.updatedAt = $('#updated-at');

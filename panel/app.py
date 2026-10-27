@@ -5,7 +5,8 @@
 Все root-операции выполняются только через ``sudo -n`` по allowlist из
 ``/etc/sudoers.d/routeweave-panel``: ``systemctl restart`` для mihomo,
 zapret-nfqws и самой панели, запуск routeweave-lists-update.service и
-helper-скрипты в ``/usr/local/sbin``. Прямых обращений к Docker-сокету и
+helper-скрипты в ``/usr/local/sbin`` (состояние tg-ws-proxy и Tailscale,
+диагностический снимок состояния). Прямых обращений к Docker-сокету и
 запусков systemctl/docker без sudo в коде нет.
 
 Каталог конфигурации задаётся переменной окружения ``ROUTEWEAVE_ETC``
@@ -44,6 +45,8 @@ ETC = Path(os.environ.get("ROUTEWEAVE_ETC", "/etc/routeweave"))
 ENV_FILE = ETC / ".env"
 LISTS_DIR = ETC / "lists"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+DIAG_DIR = Path(os.environ.get("ROUTEWEAVE_DIAG_DIR", "/var/log/routeweave"))
+DIAG_LAST = "last-dump.txt"
 
 LISTS = {
     "geo-custom": "geo-custom.txt",
@@ -55,11 +58,14 @@ UPDATER = "/usr/local/sbin/routeweave-update-lists.sh"
 TGWS_RESTART = "/usr/local/sbin/routeweave-tgws-restart.sh"
 TGWS_STATE = "/usr/local/sbin/routeweave-tgws-state.sh"
 TAILSCALE_STATE = "/usr/local/sbin/routeweave-tailscale-state.sh"
+DIAG_DUMP = "/usr/local/sbin/routeweave-diag-dump.sh"
 
 MIXED_PORT = 7890
 TGWS_PORT = 1443
 
 MAX_LIST_BYTES = 200_000
+MAX_DUMP_BYTES = 262_144
+DIAG_DUMP_NAME_RE = re.compile(r"dump-\d{8}-\d{6}\.txt")
 DOMAIN_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 DOMAIN_TLD_RE = re.compile(r"[a-z]{2,63}")
 DOMAIN_PREFIXES = ("+.", "*.")
@@ -111,6 +117,7 @@ STATUS_CACHE: dict = {"at": None, "payload": None}
 # ходит в сеть.
 STATUS_SEM = threading.BoundedSemaphore(2)
 PROBE_SEM = threading.BoundedSemaphore(1)
+DIAG_SEM = threading.BoundedSemaphore(1)
 
 # Простой rate limit по IP (X-Forwarded-For не доверяем: панель не стоит за
 # прокси, который бы его подчищал). Скользящее окно.
@@ -902,6 +909,130 @@ def api_probe():
         return {"ts": ts, "results": copy.deepcopy(results)}
     finally:
         PROBE_SEM.release()
+
+
+# ---------------- Диагностика ----------------
+
+def _validated_dump_path(raw: str) -> Path:
+    """Путь из stdout helper'а: только каталог снимков и имя dump-*.txt.
+
+    Любое отклонение — нейтральная 502: наружу не попадают ни отвергнутый
+    путь, ни цель симлинка.
+    """
+    candidate = Path((raw or "").strip())
+    if not candidate.is_absolute() or DIAG_DUMP_NAME_RE.fullmatch(candidate.name) is None:
+        raise HTTPException(502, "Снимок недоступен")
+    try:
+        if candidate.is_symlink():
+            raise HTTPException(502, "Снимок недоступен")
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(502, "Снимок недоступен") from exc
+    if not resolved.is_relative_to(DIAG_DIR.resolve()) or not resolved.is_file():
+        raise HTTPException(502, "Снимок недоступен")
+    return resolved
+
+
+def _read_dump_file(path: Path) -> tuple[str, int]:
+    """Читает снимок без симлинков; журнал может быть невалидным UTF-8."""
+    # lstat до open: FIFO и каталог отсекаются без блокирующего открытия,
+    # а O_NOFOLLOW ниже по-прежнему защищает от подмены на симлинк.
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Снимков ещё нет") from exc
+    except OSError as exc:
+        logger.warning("Не удалось проверить снимок %s: %s", path, exc)
+        raise HTTPException(400, "Снимок недоступен") from exc
+    if not stat.S_ISREG(before.st_mode):
+        raise HTTPException(400, "Снимок недоступен")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "Снимков ещё нет") from exc
+    except OSError as exc:
+        logger.warning("Не удалось открыть снимок %s: %s", path, exc)
+        raise HTTPException(400, "Снимок недоступен") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(400, "Снимок недоступен")
+        if info.st_size > MAX_DUMP_BYTES:
+            raise HTTPException(413, "Снимок больше 256 КБ")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_DUMP_BYTES:
+            chunk = os.read(fd, min(65536, MAX_DUMP_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > MAX_DUMP_BYTES:
+            raise HTTPException(413, "Снимок больше 256 КБ")
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    return data.decode("utf-8", errors="replace"), len(data)
+
+
+def _latest_dump_path(fallback: Path) -> Path:
+    """Самый свежий обычный dump-*.txt в каталоге; иначе — last-dump.txt."""
+    try:
+        candidates = [
+            item
+            for item in DIAG_DIR.iterdir()
+            if not item.is_symlink() and item.is_file() and DIAG_DUMP_NAME_RE.fullmatch(item.name)
+        ]
+    except OSError as exc:
+        logger.warning("Не удалось прочитать каталог снимков: %s", exc)
+        return fallback
+    newest = fallback
+    newest_mtime = -1.0
+    for item in candidates:
+        try:
+            mtime = item.stat().st_mtime
+        except OSError:
+            continue
+        if mtime >= newest_mtime:
+            newest = item
+            newest_mtime = mtime
+    return newest
+
+
+@app.post("/api/diagnostics/dump")
+def api_diagnostics_dump():
+    """Снимает снимок root-helper'ом и возвращает его текст.
+
+    CSRF проверяет middleware для всех мутирующих методов. Антифлуд — семафор:
+    два одновременных снимка не нужны и только нагружают шлюз.
+    """
+    if not DIAG_SEM.acquire(blocking=False):
+        raise HTTPException(429, "Снимок уже снимается")
+    try:
+        result = sudo_run([DIAG_DUMP], timeout=60)
+        if result.returncode != 0:
+            raise _sudo_error(result, "Не удалось снять снимок состояния")
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        # При обрезке helper печатает предупреждение в stdout перед путём:
+        # это диагностика, а не путь. Первая строка без префикса warn: — путь.
+        path_line = next((line for line in lines if not line.startswith("warn:")), "")
+        if not path_line:
+            raise HTTPException(502, "Снимок недоступен")
+        path = _validated_dump_path(path_line)
+        text, size = _read_dump_file(path)
+        return {"ok": True, "path": str(path), "size": size, "text": text}
+    finally:
+        DIAG_SEM.release()
+
+
+@app.get("/api/diagnostics/dump/last")
+def api_diagnostics_last():
+    """Последний снимок из last-dump.txt (чтение без следования симлинкам)."""
+    last = DIAG_DIR / DIAG_LAST
+    text, _size = _read_dump_file(last)
+    return {"ok": True, "path": str(_latest_dump_path(last)), "text": text}
 
 
 # ---------------- Списки ----------------

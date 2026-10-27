@@ -30,12 +30,18 @@
 #   ProtectHome, PrivateTmp, RestrictAddressFamilies и sudo-allowlist без
 #   wildcard) остаются в силе.
 #
-# Почему ProtectSystem=strict и ReadWritePaths только списки/run:
+# Почему ProtectSystem=strict и ReadWritePaths только три пути:
 #   панель не должна писать в /etc, /opt, /usr — это делает установщик от
 #   root. Единственное, что ей реально нужно на запись: каталог списков
-#   (/etc/routeweave/lists — правка/загрузка dpi.txt) и /run (рантайм-файлы,
-#   например /run/routeweave). ProtectSystem=strict делает всю остальную ФС
-#   read-only, ReadWritePaths открывает ровно эти два пути.
+#   (/etc/routeweave/lists — правка/загрузка dpi.txt), /run (рантайм-файлы,
+#   например /run/routeweave) и /var/log/routeweave (снимки диагностики).
+#   ProtectSystem=strict делает всю остальную ФС read-only, ReadWritePaths
+#   открывает ровно эти пути. Снимок пишет root-helper, запущенный панелью
+#   через `sudo -n`: он наследует mount-namespace этого юнита, поэтому без
+#   пути в списке запись в /var/log/routeweave невозможна. Читает снимки сама
+#   панель как группа routeweave (каталог 0750 root:routeweave, файлы 0640).
+#   Префикс "-" у /var/log/routeweave — для установок, где каталога ещё нет:
+#   иначе systemd не запустил бы юнит на старой системе.
 #
 # PANEL_PORT и PANEL_BIND берутся из EnvironmentFile: app.py читает их через
 # os.environ/.env и сам передаёт в uvicorn. ExecStart запускает app.py без
@@ -68,7 +74,7 @@ NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/etc/routeweave/lists /run
+ReadWritePaths=/etc/routeweave/lists /run -/var/log/routeweave
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT
 

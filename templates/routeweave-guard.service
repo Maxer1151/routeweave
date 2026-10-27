@@ -1,0 +1,53 @@
+[Unit]
+Description=Routeweave: сторож маршрутизации (nft mihomo, ip rule, NFQUEUE)
+# Сторож проверяет состояние, которое создают другие юниты, поэтому стартует
+# после них: до mihomo нет таблицы inet mihomo и таблицы 2022, до zapret-nfqws
+# нет привязки NFQUEUE, до firewall нет правила 8993. Проверять раньше — значит
+# чинить то, что ещё не успело появиться.
+After=network-online.target mihomo.service zapret-nfqws.service routeweave-firewall.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/routeweave-guard.sh repair
+# Необязательные настройки сторожа (GUARD_PROBE=no и адреса проб). Файл не
+# создаётся установщиком: без него действуют значения по умолчанию. Префикс
+# "-" — файла может не быть, и это норма, а не ошибка запуска.
+EnvironmentFile=-/etc/routeweave/guard.env
+# Штатный запуск укладывается в секунды, но при реальной поломке сторож ждёт
+# восстановления после действий, а пробы ходят в сеть с таймаутами. Дефолтные
+# 90 с для oneshot здесь мало: systemd убил бы сторож посреди ожидания.
+TimeoutStartSec=300
+Nice=10
+IOSchedulingClass=idle
+# NoNewPrivileges=yes: сторож не запускает setuid-программ и не повышает
+# привилегии — все нужные права даёт CapabilityBoundingSet. Заодно это
+# исключает sudo и любые обходы песочницы из починки.
+NoNewPrivileges=yes
+# ProtectSystem=strict: сторож только читает /etc/routeweave и /proc, а пишет
+# исключительно в /run (состояние сторожа, hostlist nfqws, лок-файлы). strict,
+# а не full, потому что незачем держать записываемыми /var, /srv и прочее:
+# все нужные пути перечислены в ReadWritePaths вручную, и новый путь на запись
+# не появится случайно.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RuntimeDirectory=routeweave
+RuntimeDirectoryMode=0755
+# RuntimeDirectoryPreserve=yes: юнит oneshot и после каждого запуска
+# останавливается, а /run/routeweave общий с zapret-nfqws (hostlist
+# dpi-zapret.txt). Без preserve systemd удалял бы каталог при остановке
+# сторожа и ломал бы работающий nfqws каждые 60 секунд.
+RuntimeDirectoryPreserve=yes
+# /run/routeweave — состояние сторожа и hostlist nfqws; /run/xtables.lock и
+# /run/routeweave-fw-wan.lock нужны iptables -w и flock в fw-wan.sh; префикс
+# "-" — чтобы отсутствие файла не ломало запуск юнита.
+ReadWritePaths=/run/routeweave -/run/xtables.lock -/run/routeweave-fw-wan.lock
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+# Ровно CAP_NET_ADMIN и CAP_NET_RAW: CAP_NET_ADMIN нужен ip/nft/iptables и
+# записи net.ipv4.ip_forward через sysctl, CAP_NET_RAW — сырым сокетам
+# iptables/nft при работе с ядром. CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN и
+# прочие права сторожу не нужны: он не слушает порты и не монтирует ФС.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+RestrictSUIDSGID=yes
+LockPersonality=yes
