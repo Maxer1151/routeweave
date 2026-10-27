@@ -2,25 +2,16 @@
 
 Домашний шлюз с раздельной маршрутизацией: mihomo + zapret + списки доменов + веб-панель.
 
-## Что это
+Routeweave — прозрачный шлюз на Ubuntu/Debian, который ставится на отдельную
+машину за домашним роутером. Клиенты получают его как шлюз и DNS, а mihomo
+разводит трафик по доменам: часть доменов проходит через DPI-десинк zapret,
+гео-блокировки уходят через внешний SOCKS/HTTP-прокси, российские сервисы и всё
+остальное идут напрямую. Необязательные компоненты — Telegram-прокси
+(tg-ws-proxy), WDTT-Plus для входа с телефона и Tailscale (exit node).
 
-Routeweave — прозрачный шлюз на Ubuntu/Debian, который ставится на отдельную машину за домашним роутером. Клиенты получают его как шлюз и DNS, а mihomo разводит трафик по доменам: часть доменов проходит через DPI-десинк zapret, гео-блокировки уходят через внешний SOCKS/HTTP-прокси, российские сервисы и всё остальное идут напрямую. Необязательные компоненты — Telegram-прокси (tg-ws-proxy), WDTT-Plus для входа с телефона и Tailscale (exit node).
-
-## Возможности
-
-- Маршрутизация по доменам: отдельные списки для geo (SOCKS), dpi (zapret) и RU-направления.
-- fake-ip DNS на порту 53 и правила mihomo на файловых rule-provider'ах.
-- Firewall: отдельные цепочки `ROUTEWEAVE-IN` (вход на шлюз) и
-  `ROUTEWEAVE-FWD` (forwarding для LAN, VPN и tailnet), опциональный drop QUIC
-  выше разрешающих правил.
-- Tailscale как третий вход: сервер работает как exit node, `tailscale0`
-  получает ту же политику, что LAN и WDTT.
-- Автообновление списков по systemd-таймеру.
-- Веб-панель: статусы сервисов, пробы путей, редактор списков, перезапуски.
-- zashboard для соединений и трафика.
-- Опциональные tg-ws-proxy, WDTT-Plus и Tailscale.
-
-## Архитектура
+Ставится одной командой на чистую Ubuntu/Debian: установщик сам скачивает
+mihomo и zapret, генерирует конфиг, поднимает firewall, systemd-юниты, таймер
+обновления списков и веб-панель. Настраивать mihomo вручную не нужно.
 
 ```text
                        ┌────────── Routeweave: шлюз (Ubuntu/Debian, 1 NIC) ───────────┐
@@ -32,26 +23,23 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
                        └──────────────────────────────────────────────────────────────┘
 ```
 
-## Состав
+Документация для тех, кто работает с кодом репозитория (архитектура,
+инварианты, тесты, стиль), — в [`AGENTS.md`](AGENTS.md).
 
-- **mihomo** — прозрачный шлюз: TUN, auto-route/auto-redirect, fake-ip DNS на `:53`,
-  правила на файловых rule-provider'ах, mixed-proxy `:7890`, external-controller
-  `:9090` (секрет в `.env`), zashboard на `/ui/`.
-- **zapret (nfqws)** — NFQUEUE на исходящих TCP 80/443, десинк только доменов
-  из `dpi.txt`.
-- **Списки доменов** — `/etc/routeweave/lists/`: geo, dpi, ru-direct и custom-файлы.
-- **Панель (FastAPI)** — статусы сервисов, пробы путей, редактор списков,
-  перезапуски; Basic-авторизация, один воркер, адрес прослушивания `PANEL_BIND`.
-- **Firewall** — `fw-base.sh` / `fw-wan.sh` / `fw-nfq.sh` / `fw-tailscale.sh`,
-  systemd-юниты, policy-routing для WDTT и Tailscale.
+## Возможности
 
-Опционально:
-
-- **tg-ws-proxy-rs** — Telegram MTProto-прокси в Docker, порт `1443`.
-- **WDTT-Plus** — сервер WDTT в systemd (`wdtt`), только amd64: DTLS
-  `56000/udp`, внутренний WireGuard `56001/udp`, интерфейс `wdtt0`.
-- **Tailscale** — опциональный exit node: ставится установщиком при
-  `INSTALL_TAILSCALE=yes` (или вручную), интерфейс `tailscale0`.
+- Маршрутизация по доменам: отдельные списки для geo (SOCKS), dpi (zapret) и
+  RU-направления.
+- fake-ip DNS на порту 53 и правила mihomo на файловых rule-provider'ах.
+- Firewall: отдельные цепочки `ROUTEWEAVE-IN` (вход на шлюз) и
+  `ROUTEWEAVE-FWD` (forwarding для LAN, VPN и tailnet), опциональный drop QUIC.
+- Tailscale как третий вход: сервер работает как exit node, `tailscale0`
+  получает ту же политику, что LAN и WDTT.
+- Автообновление списков по systemd-таймеру.
+- Веб-панель: статусы сервисов, пробы путей, редактор списков, перезапуски.
+- zashboard для соединений и трафика.
+- Опциональные tg-ws-proxy, WDTT-Plus и Tailscale.
+- Опциональный доступ к опубликованным портам из WAN (`WAN_INGRESS`).
 
 ## Требования
 
@@ -67,7 +55,7 @@ Routeweave — прозрачный шлюз на Ubuntu/Debian, который 
   Tailscale (нужен интернет). Авторизация — ключ (`TS_AUTHKEY_FILE` или
   `TS_AUTHKEY`) либо ручной `tailscale up` после установки.
 
-## Быстрый старт
+## Быстрая установка
 
 ```bash
 git clone https://github.com/Maxer1151/routeweave.git
@@ -91,19 +79,39 @@ sudo env INSTALL_TAILSCALE=yes bash install.sh  # + Tailscale exit node
 `systemctl restart`, но результат стоит проверить через `systemctl status`.
 Списки и `zapret.conf` сохраняются.
 
-Если на шлюзе активен ufw, установщик открывает доступ из LAN (только при
-приватном `LAN_CIDR`: правила `ufw route allow in on LAN_IFACE` и
-`ufw allow from LAN_CIDR`) и `WG_SUBNET` к `53/tcp+udp`, `7890/tcp`,
-`9090/tcp`, `PANEL_PORT/tcp` и `1443/tcp` (при
+Установка идемпотентна: повторный запуск не создаёт дублей правил firewall и не
+перезаписывает чужие ключи `.env`. Если на шлюзе активен ufw, установщик
+открывает доступ из LAN (только при приватном `LAN_CIDR`: правила
+`ufw route allow in on LAN_IFACE` и `ufw allow from LAN_CIDR`) и `WG_SUBNET` к
+`53/tcp+udp`, `7890/tcp`, `9090/tcp`, `PANEL_PORT/tcp` и `1443/tcp` (при
 `INSTALL_TGWS=yes`), а также разрешает forwarding для LAN-интерфейса и
 `wdtt0`. При публичном или пустом `LAN_CIDR` LAN-правила не добавляются —
 сервисы остаются доступны через tailscale/WDTT/SSH-туннель, установщик
 предупреждает. При `INSTALL_TAILSCALE=yes` или уже установленном Tailscale
 добавляются правила для `tailscale0`, `100.64.0.0/10` и `41641/udp`, а
-forwarding разрешён для tailnet. Правила добавляются идемпотентно, повторный
-запуск дублей не создаёт. Независимо от ufw вход на сам шлюз ограничивает
+forwarding разрешён для tailnet. Независимо от ufw вход на сам шлюз ограничивает
 цепочка `ROUTEWEAVE-IN` (прыжок в `INPUT 1`): политика `INPUT` не меняется,
 но панель, API mihomo, DNS и прокси открыты только из доверенных зон.
+
+## После установки
+
+1. **DHCP.** В роутере выдайте клиентам шлюз и DNS = `SERVER_IP`.
+   IPv6 в LAN отключите — иначе устройства уйдут мимо шлюза.
+2. **Панель.** Откройте `http://SERVER_IP:PANEL_PORT`, логин `PANEL_USER`,
+   пароль — `PANEL_PASS` из `/etc/routeweave/.env`.
+3. **Zashboard.** Откройте `http://SERVER_IP:9090/ui/`, укажите backend
+   `http://SERVER_IP:9090` и секрет `MIHOMO_SECRET` из `.env`.
+4. **Списки.** Проверьте `/etc/routeweave/lists/` и при необходимости
+   добавьте домены в `geo-custom.txt`, `dpi.txt` или `ru-direct-custom.txt`
+   (см. раздел «Панель»).
+5. **Стратегия zapret.** Запустите `sudo /opt/zapret/blockcheck.sh`, перенесите
+   рабочую стратегию в `/etc/routeweave/zapret.conf` и выполните
+   `sudo systemctl restart zapret-nfqws`.
+6. **Tailscale (если ставили).** Одобрите шлюз как exit node в admin console
+   (**Machines** → **Edit exit node** → **Use as exit node**) и настройте DNS
+   tailnet: **Use with exit node** и nameserver `100.x.y.z` (см. раздел
+   «Опционально: Tailscale»). DNS через fake-ip работает только при
+   `TS_EXIT_MODE=policy`; в режиме `nat` запросы уходят в WAN напрямую.
 
 ## Параметры `.env`
 
@@ -187,51 +195,6 @@ forwarding разрешён для tailnet. Правила добавляютс�
 отключает только проверку архивов и громко предупреждает; проверку коммита
 zapret он не отключает.
 
-## После установки
-
-1. **DHCP.** В роутере выдайте клиентам шлюз и DNS = `SERVER_IP`.
-   IPv6 в LAN отключите — иначе устройства уйдут мимо шлюза.
-2. **Панель.** Откройте `http://SERVER_IP:PANEL_PORT`, логин `PANEL_USER`,
-   пароль — `PANEL_PASS` из `/etc/routeweave/.env`.
-3. **Zashboard.** Откройте `http://SERVER_IP:9090/ui/`, укажите backend
-   `http://SERVER_IP:9090` и секрет `MIHOMO_SECRET` из `.env`.
-4. **Списки.** Проверьте `/etc/routeweave/lists/` и при необходимости
-   добавьте домены в `geo-custom.txt`, `dpi.txt` или `ru-direct-custom.txt`
-   (см. раздел «Панель»).
-5. **Стратегия zapret.** Запустите `sudo /opt/zapret/blockcheck.sh`, перенесите
-   рабочую стратегию в `/etc/routeweave/zapret.conf` и выполните
-   `sudo systemctl restart zapret-nfqws`.
-6. **Tailscale (если ставили).** Одобрите шлюз как exit node в admin console
-   (**Machines** → **Edit exit node** → **Use as exit node**) и настройте DNS
-   tailnet: **Use with exit node** и nameserver `100.x.y.z` (см. раздел
-   «Опционально: Tailscale»). DNS через fake-ip работает только при
-   `TS_EXIT_MODE=policy`; в режиме `nat` запросы уходят в WAN напрямую.
-
-## Автообновление списков
-
-Апдейтер: `/usr/local/sbin/routeweave-update-lists.sh`. Юниты:
-`routeweave-lists-update.service` и `routeweave-lists-update.timer`.
-Таймер: `OnCalendar=04:15`, `RandomizedDelaySec=300`, `Persistent=true`.
-
-Что делает апдейтер:
-
-- тянет Amnezia JSON (RU-домены) и `geoblock.lst` (гео-домены);
-- нормализует записи, подмешивает custom-списки;
-- исключает dpi-домены из geo;
-- пишет `geo.txt` и `ru-direct.txt`;
-- перезагружает mihomo через API (`PUT /providers/rules/...`);
-- при ошибке API перезапускает mihomo.
-
-Ручной прогон и лог:
-
-```bash
-sudo systemctl start routeweave-lists-update.service
-journalctl -u routeweave-lists-update -n 50
-```
-
-Важно: `geo.txt` и `ru-direct.txt` — генерируемые файлы. Правьте
-`geo-custom.txt`, `ru-direct-custom.txt` и `dpi.txt`.
-
 ## Панель
 
 Панель закрыта Basic-авторизацией (`PANEL_USER` / `PANEL_PASS`). Она слушает
@@ -294,6 +257,31 @@ mihomo» запускает апдейтер (для `dpi` — перезапу�
 sysfs), возвращает агрегаты без ключей и имён устройств и входит в
 sudo-allowlist панели без wildcard. Карточки нет, если Tailscale не установлен;
 одобрение exit node по-прежнему делается в admin console.
+
+## Автообновление списков
+
+Апдейтер: `/usr/local/sbin/routeweave-update-lists.sh`. Юниты:
+`routeweave-lists-update.service` и `routeweave-lists-update.timer`.
+Таймер: `OnCalendar=04:15`, `RandomizedDelaySec=300`, `Persistent=true`.
+
+Что делает апдейтер:
+
+- тянет Amnezia JSON (RU-домены) и `geoblock.lst` (гео-домены);
+- нормализует записи, подмешивает custom-списки;
+- исключает dpi-домены из geo;
+- пишет `geo.txt` и `ru-direct.txt`;
+- перезагружает mihomo через API (`PUT /providers/rules/...`);
+- при ошибке API перезапускает mihomo.
+
+Ручной прогон и лог:
+
+```bash
+sudo systemctl start routeweave-lists-update.service
+journalctl -u routeweave-lists-update -n 50
+```
+
+Важно: `geo.txt` и `ru-direct.txt` — генерируемые файлы. Правьте
+`geo-custom.txt`, `ru-direct-custom.txt` и `dpi.txt`.
 
 ## DPI и fwmark
 
@@ -584,61 +572,35 @@ reverse-proxy: открывайте только те порты, которые
 ## Безопасность
 
 - Панель рассчитана на доверенную LAN. Не выставляйте `8080`, `9090`, `1443`,
-  `7890` и `53` в интернет; при необходимости удалённого доступа — VPN (в том
-  числе tailnet) или reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
-- `.env` — данные, а не shell: значения в одинарных кавычках, `install.sh`,
-  апдейтер и панель разбирают файл построчно и не исполняют его. Права
-  `0640 root:routeweave`; при повторной установке создаётся бэкап
-  `.env.bak.YYYYmmdd-HHMMSS` с `0600 root:root`. Контейнер tg-ws-proxy
-  получает только переменные из своего `.env.tgws` и не видит секретов
-  панели и mihomo.
+  `7890` и `53` в интернет; для удалённого доступа — VPN (в том числе tailnet)
+  или reverse-proxy с TLS (Caddy/nginx) на отдельном хосте.
+- `/etc/routeweave/.env` — файл с секретами. Он создаётся с правами
+  `0640 root:routeweave`; при повторной установке рядом появляется бэкап
+  `.env.bak.YYYYmmdd-HHMMSS` с `0600 root:root`. Не публикуйте файл, логи и
+  дампы и не коммитьте их.
 - Панель работает от пользователя `routeweave`; root-доступ — только через
-  `sudo -n` по allowlist `/etc/sudoers.d/routeweave-panel`, без wildcard.
-- `NoNewPrivileges=no` в юните панели стоит осознанно: иначе setuid-`sudo`
-  не работает. `CapabilityBoundingSet` при этом **не пустой**: в нём
-  минимальный набор `CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE
-  CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT`,
-  без которого setuid-`sudo` не может повысить привилегии. Широких
-  capability (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`) нет;
-  остальные ограничения — `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
-  `RestrictAddressFamilies` и узкий sudo-allowlist.
-- Изменяющие запросы защищены fail-closed: нужен совпадающий
-  `Origin`/`Referer`, либо `Sec-Fetch-Site: same-origin|none`, либо
-  `X-Requested-With: Routeweave`. Неизвестный `Host` получает `421`, список
-  больше 200 КБ — `413`, превышение лимита запросов или Basic-auth — `429`.
-  CSP запрещает inline-скрипты и стили (`frame-ancestors 'none'`,
-  `object-src 'none'`), ответы получают `Permissions-Policy` и COOP/CORP.
-- Firewall держит правила в двух цепочках: `ROUTEWEAVE-IN` (прыжок в
-  `INPUT 1`) и `ROUTEWEAVE-FWD`. Вход разрешён только из доверенных зон, а
-  `QUIC_DROP` стоит выше `ACCEPT`; помеченный `WAN_INGRESS` трафик из
-  QUIC-drop исключён. Политика `INPUT` не меняется.
-- IPv6 осознанно не фильтруется: проект IPv4-only, `ip6tables` не трогается.
-  Это известное ограничение — IPv6 в LAN нужно отключать.
-- Tailnet — отдельная граница доверия: доступ к панели и API mihomo по
-  tailscale-адресу регулируется ACL/grants и сроком действия ключей. Это не
-  публикация в интернет.
-- CGNAT-спуфинг с `100.64.0.0/10` не с `tailscale0` дропается.
-- `41641/udp` открыт осознанно: только для прямых соединений Tailscale.
-- tg-ws-proxy запускается из образа, запиненного по digest, с `read_only`,
-  `cap_drop: ALL`, `no-new-privileges` и лимитами; порт публикуется на
-  `SERVER_IP`, а не на `0.0.0.0`. Правила Docker в `DOCKER-USER` Routeweave не
-  управляет: при публичном `SERVER_IP` или пробросе `1443` на роутере прокси
-  будет доступен извне.
-- Целостность: версии mihomo, zashboard и WDTT и их sha256 зашиты в git;
-  несовпадение останавливает установку. Архивы распаковываются в `mktemp` с
-  отказом от symlink/setuid и путей `..`, zapret собирается из закреплённого
-  коммита. `--allow-unverified` — только для отладки и не отключает проверку
-  коммита zapret.
-- Установщик печатает только сгенерированный `PANEL_PASS` — один раз в
-  итоговой сводке и только если stdout — терминал (TTY). При `| tee`,
-  редиректе в файл или CI пароль не печатается, вместо него ссылка на
-  `/etc/routeweave/.env` → `PANEL_PASS`; `MIHOMO_SECRET`, `TG_SECRET` и
-  `SOCKS_URL` в консоль не попадают, панель `.env` не отдаёт.
-- SOCKS-креды лежат в `.env`; не публикуйте файл, логи и дампы.
-- Не коммитьте `.env`, логи и дампы: в логах могут быть креды.
+  `sudo -n` по allowlist без wildcard.
+- Изменяющие запросы защищены fail-closed (CSRF), неизвестный `Host` получает
+  `421`, превышение лимита — `429`, список больше 200 КБ — `413`.
+- Вход на шлюз ограничивает цепочка `ROUTEWEAVE-IN`, а forwarding —
+  `ROUTEWEAVE-FWD`; политика `INPUT` не меняется, `QUIC_DROP` стоит выше
+  разрешающих правил.
+- LAN-доступ открывается только при приватном `LAN_CIDR`. Публичный или пустой
+  CIDR — LAN-правила не добавляются (сервисы остаются в tailnet/WDTT/через
+  SSH-туннель).
+- IPv6 не фильтруется: проект IPv4-only, `ip6tables` не трогается. IPv6 в LAN
+  нужно отключать в роутере.
+- Версии mihomo, zashboard, WDTT и их sha256 зашиты в git; zapret ставится из
+  закреплённого коммита, образ tgws — по digest. `--allow-unverified` — только
+  для отладки.
+- Установщик печатает `PANEL_PASS` только один раз и только в терминал (TTY);
+  `MIHOMO_SECRET`, `TG_SECRET` и `SOCKS_URL` не печатаются, панель `.env` не
+  отдаёт.
+- tg-ws-proxy запускается с `read_only`, `cap_drop: ALL`, `no-new-privileges` и
+  лимитами; правила Docker в `DOCKER-USER` Routeweave не управляет.
 
-Подробности модели угроз и порядок ответственного раскрытия — в
-[`SECURITY.md`](SECURITY.md).
+Полная модель угроз, инварианты и порядок ответственного раскрытия —
+[`SECURITY.md`](SECURITY.md). Правила для разработчиков — [`AGENTS.md`](AGENTS.md).
 
 ## Ограничения
 
@@ -656,6 +618,54 @@ reverse-proxy: открывайте только те порты, которые
 - zashboard отдаёт сам mihomo на `:9090/ui/` — это отдельный origin, не часть
   панели.
 - Двойной NAT (LAN → шлюз → роутер → провайдер) — нормально.
+
+## FAQ
+
+**Нужен ли отдельный роутер или машина?**
+Нужна отдельная машина (или VM) с Ubuntu 22.04+/Debian 12+ и одной NIC за
+домашним роутером: она становится шлюзом и DNS для клиентов. Сам роутер
+остаётся на месте, в нём настраивается DHCP с выдачей `SERVER_IP`.
+
+**Почему YouTube не работает?**
+Проверьте, что в `/etc/routeweave/zapret.conf` в `EXTRA` есть
+`--dpi-desync-fwmark=0x80000`. Без этой метки фейковые пакеты nfqws уходят в
+TUN mihomo и съедаются. Если метка на месте, подберите стратегию через
+`sudo /opt/zapret/blockcheck.sh` и перезапустите `zapret-nfqws`.
+
+**Почему панель не открывается из LAN?**
+Три частые причины: `LAN_CIDR` пуст или публичный (LAN-правила не
+добавляются — смотрите `fw-base.sh doctor`), `PANEL_BIND` указывает не на тот
+адрес (по умолчанию `SERVER_IP`), либо запрос не проходит проверки самой
+панели: `421` — неизвестный `Host` (добавьте его в `PANEL_ALLOWED_HOSTS`),
+`429` — сработал лимит, `403` — не пройдена CSRF-проверка.
+
+**Работает ли IPv6?**
+Нет. Firewall фильтрует только IPv4, `ip6tables` не трогается. IPv6 в LAN
+нужно отключать в роутере, иначе устройства уйдут мимо шлюза.
+
+**Что будет с секретами при удалении?**
+По умолчанию `uninstall.sh` сохраняет `/etc/routeweave` с `.env`: в
+интерактивном режиме спросит подтверждение, в неинтерактивном — напомнит о
+ротации секретов. `--purge` удаляет каталог целиком. Если секреты нужно
+сохранить — сделайте копию `.env` заранее.
+
+**Как обновить Routeweave?**
+`git pull`, затем `sudo bash install.sh`. Установщик обновит управляемые ключи
+`.env` (с бэкапом), перегенерирует `config.yaml`, обновит юниты и перезапустит
+ядро; списки и `zapret.conf` сохранятся.
+
+**Можно ли поставить на VPS?**
+Технически да, но шлюз рассчитан на LAN за роутером. На VPS `SERVER_IP` —
+публичный адрес, поэтому LAN-правила не добавляются: панель, DNS и прокси
+останутся доступны только через tailscale/WDTT/SSH-туннель. Для WAN-доступа к
+опубликованным портам есть `WAN_INGRESS`, но панель, API mihomo и прокси
+публиковать нельзя.
+
+**Чем отличается `TS_EXIT_MODE=nat` от `policy`?**
+`policy` (по умолчанию) проводит трафик tailnet через TUN mihomo: работают
+geo/SOCKS, DPI и fake-ip DNS. `nat` делает прямой MASQUERADE в WAN — быстрее и
+без userspace-стека, но без geo/SOCKS/DPI-политики, источник в LAN
+маскарадится, а DNS через fake-ip не применяется.
 
 ## Если что-то сломалось
 
@@ -726,35 +736,21 @@ mihomo/zashboard при необходимости, юниты и конфиги
 сохраняется. Пакет Tailscale и состояние `/var/lib/tailscale` не удаляются;
 пакет при необходимости удаляется вручную.
 
-## Разработка
+## Для разработчиков
 
-Зависимости для тестов ставьте в venv:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r panel/requirements.txt pytest pyyaml
-```
-
-Основные команды:
+Документация для контрибьюторов — [`AGENTS.md`](AGENTS.md): карта
+репозитория, устройство шлюза, инварианты безопасности, тесты, CI и стиль.
+Модель угроз — [`SECURITY.md`](SECURITY.md).
 
 ```bash
 make lint    # bash -n, shellcheck, ruff, compileall
 make test    # pytest tests -v
-make all     # lint + test (цель по умолчанию)
-make help    # список целей
-
-python -m pytest tests -q   # обычный прогон; netns-тесты без root пропускаются
+make all     # lint + test
 ```
 
-`make lint` требует `shellcheck` и `ruff` в PATH; пути можно задать
-переменными (`make lint SHELLCHECK=... RUFF=...`). Привилегированные
-netns-тесты помечены `privileged` и без root корректно пропускаются. Отдельный
-CI job запускает все тесты с маркером `privileged` (netns-модули:
-`test_firewall.py`, `test_wan_ingress.py`, `test_tailscale_nat.py`,
-`test_tailscale_exit.py`, `test_input_policy.py`, `test_fw_nfq.py`) под root и
-падает, если в логе есть хоть один `SKIPPED`. Другие job'ы прогоняют
-`docker compose config` и pytest с порогом покрытия `panel/`.
+Зависимости ставьте в venv: `pip install -r panel/requirements.txt pytest
+pyyaml`. Привилегированные netns-тесты помечены `privileged` и без root
+корректно пропускаются; полный прогон с ними требует root (см. `AGENTS.md`).
 
 ## Лицензия
 
