@@ -5,8 +5,9 @@ routeweave. Тесты проверяют, что подмена файлов с
 писать по ссылке (ни через основной сценарий, ни через put()), а .env
 разбирается без выполнения команд из значений.
 
-Сеть не используется: сценарии с симлинками завершаются до загрузки, а
-put()/env_get() проверяются через ROUTEWEAVE_LIB_ONLY=1.
+Сеть не используется: сценарии с симлинками завершаются до загрузки,
+put()/env_get() проверяются через ROUTEWEAVE_LIB_ONLY=1, а полный прогон
+идёт с заглушками curl/jq из PATH.
 """
 
 import stat
@@ -39,11 +40,12 @@ def run_script(etc: Path, **extra_env) -> subprocess.CompletedProcess:
     )
 
 
-def run_lib(etc: Path, code: str) -> subprocess.CompletedProcess:
+def run_lib(etc: Path, code: str, **extra_env) -> subprocess.CompletedProcess:
     """Source-нуть функции скрипта и выполнить code в том же bash."""
     env = dict(BASE_ENV)
     env["ROUTEWEAVE_ETC"] = str(etc)
     env["ROUTEWEAVE_LIB_ONLY"] = "1"
+    env.update(extra_env)
     return subprocess.run(
         ["bash", "-c", f'source "{SCRIPT}"\n{code}\n'],
         check=False,
@@ -350,8 +352,13 @@ cat >/dev/null
 case "$url" in
   http://10.0.0.5:9090/providers/rules*) printf '204' ;;
   *providers/rules*) exit 22 ;;
-  *amnezia*) cat "$FIXTURES/amnezia.json" > "$out" ;;
-  *geoblock*) cat "$FIXTURES/geoblock.lst" > "$out" ;;
+  *amnezia*)
+    [ "${FAIL_RU:-0}" = 1 ] && exit 22
+    cat "$FIXTURES/amnezia.json" > "$out" ;;
+  *geoblock*)
+    [ "${FAIL_GEO:-0}" = 1 ] && exit 22
+    cat "$FIXTURES/geoblock.lst" > "$out" ;;
+  *empty*) : > "$out" ;;
   *) exit 22 ;;
 esac
 """
@@ -365,6 +372,41 @@ if [ "$1" = "-r" ]; then
 fi
 exit 2
 """
+
+
+def install_tools(tmp_path: Path) -> Path:
+    """curl/jq/systemctl-заглушки в отдельном каталоге для PATH."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, text in (
+        ("curl", FAKE_CURL),
+        ("jq", FAKE_JQ),
+        ("systemctl", "#!/bin/sh\nexit 0\n"),
+    ):
+        path = bin_dir / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+    return bin_dir
+
+
+def make_fixtures(tmp_path: Path, ru_hosts, geo_hosts) -> Path:
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    fixtures.joinpath("amnezia.json").write_text(
+        "[\n"
+        + ",\n".join(f'{{"hostname": "{h}"}}' for h in ru_hosts)
+        + "\n]\n",
+        encoding="utf-8",
+    )
+    fixtures.joinpath("geoblock.lst").write_text(
+        "\n".join(geo_hosts) + "\n", encoding="utf-8"
+    )
+    return fixtures
+
+
+def expected_list(hosts) -> str:
+    """Что norm() + префикс '+.' дают из подготовленных хостов."""
+    return "".join(f"+.{h}\n" for h in sorted(set(hosts)))
 
 
 def test_full_run_with_fake_network(tmp_path):
@@ -426,3 +468,147 @@ def test_no_secret_in_argv():
     assert '"--proxy"' not in text
     assert "--proxy \"$P\"" not in text
     assert '-H "Authorization' not in text
+
+
+# --- Отказы сети не должны выглядеть как «Изменений нет» -------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.invalid/x",  # curl exit 22, файла нет
+        "https://example.invalid/empty",  # curl exit 0, файл пустой
+    ],
+)
+def test_fetch_returns_error_on_failed_or_empty_download(tmp_path, url):
+    """Регрессия: при пустом SOCKS_URL fetch() раньше возвращал 0."""
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    bin_dir = install_tools(tmp_path)
+    out = tmp_path / "out.txt"
+
+    proc = run_lib(
+        etc,
+        f'set +e\nfetch "{url}" "{out}"\necho "rc=$?"\n',
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "rc=1" in proc.stdout, proc.stdout
+    assert not out.exists() or out.read_text(encoding="utf-8") == ""
+
+
+def test_run_fails_when_both_sources_unreachable(tmp_path):
+    """Полный отказ сети — ненулевой код, без «Изменений нет» и без reload."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    fixtures = make_fixtures(
+        tmp_path,
+        ru_hosts=[f"h{i}.ru{i % 5}.example" for i in range(1200)],
+        geo_hosts=[f"g{i}.blocked{i % 7}.example" for i in range(80)],
+    )
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+        FAIL_RU="1",
+        FAIL_GEO="1",
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    assert "ОШИБКА" in proc.stdout, proc.stdout
+    assert "Изменений нет" not in proc.stdout, proc.stdout
+    assert "ОШИБКА: ru-direct: fetch/json" in proc.stdout
+    assert "ОШИБКА: geo: fetch" in proc.stdout
+    assert "reload geo-domains" not in proc.stdout
+    assert not (lists / "ru-direct.txt").exists()
+    assert not (lists / "geo.txt").exists()
+
+
+def test_run_fails_but_reloads_successful_source(tmp_path):
+    """ru-direct отказал, geo обновился: файл записан, reload есть, код 1."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    geo_hosts = [f"g{i}.blocked{i % 7}.example" for i in range(80)]
+    fixtures = make_fixtures(
+        tmp_path,
+        ru_hosts=[f"h{i}.ru{i % 5}.example" for i in range(1200)],
+        geo_hosts=geo_hosts,
+    )
+    (etc / ".env").write_text(
+        "MIHOMO_API='http://10.0.0.5:9090/'\n", encoding="utf-8"
+    )
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+        FAIL_RU="1",
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    assert "ОШИБКА: ru-direct: fetch/json" in proc.stdout
+    assert "ОШИБКА: источники с ошибкой: ru-direct" in proc.stdout
+    # Успешно обновлённый geo всё равно попал в файл и в mihomo.
+    assert (lists / "geo.txt").read_text(encoding="utf-8") == expected_list(
+        geo_hosts
+    )
+    assert "reload geo-domains -> 204" in proc.stdout
+    assert not (lists / "ru-direct.txt").exists()
+
+
+def test_run_reports_no_changes_when_both_same(tmp_path):
+    """Оба источника SAME, ошибок нет: код 0 и «Изменений нет» без reload."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    ru_hosts = [f"h{i}.ru{i % 5}.example" for i in range(1200)]
+    geo_hosts = [f"g{i}.blocked{i % 7}.example" for i in range(80)]
+    fixtures = make_fixtures(tmp_path, ru_hosts=ru_hosts, geo_hosts=geo_hosts)
+    (lists / "dpi.txt").write_text("", encoding="utf-8")
+    (lists / "ru-direct.txt").write_text(expected_list(ru_hosts), encoding="utf-8")
+    (lists / "geo.txt").write_text(expected_list(geo_hosts), encoding="utf-8")
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "Изменений нет" in proc.stdout
+    assert "SAME ru-direct" in proc.stdout
+    assert "SAME geo" in proc.stdout
+    assert "reload geo-domains" not in proc.stdout
+    assert (lists / "ru-direct.txt").read_text(encoding="utf-8") == expected_list(
+        ru_hosts
+    )
+
+
+def test_run_fails_when_ru_below_min_count(tmp_path):
+    """Мало хостов в ru-direct — отказ, но geo успевает обновиться."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    geo_hosts = [f"g{i}.blocked{i % 7}.example" for i in range(80)]
+    fixtures = make_fixtures(
+        tmp_path,
+        ru_hosts=["a.example", "b.example", "c.example"],
+        geo_hosts=geo_hosts,
+    )
+    (etc / ".env").write_text(
+        "MIHOMO_API='http://10.0.0.5:9090/'\n", encoding="utf-8"
+    )
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    assert "ОШИБКА: ru-direct: 3 < 1000" in proc.stdout
+    assert "Изменений нет" not in proc.stdout
+    assert (lists / "geo.txt").read_text(encoding="utf-8") == expected_list(
+        geo_hosts
+    )
+    assert not (lists / "ru-direct.txt").exists()

@@ -73,6 +73,9 @@ curl_cfg(){ # curl_cfg <proxy> <bearer>: конфиг для curl -K - (без �
 }
 
 fetch(){ # fetch <url> <out>: прямое соединение, при наличии прокси — через него
+  # 0 только при успешном curl и непустом файле. Иначе 1: вызывающий код
+  # обязан отличать отказ сети от «изменений нет», иначе неудачное обновление
+  # выглядит как зелёный прогон.
   local url=$1 out=$2 cfg
   cfg=$(curl_cfg "$P" "")
   if timeout 100 curl -fsSL --connect-timeout 10 --max-time 90 -K - "$url" -o "$out" \
@@ -81,9 +84,12 @@ fetch(){ # fetch <url> <out>: прямое соединение, при нали
   fi
   if [ -n "$P" ]; then
     cfg=$(curl_cfg "$P" "")
-    timeout 100 curl -fsSL --connect-timeout 15 --max-time 120 -K - "$url" -o "$out" \
-      <<<"$cfg" && [ -s "$out" ]
+    if timeout 100 curl -fsSL --connect-timeout 15 --max-time 120 -K - "$url" -o "$out" \
+        <<<"$cfg" && [ -s "$out" ]; then
+      return 0
+    fi
   fi
+  return 1
 }
 
 norm(){ tr -d '\r' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//;s/^\*\.//;s/^\+\.//;s/^\.//' | grep -E '^[A-Za-z0-9_.-]+\.[A-Za-z]{2,}$' | LC_ALL=C sort -u || true; }
@@ -169,6 +175,22 @@ mihomo_api(){ # базовый адрес API mihomo из .env без завер
   printf '%s' "${api%/}"
 }
 
+reload_rules(){ # PUT провайдеров; ошибка reload -> restart mihomo, но не отказ main
+  local api p cfg code rc=0
+  api=$(mihomo_api)
+  for p in geo-domains ru-domains; do
+    cfg=$(curl_cfg "" "$S")
+    code=$(printf '%s' "$cfg" | timeout 100 curl -s -o /dev/null -w '%{http_code}' -X PUT -K - "$api/providers/rules/$p" || true)
+    log "reload $p -> ${code:-ERR}"
+    [ "$code" = 204 ] || [ "$code" = 200 ] || rc=1
+  done
+  if [ "$rc" != 0 ]; then
+    log "API reload failed -> restart mihomo"
+    timeout 20 systemctl restart mihomo || true
+  fi
+  return 0
+}
+
 main(){
   umask 077
   ensure_staging || { log "ОШИБКА: не удалось создать $STAGING"; exit 1; }
@@ -180,7 +202,7 @@ main(){
     refuse_symlink "$L/$f"
   done
 
-  local socks MIHOMO_API
+  local socks
   socks=$(env_get SOCKS_URL)
   # Раньше секрет приезжал как ${MIHOMO_SECRET:-} после source .env; теперь
   # значение даёт env_get: кавычки разворачиваются, команды не выполняются,
@@ -198,17 +220,20 @@ main(){
 
   T=$(mktemp -d)
   trap 'rm -rf -- "$T"' EXIT
-  local R=0 G=0 n rc=0 p code cfg st=0
+  # R/G: 1 — источник обновлён. rfail/gfail: 1 — источник отказал и итог не
+  # может считаться успешным, даже если второй источник обновился.
+  local R=0 G=0 n st=0 rfail=0 gfail=0
   if fetch https://raw.githubusercontent.com/lib4u/amnezia-tunneling-ru/main/amnezia.json "$T/a.json" && jq -e . "$T/a.json" >/dev/null 2>&1; then
     jq -r '.[].hostname // empty' "$T/a.json" | norm > "$T/ru"; n=$(wc -l <"$T/ru")
     if [ "$n" -ge 1000 ]; then norm <"$L/ru-direct-custom.txt" > "$T/ruc" || true
       cat "$T/ru" "$T/ruc" | LC_ALL=C sort -u | sed 's/^/+./' > "$T/ruf"
+      st=0
       put "$T/ruf" "$L/ru-direct.txt" ru-direct || st=$?
       if [ "$st" = 0 ]; then R=1; elif [ "$st" != 1 ]; then
-        log "ОШИБКА: запись ru-direct.txt"; exit 1
+        log "ОШИБКА: запись ru-direct.txt"; rfail=1
       fi
-    else log "SKIP ru-direct: $n < 1000"; fi
-  else log "SKIP ru-direct: fetch/json"; fi
+    else log "ОШИБКА: ru-direct: $n < 1000"; rfail=1; fi
+  else log "ОШИБКА: ru-direct: fetch/json"; rfail=1; fi
   if fetch https://raw.githubusercontent.com/Internet-Helper/Unblock-for-Russia/main/geoblock.lst "$T/g.lst"; then
     norm <"$T/g.lst" > "$T/g"; n=$(wc -l <"$T/g")
     if [ "$n" -ge 50 ]; then norm <"$L/dpi.txt" > "$T/dpi" || true; norm <"$L/geo-custom.txt" > "$T/gc" || true
@@ -216,22 +241,22 @@ main(){
       st=0
       put "$T/gf" "$L/geo.txt" geo || st=$?
       if [ "$st" = 0 ]; then G=1; elif [ "$st" != 1 ]; then
-        log "ОШИБКА: запись geo.txt"; exit 1
+        log "ОШИБКА: запись geo.txt"; gfail=1
       fi
-    else log "SKIP geo: $n < 50"; fi
-  else log "SKIP geo: fetch"; fi
-  if [ "$R$G" = "00" ]; then log "Изменений нет"; exit 0; fi
-  MIHOMO_API=$(mihomo_api)
-  for p in geo-domains ru-domains; do
-    cfg=$(curl_cfg "" "$S")
-    code=$(printf '%s' "$cfg" | timeout 100 curl -s -o /dev/null -w '%{http_code}' -X PUT -K - "$MIHOMO_API/providers/rules/$p" || true)
-    log "reload $p -> ${code:-ERR}"
-    [ "$code" = 204 ] || [ "$code" = 200 ] || rc=1
-  done
-  if [ "$rc" != 0 ]; then
-    log "API reload failed -> restart mihomo"
-    timeout 20 systemctl restart mihomo || true
+    else log "ОШИБКА: geo: $n < 50"; gfail=1; fi
+  else log "ОШИБКА: geo: fetch"; gfail=1; fi
+  if [ "$rfail" = 1 ] || [ "$gfail" = 1 ]; then
+    # Частичный успех: то, что уже записано, должно попасть в mihomo, но код
+    # возврата остаётся ненулевым — обновление неполное.
+    if [ "$R" = 1 ] || [ "$G" = 1 ]; then reload_rules; fi
+    local failed="" sep=""
+    if [ "$rfail" = 1 ]; then failed="ru-direct"; sep=", "; fi
+    if [ "$gfail" = 1 ]; then failed="${failed}${sep}geo"; fi
+    log "ОШИБКА: источники с ошибкой: $failed"
+    exit 1
   fi
+  if [ "$R$G" = "00" ]; then log "Изменений нет"; exit 0; fi
+  reload_rules
   log "Готово"
 }
 
