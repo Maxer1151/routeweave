@@ -64,6 +64,34 @@ if [[ ! "$QNUM" =~ ^[0-9]+$ ]]; then
   QNUM=200
 fi
 
+# Метка, которой nfqws помечает поддельные пакеты. Резолвится так же, как в
+# fw-nfq.sh: NFQWS_MARK из конфига, затем значение из EXTRA (старые установки),
+# затем 0x80000. Правило без этого исключения возвращает фейки в очередь.
+DEFAULT_NFQWS_MARK=0x80000
+resolve_nfqws_mark() {
+  local mark="${NFQWS_MARK:-}" src="NFQWS_MARK"
+  if [ -z "$mark" ]; then
+    if [[ "${EXTRA:-}" =~ --dpi-desync-fwmark=([^[:space:]]+) ]]; then
+      mark="${BASH_REMATCH[1]}"
+      src="EXTRA"
+    elif [[ "${EXTRA:-}" =~ --dpi-desync-fwmark[[:space:]]+([^[:space:]]+) ]]; then
+      mark="${BASH_REMATCH[1]}"
+      src="EXTRA"
+    fi
+  fi
+  if [ -z "$mark" ]; then
+    NFQWS_MARK="$DEFAULT_NFQWS_MARK"
+    return 0
+  fi
+  if [[ "$mark" =~ ^0[xX][0-9a-fA-F]+$ || "$mark" =~ ^[0-9]+$ ]]; then
+    NFQWS_MARK="$mark"
+  else
+    warn "$src='$mark' не похож на число, беру $DEFAULT_NFQWS_MARK"
+    NFQWS_MARK="$DEFAULT_NFQWS_MARK"
+  fi
+}
+resolve_nfqws_mark
+
 # Числовые настройки: мусор в окружении не должен ломать арифметику ниже.
 [[ "$COOLDOWN" =~ ^[0-9]+$ ]] || {
   warn "GUARD_COOLDOWN='$COOLDOWN' не число, беру 600"
@@ -381,13 +409,36 @@ route2022_problem() {
   return 0
 }
 
-# nfq_rule_present <текст правил> — есть ли NFQUEUE именно на нашу очередь.
+# nfq_rule_for_queue <текст правил> — есть ли NFQUEUE именно на нашу очередь.
 # Учитываем обе формы: "--queue-num 200" и "--queue-num=200".
-nfq_rule_present() {
+nfq_rule_for_queue() {
   local text="$1" re
   grep -qF 'NFQUEUE' <<< "$text" || return 1
   re="--queue-num[= ]+${QNUM}([^0-9]|$)"
   grep -qE -e "$re" <<< "$text"
+}
+
+# nfq_rule_has_mark <текст правил> — исключает ли правило поддельные пакеты
+# nfqws по метке. iptables -S печатает "--mark 0x80000/0x80000"; принимаем и
+# форму с `=`, и верхний регистр X (конфиг мог задать 0X80000).
+nfq_rule_has_mark() {
+  local text="$1" re
+  re="--mark[= ]+${NFQWS_MARK}/${NFQWS_MARK}([^0-9a-fA-F]|$)"
+  grep -qiE -e "$re" <<< "$text"
+}
+
+# nfq_rule_present <текст правил> — правило NFQUEUE на нашу очередь есть, и
+# каждое такое правило содержит исключение метки zapret. Legacy-правило без
+# метки, оставшееся рядом с новым, тоже считается поломкой: оно продолжает
+# возвращать фейки в очередь.
+nfq_rule_present() {
+  local text="$1" line found=0
+  while IFS= read -r line; do
+    nfq_rule_for_queue "$line" || continue
+    found=1
+    nfq_rule_has_mark "$line" || return 1
+  done <<< "$text"
+  [ "$found" -eq 1 ]
 }
 
 nfq_rule_problem() {
@@ -398,7 +449,11 @@ nfq_rule_problem() {
     return 2
   fi
   if ! nfq_rule_present "$PROBE_OUT"; then
-    REASON="нет правила NFQUEUE в mangle POSTROUTING (queue $QNUM)"
+    if nfq_rule_for_queue "$PROBE_OUT"; then
+      REASON="правило NFQUEUE без исключения метки zapret: нет --mark $NFQWS_MARK/$NFQWS_MARK (queue $QNUM) — поддельные пакеты nfqws вернутся в очередь"
+    else
+      REASON="нет правила NFQUEUE в mangle POSTROUTING (queue $QNUM)"
+    fi
     return 1
   fi
   return 0

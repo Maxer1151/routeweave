@@ -95,8 +95,14 @@ FAKES = {
         case "$*" in
           '-w 5 -t mangle -S POSTROUTING')
             if [ "$(cat "$FAKE_STATE/nfq_rule")" = 1 ]; then
-              echo '-A POSTROUTING -o eth0 -p tcp -m multiport' \\
-                   '--dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass'
+              if [ "$(cat "$FAKE_STATE/nfq_rule_legacy")" = 1 ]; then
+                echo '-A POSTROUTING -o eth0 -p tcp -m multiport' \\
+                     '--dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass'
+              else
+                echo '-A POSTROUTING -o eth0 -p tcp -m multiport' \\
+                     '--dports 80,443 -m mark ! --mark 0x80000/0x80000' \\
+                     '-j NFQUEUE --queue-num 200 --queue-bypass'
+              fi
             fi
             ;;
           *) exit 1 ;;
@@ -163,6 +169,7 @@ FW_NFQ = """
     printf 'fw-nfq %s\\n' "$*" >> "$FAKE_CALLS"
     if [ "$1" = start ] && [ "$(cat "$FAKE_STATE/fix_nfq")" = 1 ]; then
       echo 1 > "$FAKE_STATE/nfq_rule"
+      echo 0 > "$FAKE_STATE/nfq_rule_legacy"
     fi
     exit 0
 """
@@ -188,6 +195,7 @@ DEFAULTS = {
     "mihomo_redirect": "1",
     "route2022": "1",
     "nfq_rule": "1",
+    "nfq_rule_legacy": "0",
     "nfqws_active": "active",
     "wan_ingress": "no",
     "rule8993": "0",
@@ -293,6 +301,69 @@ def test_bash_syntax_ok():
         [BASH, "-n", str(SCRIPT)], check=False, capture_output=True, text=True
     )
     assert res.returncode == 0, res.stderr
+
+
+def _guard_functions(*names: str) -> str:
+    """Достаёт определения функций из скрипта для юнит-вызова через bash."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    chunks = []
+    for name in names:
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.MULTILINE | re.DOTALL)
+        assert match, f"в routeweave-guard.sh нет функции {name}()"
+        chunks.append(match.group(0))
+    return "".join(chunks)
+
+
+def nfq_rule_present(rule: str) -> bool:
+    script = (
+        f"QNUM={QNUM}\nNFQWS_MARK=0x80000\n"
+        + _guard_functions(
+            "nfq_rule_for_queue", "nfq_rule_has_mark", "nfq_rule_present"
+        )
+        + 'if nfq_rule_present "$1"; then echo yes; else echo no; fi\n'
+    )
+    res = subprocess.run(
+        [BASH, "-c", script, "bash", rule],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return res.stdout.strip() == "yes"
+
+
+NFQ_RULE = (
+    "-A POSTROUTING -o eth0 -p tcp -m multiport --dports 80,443 "
+    "-m connbytes --connbytes 1:10 --connbytes-mode packets "
+    "--connbytes-dir original {mark}"
+    "-j NFQUEUE --queue-num 200 --queue-bypass"
+)
+
+
+def test_nfq_rule_present_rejects_rule_without_mark():
+    assert not nfq_rule_present(NFQ_RULE.format(mark=""))
+
+
+def test_nfq_rule_present_rejects_legacy_next_to_marked():
+    text = (
+        NFQ_RULE.format(mark="")
+        + "\n"
+        + NFQ_RULE.format(mark="-m mark ! --mark 0x80000/0x80000 ")
+    )
+    assert not nfq_rule_present(text)
+
+
+@pytest.mark.parametrize(
+    "mark",
+    [
+        "-m mark ! --mark 0x80000/0x80000 ",
+        "-m mark ! --mark=0x80000/0x80000 ",
+        "-m mark ! --mark 0X80000/0X80000 ",
+    ],
+    ids=["space", "equals", "upper-hex"],
+)
+def test_nfq_rule_present_accepts_mark(mark: str):
+    assert nfq_rule_present(NFQ_RULE.format(mark=mark))
 
 
 def test_no_duplicate_directives_in_units():
@@ -410,6 +481,26 @@ def test_repair_starts_fw_nfq_when_rule_missing(sandbox: Sandbox):
     )
     assert guard_lines == [expected]
     assert "fw-nfq start" in sandbox.mutating_calls()
+
+
+def test_check_reports_nfq_rule_without_mark(sandbox: Sandbox):
+    sandbox.set("nfq_rule_legacy", "1")
+
+    res = sandbox.run("check")
+
+    assert res.returncode == 1
+    assert "правило NFQUEUE без исключения метки zapret" in res.stderr
+    assert sandbox.mutating_calls() == []
+
+
+def test_repair_fixes_nfq_rule_without_mark(sandbox: Sandbox):
+    sandbox.set("nfq_rule_legacy", "1")
+
+    res = sandbox.run("repair")
+
+    assert res.returncode == 0, res.stderr
+    assert "fw-nfq start" in sandbox.mutating_calls()
+    assert "правило NFQUEUE без исключения метки zapret" in res.stdout
 
 
 def test_repair_restarts_nfqws_when_queue_not_bound(sandbox: Sandbox):

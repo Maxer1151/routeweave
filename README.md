@@ -387,7 +387,9 @@ systemd. Снимок, наоборот, вызывается панелью ч�
 Критично: в `EXTRA` в `/etc/routeweave/zapret.conf` обязателен
 `--dpi-desync-fwmark=0x80000`. Без метки фейковые пакеты nfqws уходят в TUN
 mihomo и съедаются — YouTube не пробивается. Маркированные пакеты должны
-уходить в `main`, а не в TUN.
+уходить в `main`, а не в TUN. По этой же метке (`NFQWS_MARK`) правило
+`fw-nfq.sh` исключает фейки из NFQUEUE: без исключения они возвращаются в
+очередь и вешают `nfqws` в `sendto()` — TCP 80/443 пропадает на минуты.
 
 На amd64 установщик качает `mihomo-linux-amd64-compatible` (без AVX), на
 arm64 — `mihomo-linux-arm64`. Стратегия по умолчанию — `fake,multidisorder`

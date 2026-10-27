@@ -113,6 +113,50 @@ def test_valid_conf_passes_expected_argv(sandbox: Sandbox):
     ]
 
 
+def test_extra_mark_placeholder_is_expanded(sandbox: Sandbox):
+    """Шаблонный EXTRA с $NFQWS_MARK превращается в число без участия шелла."""
+    sandbox.etc.joinpath("zapret.conf").write_text(
+        sandbox.conf(
+            NFQWS_MARK="0x90000",
+            EXTRA="--dpi-desync-fwmark=$NFQWS_MARK",
+        ),
+        encoding="utf-8",
+    )
+    res, argv = sandbox.run()
+
+    assert res.returncode == 0, res.stderr
+    assert "--dpi-desync-fwmark=0x90000" in argv
+    assert not any("$" in word or "NFQWS_MARK" in word for word in argv), argv
+
+
+def test_extra_literal_mark_still_works(sandbox: Sandbox):
+    """Старый конфиг без NFQWS_MARK и с литералом в EXTRA не ломается."""
+    sandbox.etc.joinpath("zapret.conf").write_text(
+        sandbox.conf(EXTRA="--dpi-desync-fwmark=0x90000"),
+        encoding="utf-8",
+    )
+    res, argv = sandbox.run()
+
+    assert res.returncode == 0, res.stderr
+    assert "--dpi-desync-fwmark=0x90000" in argv
+
+
+def test_bad_nfqws_mark_falls_back_to_default(sandbox: Sandbox):
+    """Нечисловая метка не попадает в argv: берём 0x80000 и предупреждаем."""
+    sandbox.etc.joinpath("zapret.conf").write_text(
+        sandbox.conf(
+            NFQWS_MARK="0x90000;id",
+            EXTRA="--dpi-desync-fwmark=$NFQWS_MARK",
+        ),
+        encoding="utf-8",
+    )
+    res, argv = sandbox.run()
+
+    assert res.returncode == 0, res.stderr
+    assert "не похож на число" in res.stderr
+    assert "--dpi-desync-fwmark=0x80000" in argv
+
+
 def test_argv_has_no_shell_artifacts(sandbox: Sandbox):
     """Ровно один exec, без `sh -c`, без кавычек и метасимволов в словах."""
     sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")

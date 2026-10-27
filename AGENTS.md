@@ -88,8 +88,9 @@ Policy-routing (`ip rule`, приоритеты по возрастанию):
 9. **Сторож маршрутизации.** `routeweave-guard.sh` запускается только
    `routeweave-guard.timer` от root (в sudoers его нет) и проверяет
    `ip_forward`, таблицу `inet mihomo` с цепочками `prerouting`/`redirect`,
-   `default` в таблице 2022, правило NFQUEUE на `QNUM` в `mangle POSTROUTING`,
-   привязку очереди к `nfqws` и `ip rule` 8993 при `WAN_INGRESS=yes`. Чинит
+   `default` в таблице 2022, правило NFQUEUE на `QNUM` в `mangle POSTROUTING`
+   с исключением метки zapret, привязку очереди к `nfqws` и `ip rule` 8993 при
+   `WAN_INGRESS=yes`. Чинит
    только это, соблюдая кулдаун и предохранитель (не больше четырёх действий
    в час), и НЕ трогает чужие nft-таблицы, conntrack и правила mihomo с
    приоритетами 9000–9002. Состояние — `/run/routeweave/guard`.

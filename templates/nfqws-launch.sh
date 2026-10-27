@@ -16,7 +16,9 @@
 # Whitelist (см. RE_WORDS/RE_TOKEN ниже): A-Za-z0-9, пробел и _.,:=/+@%-.
 # Всё остальное (`;`, `$`, обратная кавычка, кавычки, `&`, `|`, `>`, `<`,
 # скобки, фигурные скобки, перевод строки, ...) — отказ запуска с сообщением
-# в stderr и кодом 1. Лучше не запустить десинк, чем исполнить инъекцию:
+# в stderr и кодом 1. Единственное исключение — литерал $NFQWS_MARK в EXTRA:
+# он заменяется числовой меткой из NFQWS_MARK до проверки, без участия шелла.
+# Лучше не запустить десинк, чем исполнить инъекцию:
 # сервис останется в failed и это видно в `systemctl status zapret-nfqws`.
 #
 # NFQWS_BIN — законное расширение для тестов и нестандартной сборки: путь к
@@ -43,6 +45,7 @@ AUTOTTL_ARG=""
 TTL_ARG=""
 EXTRA=""
 HOSTLIST=""
+NFQWS_MARK=""
 
 # Конфиг разбирается ВРУЧНУЮ, без `. "$CONF"`.
 # Почему не source: точка выполнила бы содержимое файла шеллом ДО любой
@@ -69,7 +72,7 @@ load_conf() { # load_conf <файл>
         val=${val:1:${#val}-2}
       fi
       case $key in
-        QNUM | DESYNC | FOOLING | AUTOTTL_ARG | TTL_ARG | EXTRA | HOSTLIST)
+        QNUM | DESYNC | FOOLING | AUTOTTL_ARG | TTL_ARG | EXTRA | HOSTLIST | NFQWS_MARK)
           printf -v "$key" '%s' "$val"
           ;;
         *) : ;; # WAN_IFACE, SRC_HOSTLIST и прочее лаунчеру не нужны
@@ -81,6 +84,35 @@ load_conf() { # load_conf <файл>
 }
 
 load_conf "$CONF"
+
+# Подстановка метки nfqws в EXTRA. Раньше значение было литералом; теперь
+# шаблон пишет --dpi-desync-fwmark=$NFQWS_MARK, чтобы метка задавалась в одном
+# месте. $NFQWS_MARK из конфига проверяется как число и подставляется строкой —
+# шелл и eval по-прежнему не участвуют. Старые установки без NFQWS_MARK
+# работают как раньше: если в EXTRA литерал, он остаётся, а метка для проверки
+# правила берётся из него же.
+DEFAULT_NFQWS_MARK=0x80000
+resolve_nfqws_mark() {
+  local mark="${NFQWS_MARK:-}" src="NFQWS_MARK"
+  if [ -z "$mark" ]; then
+    if [[ $EXTRA =~ --dpi-desync-fwmark=([^[:space:]]+) ]]; then
+      mark="${BASH_REMATCH[1]}"
+      src="EXTRA"
+    elif [[ $EXTRA =~ --dpi-desync-fwmark[[:space:]]+([^[:space:]]+) ]]; then
+      mark="${BASH_REMATCH[1]}"
+      src="EXTRA"
+    fi
+  fi
+  if [ -z "$mark" ]; then
+    mark="$DEFAULT_NFQWS_MARK"
+  elif [[ ! "$mark" =~ ^0[xX][0-9a-fA-F]+$ && ! "$mark" =~ ^[0-9]+$ ]]; then
+    warn "$src='$mark' не похож на число, беру $DEFAULT_NFQWS_MARK"
+    mark="$DEFAULT_NFQWS_MARK"
+  fi
+  NFQWS_MARK="$mark"
+  EXTRA=${EXTRA//\$NFQWS_MARK/$NFQWS_MARK}
+}
+resolve_nfqws_mark
 
 # Сравнение символов по ASCII: локаль пользователя/сервиса не должна влиять
 # на диапазоны A-Z/a-z в регулярках.

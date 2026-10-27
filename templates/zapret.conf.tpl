@@ -6,6 +6,11 @@
 # Номер NFQUEUE (должен совпадать в fw-nfq.sh)
 QNUM=200
 
+# Метка, которой nfqws помечает поддельные пакеты. По ней же fw-nfq.sh
+# исключает их из NFQUEUE: без исключения они возвращаются в очередь и
+# вешают nfqws в sendto() (skb не освобождаются).
+NFQWS_MARK=0x80000
+
 # WAN-интерфейс (uplink к роутеру/интернету)
 WAN_IFACE={{WAN_IFACE}}
 
@@ -16,12 +21,13 @@ HOSTLIST=/run/routeweave/dpi-zapret.txt
 
 # Стартовая стратегия: fake + multidisorder, TLS-режим с подменой SNI.
 # Подбирается blockcheck.sh под вашего провайдера.
-# ВАЖНО: --dpi-desync-fwmark=0x80000 обязателен при активном TUN mihomo:
+# ВАЖНО: --dpi-desync-fwmark=$NFQWS_MARK обязателен при активном TUN mihomo:
 # без метки фейковые пакеты nfqws уходят в TUN mihomo и съедаются,
 # из-за чего youtube.com не пробивается.
-# Маркированные пакеты должны уходить в main, а не в TUN.
+# Маркированные пакеты должны уходить в main, а не в TUN, а fw-nfq.sh
+# исключает их из NFQUEUE по той же метке.
 DESYNC=fake,multidisorder
 FOOLING=md5sig
 AUTOTTL_ARG=
 TTL_ARG=
-EXTRA="--dpi-desync-repeats=11 --dpi-desync-split-pos=1,midsld --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --dpi-desync-fwmark=0x80000"
+EXTRA="--dpi-desync-repeats=11 --dpi-desync-split-pos=1,midsld --dpi-desync-fake-tls-mod=rnd,dupsid,sni=www.google.com --dpi-desync-fwmark=$NFQWS_MARK"

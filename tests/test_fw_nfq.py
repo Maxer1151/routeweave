@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +43,26 @@ def _code_lines():
 
 def _iptables_lines():
     return [(num, line) for num, line in _code_lines() if "iptables" in line]
+
+
+def _logical_lines(text: str) -> list[str]:
+    """Склеивает строки с продолжением `\\` в одну команду."""
+    result: list[str] = []
+    buf = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            buf += stripped[:-1].rstrip() + " "
+            continue
+        buf += stripped
+        if buf:
+            result.append(buf)
+        buf = ""
+    if buf:
+        result.append(buf)
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -98,8 +119,151 @@ def test_bash_syntax_ok():
 def test_rule_body_unchanged():
     """Правило осталось прежним: multiport 80/443, connbytes, NFQUEUE, queue-bypass."""
     text = FW_NFQ.read_text(encoding="utf-8")
-    for needle in ('--dports "80,443"', "--connbytes 1:10", "-j NFQUEUE", "--queue-bypass"):
+    for needle in (
+        '--dports "80,443"',
+        "--connbytes 1:10",
+        "-j NFQUEUE",
+        "--queue-bypass",
+        '-m mark ! --mark "$NFQWS_MARK/$NFQWS_MARK"',
+    ):
         assert needle in text, f"из правила пропало: {needle}"
+
+
+def test_rule_excludes_nfqws_mark():
+    """Фейки nfqws не должны возвращаться в ту же очередь (дедлок sendto)."""
+    text = FW_NFQ.read_text(encoding="utf-8")
+    assert "-m mark ! --mark" in text
+    assert "$NFQWS_MARK/$NFQWS_MARK" in text
+
+
+def test_legacy_rule_without_mark_is_deleted():
+    """start и stop снимают правило прежних версий — без исключения метки."""
+    text = FW_NFQ.read_text(encoding="utf-8")
+    legacy = [
+        cmd
+        for cmd in _logical_lines(text)
+        if "-D POSTROUTING" in cmd and "-j NFQUEUE" in cmd
+    ]
+    assert legacy, "нет удаления legacy-правила без метки"
+    for cmd in legacy:
+        assert "--queue-bypass" in cmd, cmd
+        assert "--mark" not in cmd, f"legacy-правило не должно содержать метку: {cmd}"
+
+    start_body = text.split("start()", 1)[1].split("stop()", 1)[0]
+    stop_body = text.split("stop()", 1)[1].split("case ", 1)[0]
+    assert "delete_legacy_rule" in start_body, "start() не удаляет legacy-правило"
+    assert "delete_legacy_rule" in stop_body, "stop() не удаляет legacy-правило"
+
+
+# --------------------------------------------------------------------------
+# сборка правила без root: фейковый iptables записывает argv
+# --------------------------------------------------------------------------
+
+class TestRuleBuild:
+    """Проверяет текст правила и миграцию без netns: iptables — фейк."""
+
+    @pytest.fixture
+    def sandbox(self, tmp_path):
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log = tmp_path / "iptables.log"
+
+        fake_iptables = bin_dir / "iptables"
+        fake_iptables.write_text(
+            textwrap.dedent(
+                """\
+                #!/bin/sh
+                printf '%s\\n' "$*" >> "$FAKE_IPT_LOG"
+                case " $* " in
+                  *" -C "*) exit 1 ;;
+                  *) exit 0 ;;
+                esac
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_iptables.chmod(0o755)
+        (bin_dir / "pgrep").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (bin_dir / "pgrep").chmod(0o755)
+
+        def write_conf(extra_line: str = "") -> None:
+            (etc / "zapret.conf").write_text(
+                "WAN_IFACE=dummy0\n"
+                f"QNUM={QNUM}\n"
+                f"HOSTLIST={tmp_path / 'run' / 'dpi-zapret.txt'}\n"
+                f"SRC_HOSTLIST={tmp_path / 'missing-dpi.txt'}\n"
+                f"{extra_line}\n",
+                encoding="utf-8",
+            )
+
+        write_conf()
+
+        def run(action: str = "start"):
+            env = {
+                "PATH": f"{bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LC_ALL": "C",
+                "ROUTEWEAVE_ETC": str(etc),
+                "FAKE_IPT_LOG": str(log),
+            }
+            return subprocess.run(
+                ["bash", str(FW_NFQ), action],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        return SimpleNamespace(
+            etc=etc, log=log, write_conf=write_conf, run=run
+        )
+
+    @staticmethod
+    def calls(sandbox) -> list[str]:
+        if not sandbox.log.exists():
+            return []
+        return sandbox.log.read_text(encoding="utf-8").splitlines()
+
+    def test_start_adds_mark_and_deletes_legacy(self, sandbox):
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+
+        calls = self.calls(sandbox)
+        inserted = [c for c in calls if "-I POSTROUTING" in c]
+        assert len(inserted) == 1, calls
+        assert "-m mark ! --mark 0x80000/0x80000" in inserted[0], inserted[0]
+
+        legacy = [c for c in calls if "-D POSTROUTING" in c and "-j NFQUEUE" in c]
+        assert legacy, calls
+        assert all("--queue-bypass" in c and "--mark" not in c for c in legacy), legacy
+
+    def test_mark_from_extra_for_old_install(self, sandbox):
+        sandbox.write_conf('EXTRA="--dpi-desync-fwmark=0x90000"')
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        assert len(inserted) == 1, self.calls(sandbox)
+        assert "--mark 0x90000/0x90000" in inserted[0], inserted[0]
+
+    def test_nfqws_mark_beats_extra(self, sandbox):
+        sandbox.write_conf(
+            'NFQWS_MARK=0xA0000\nEXTRA="--dpi-desync-fwmark=0x90000"'
+        )
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        assert len(inserted) == 1, self.calls(sandbox)
+        assert "--mark 0xA0000/0xA0000" in inserted[0], inserted[0]
+
+    def test_invalid_mark_warns_and_falls_back(self, sandbox):
+        sandbox.write_conf('NFQWS_MARK="abc"')
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+        assert "не похож на число" in res.stderr
+        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        assert len(inserted) == 1, self.calls(sandbox)
+        assert "--mark 0x80000/0x80000" in inserted[0], inserted[0]
 
 
 # --------------------------------------------------------------------------
@@ -151,6 +315,7 @@ def _probe_nfqueue():
             "-m", "multiport", "--dports", "80,443",
             "-m", "connbytes", "--connbytes", "1:10",
             "--connbytes-mode", "packets", "--connbytes-dir", "original",
+            "-m", "mark", "!", "--mark", "0x80000/0x80000",
             "-j", "NFQUEUE", "--queue-num", QNUM, "--queue-bypass",
         )
     finally:
@@ -215,6 +380,7 @@ class TestNetns:
         rule = rules[0]
         assert "-o dummy0" in rule, rule
         assert "80,443" in rule, rule
+        assert "-m mark ! --mark 0x80000/0x80000" in rule, rule
         assert "NFQUEUE" in rule and QNUM in rule, rule
 
     def test_hostlist_is_generated(self, started):
@@ -230,6 +396,51 @@ class TestNetns:
         res = run_fw(started.etc, "start")
         assert res.returncode == 0, res.stderr
         assert len(nfq_rules()) == before == 1, nfq_rules()
+
+    def test_start_removes_legacy_rule_without_mark(self, started):
+        """Правило прежних версий не должно остаться рядом с новым."""
+        legacy = [
+            "-p", "tcp", "-m", "multiport", "--dports", "80,443",
+            "-m", "connbytes", "--connbytes", "1:10",
+            "--connbytes-mode", "packets", "--connbytes-dir", "original",
+            "-j", "NFQUEUE", "--queue-num", QNUM, "--queue-bypass",
+        ]
+        ns_ok(
+            "iptables", "-w", "5", "-t", "mangle", "-I", "POSTROUTING", "1",
+            "-o", "dummy0", *legacy,
+        )
+        assert len(nfq_rules()) == 2, nfq_rules()
+
+        res = run_fw(started.etc, "start")
+        assert res.returncode == 0, res.stderr
+
+        rules = nfq_rules()
+        assert len(rules) == 1, rules
+        assert "-m mark ! --mark 0x80000/0x80000" in rules[0], rules[0]
+
+    def test_mark_from_extra(self, started):
+        """Старая установка без NFQWS_MARK: метка берётся из EXTRA."""
+        conf = started.etc / "zapret.conf"
+        original = conf.read_text(encoding="utf-8")
+        assert run_fw(started.etc, "stop").returncode == 0
+        conf.write_text(
+            "WAN_IFACE=dummy0\n"
+            f"QNUM={QNUM}\n"
+            f"SRC_HOSTLIST={started.hosts}\n"
+            f"HOSTLIST={started.generated}\n"
+            'EXTRA="--dpi-desync-fwmark=0x90000"\n',
+            encoding="utf-8",
+        )
+        try:
+            res = run_fw(started.etc, "start")
+            assert res.returncode == 0, res.stderr
+            rules = nfq_rules()
+            assert len(rules) == 1, rules
+            assert "-m mark ! --mark 0x90000/0x90000" in rules[0], rules[0]
+        finally:
+            assert run_fw(started.etc, "stop").returncode == 0
+            conf.write_text(original, encoding="utf-8")
+            assert run_fw(started.etc, "start").returncode == 0
 
     def test_stop_removes_rule(self, started):
         assert run_fw(started.etc, "start").returncode == 0

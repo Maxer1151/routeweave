@@ -131,6 +131,13 @@
 
 ### Исправлено
 
+- Дедлок `nfqws`: правило NFQUEUE не исключало поддельные пакеты, помеченные
+  `--dpi-desync-fwmark=0x80000`. Они возвращались в ту же очередь 200, их skb
+  держали `sk_wmem_alloc` raw-сокета, `sendto()` вставал навсегда, очередь не
+  дренировалась — TCP 80/443 умирал на 3–4 минуты при живом ICMP. Теперь в
+  правиле есть `-m mark ! --mark $NFQWS_MARK/$NFQWS_MARK`, а `start`/`stop`
+  снимают legacy-правило без метки. Сторож считает правило без метки
+  сломанным и чинит его.
 - Панель: применение списка падало с `read-only file system` (EROFS, errno 30).
   `routeweave-panel.service` с `ProtectSystem=strict` не открывал на запись
   `/etc/routeweave/.staging`, хотя панель запускает
