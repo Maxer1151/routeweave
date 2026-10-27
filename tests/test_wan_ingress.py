@@ -19,14 +19,11 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [
-    pytest.mark.privileged,
-    # skipif, а не module-level skip: иначе pytest не соберёт ни одного теста
-    # и вернёт код 5; так тесты просто помечаются skipped.
-    pytest.mark.skipif(os.geteuid() != 0, reason="нужен root: netns и iptables"),
-    pytest.mark.skipif(shutil.which("ip") is None, reason="нет ip из iproute2"),
-    pytest.mark.skipif(shutil.which("iptables") is None, reason="нет iptables"),
-]
+# Маркер privileged стоит на модуле: CI-job netns отбирает тесты по нему.
+# Пропуск без root оформлен в фикстуре started, а не module-level skipif:
+# статическая проверка скрипта (test_remove_ip_rule_...) не требует netns и
+# должна выполняться всегда, а module-level skipif пропустил бы и её.
+pytestmark = [pytest.mark.privileged]
 
 NS = "rwwan"
 REPO = Path(__file__).resolve().parent.parent
@@ -116,8 +113,60 @@ def write_env(path, wan_ingress="yes"):
     return path
 
 
+def remove_ip_rule_body():
+    """Тело функции remove_ip_rule из fw-wan.sh (скрипт не запускается)."""
+    text = FW_WAN.read_text(encoding="utf-8")
+    match = re.search(
+        r"^remove_ip_rule\(\) \{\n(?P<body>.*?)^\}$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "в templates/fw-wan.sh нет функции remove_ip_rule"
+    return match.group("body")
+
+
+def test_remove_ip_rule_cleans_reserved_priority():
+    """Статическая проверка, root не нужен: 8993 зачищается по priority.
+
+    Зачистка по priority нужна, чтобы после миграции WAN_INGRESS_MARK
+    0x40000 -> 0x200000 не осталось старого правила на 8993: оно уводило бы
+    в main чужой трафик с меткой 0x40000. Для любого другого priority такое
+    удаление недопустимо — там может стоять чужое правило.
+    """
+    body = remove_ip_rule_body()
+
+    sweep = re.search(
+        r'if \[ "\$WAN_INGRESS_RULE_PRIO" -eq 8993 \]; then\n'
+        r'\s*while ip rule del priority "\$WAN_INGRESS_RULE_PRIO"'
+        r" 2>/dev/null; do :; done\n"
+        r"\s*fi",
+        body,
+    )
+    assert sweep, (
+        "в remove_ip_rule нет зачистки по priority под защитой 8993:\n" + body
+    )
+    # Ровно один вызов удаления по priority: второй, вне проверки на 8993,
+    # снёс бы чужое правило на пользовательском priority.
+    assert body.count("ip rule del priority") == 1, body
+
+    # Точное удаление сохранено (нестандартный priority и дубли).
+    assert 'ip rule del fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK"' in body, body
+    assert 'lookup main priority "$WAN_INGRESS_RULE_PRIO"' in body, body
+    assert body.index("ip rule del priority") < body.index("ip rule del fwmark"), \
+        "зачистка по priority должна идти до точного удаления"
+
+
 @pytest.fixture(scope="module")
 def started(tmp_path_factory):
+    # skip, а не module-level skipif: иначе pytest не собрал бы и статическую
+    # проверку test_remove_ip_rule_..., которой root не нужен.
+    if os.geteuid() != 0:
+        pytest.skip("нужен root: netns и iptables")
+    if shutil.which("ip") is None:
+        pytest.skip("нет ip из iproute2")
+    if shutil.which("iptables") is None:
+        pytest.skip("нет iptables")
+
     etc = write_env(tmp_path_factory.mktemp("etc"))
 
     _run("ip", "netns", "del", NS)  # мусор от упавшего прогона
@@ -316,3 +365,39 @@ def test_stop_removes_everything(started):
     # повторный stop — успех, а не "chain does not exist"
     again = run_fw(started, "stop")
     assert again.returncode == 0, again.stderr
+
+
+def test_start_removes_stale_mark_rule_on_reserved_priority(started):
+    """Устаревшее правило со старой меткой на 8993 не переживает start.
+
+    Миграция WAN_INGRESS_MARK 0x40000 -> 0x200000: старое правило на
+    зарезервированном priority 8993 осталось бы и уводило в main чужой
+    трафик с fwmark 0x40000. remove_ip_rule на 8993 зачищает priority
+    целиком, поэтому такого правила быть не должно.
+    """
+    assert run_fw(started, "stop").returncode == 0
+
+    try:
+        add = ns("ip", "rule", "add", "fwmark", "0x40000/0x40000",
+                 "lookup", "main", "priority", PRIO)
+        if add.returncode != 0:
+            pytest.skip(f"ip rule add в netns недоступен: {add.stderr.strip()}")
+
+        stale = [ln for ln in rule_lines()
+                 if ln.startswith(f"{PRIO}:") and "fwmark 0x40000/0x40000" in ln]
+        assert stale, "не удалось добавить устаревшее правило 0x40000 на 8993"
+
+        res = run_fw(started, "start")
+        assert res.returncode == 0, res.stderr
+
+        reserved = [ln for ln in rule_lines() if ln.startswith(f"{PRIO}:")]
+        assert not any("fwmark 0x40000/0x40000" in ln for ln in reserved), \
+            "устаревшее правило 0x40000 на 8993 осталось после start:\n" \
+            + "\n".join(reserved)
+        assert any(f"fwmark {MARK}/{MARK}" in ln and "lookup main" in ln
+                   for ln in reserved), \
+            f"нет правила {PRIO} с текущей меткой {MARK}:\n" + "\n".join(reserved)
+        assert len(reserved) == 1, reserved
+    finally:
+        # Возвращаем состояние фикстуры для остальных тестов модуля.
+        run_fw(started, "start")

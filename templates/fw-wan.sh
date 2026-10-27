@@ -224,12 +224,21 @@ remove_jumps() { # remove_jumps <хук> <цепочка> — снять все 
 }
 
 remove_ip_rule() {
-  # Снимаем только своё правило — точное совпадение метки, таблицы и
-  # приоритета. Удалять "всё с этим priority" нельзя: на том же номере может
+  # 8993 — документированный зарезервированный priority RouteWeave
+  # (.env.example), других правил там быть не должно. Поэтому именно на нём
+  # допустима зачистка по priority: она снимает и наше правило, и дубли, и
+  # оставшееся от миграции WAN_INGRESS_MARK 0x40000 -> 0x200000 правило со
+  # старой меткой (оно уводило бы помеченный 0x40000 трафик в main).
+  # На пользовательском priority так делать нельзя: на том же номере может
   # стоять чужое правило (пользовательское или другого компонента), и мы бы
-  # снесли его вместе со своим. Цикл нужен на случай дублей от старых версий;
-  # когда точного правила не осталось, ip rule del возвращает ошибку и цикл
-  # завершается.
+  # снесли его вместе со своим.
+  if [ "$WAN_INGRESS_RULE_PRIO" -eq 8993 ]; then
+    while ip rule del priority "$WAN_INGRESS_RULE_PRIO" 2>/dev/null; do :; done
+  fi
+  # Точное удаление по метке, таблице и приоритету остаётся и после зачистки:
+  # оно покрывает нестандартный priority и дубли от старых версий. Цикл нужен
+  # на случай дублей; когда точного правила не осталось, ip rule del
+  # возвращает ошибку и цикл завершается.
   while ip rule del fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" \
     lookup main priority "$WAN_INGRESS_RULE_PRIO" 2>/dev/null; do :; done
 }
@@ -355,9 +364,11 @@ start() {
   iptables -w 5 -t mangle -A "$OUT_CHAIN" -m conntrack --ctstate ESTABLISHED,RELATED \
     -j CONNMARK --restore-mark --nfmask "$WAN_INGRESS_MARK" --ctmask "$WAN_INGRESS_MARK"
 
-  # Правило снимаем точным совпадением (метка + main + priority): при смене
-  # WAN_INGRESS_MARK старое правило иначе осталось бы и уводило пакеты со
-  # старой меткой, а удаление «по priority» снесло бы чужие правила.
+  # remove_ip_rule на зарезервированном priority 8993 сначала зачищает все
+  # правила по priority (это снимает и старое правило с прежней меткой после
+  # смены WAN_INGRESS_MARK, и дубли), а на пользовательском priority удаляет
+  # только точное совпадение метки, таблицы и приоритета — чужое правило там
+  # трогать нельзя.
   remove_ip_rule
   ip rule add fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" lookup main priority "$WAN_INGRESS_RULE_PRIO"
 

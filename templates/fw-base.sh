@@ -28,11 +28,16 @@
 # Вход на сам шлюз (INPUT) — цепочка ROUTEWEAVE-IN, прыжок в INPUT 1. Политику
 # INPUT скрипт не меняет (её держат ufw/docker), поэтому ограничения заданы
 # явными правилами: lo, ESTABLISHED/RELATED, ICMP, SSH и сервисы шлюза
-# (DNS 53, панель PANEL_PORT, API mihomo 9090, прокси 7890) — только из
-# доверенных зон (LAN_IFACE, tailscale0, wdtt0, WG_SUBNET, TS_SUBNET,
-# 100.64.0.0/10). Для этих портов стоит и явный DROP из остальных источников:
-# при INPUT policy ACCEPT (docker) иначе панель и API были бы открыты в WAN.
-# Финальный RETURN возвращает пакет в INPUT, чтобы не менять чужую политику.
+# (DNS 53, панель PANEL_PORT, API mihomo 9090, прокси 7890). Сервисы открыты
+# только из доверенных зон: из LAN — при совпадении интерфейса LAN_IFACE И
+# приватного источника LAN_CIDR (10/8, 172.16/12, 192.168/16), из VPN и
+# Tailscale — по интерфейсу (tailscale0, wdtt0) или подсети (WG_SUBNET,
+# TS_SUBNET, 100.64.0.0/10). На VPS с единственным публичным NIC (LAN_IFACE =
+# публичный интерфейс) и при пробросе порта с WAN source не приватный, поэтому
+# панель/DNS/API в WAN закрыты. Для этих портов стоит и явный DROP из
+# остальных источников: при INPUT policy ACCEPT (docker) иначе панель и API
+# были бы открыты в WAN. Финальный RETURN возвращает пакет в INPUT, чтобы не
+# менять чужую политику.
 #
 # QUIC_DROP исключает помеченный WAN_INGRESS трафик: WAN_INGRESS_MARK (по
 # умолчанию 0x200000, читается из .env) ставит fw-wan.sh на входящие из WAN
@@ -127,6 +132,82 @@ valid_port PANEL_PORT "$PANEL_PORT"
 # автодетект может не найти маршрут (нет LAN_IFACE в .env) — || true, иначе
 # pipefail+set -e уронят скрипт ещё до проверок
 LAN_IFACE="${LAN_IFACE:-$(ip route get 192.168.0.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i + 1); exit}}' || true)}"
+
+# LAN_CIDR — источник, которому разрешён вход на сервисы через LAN_IFACE.
+# Одного -i LAN_IFACE мало: на VPS это единственный публичный NIC, а на
+# домашнем шлюзе проброс порта даёт source из WAN на LAN_IFACE — в обоих
+# случаях ACCEPT по интерфейсу открыл бы панель/DNS/API в WAN. Поэтому LAN-
+# правило требует ещё и приватный source.
+#
+# Значение можно задать списком (через пробел/запятую) и в любой записи:
+# 192.168.1.5/24 канонизируется в 192.168.1.0/24. Не приватные (публичные,
+# loopback, link-local, 0.0.0.0/0) не добавляются: is_private для этого не
+# годится (он считает приватными loopback и link-local), проверяем вхождение
+# в RFC1918 целиком через subnet_of.
+LAN_CIDR="${LAN_CIDR:-}"
+LAN_NETS=()
+
+lan_net_is_private() { # lan_net_is_private <канонический CIDR>
+  if python3 -c '
+import ipaddress
+import sys
+
+net = ipaddress.IPv4Network(sys.argv[1])
+private = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+sys.exit(0 if any(net.subnet_of(net_) for net_ in private) else 1)
+' "$1" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+add_lan_net() { # add_lan_net <токен LAN_CIDR>
+  local raw="${1:-}" net
+  [ -n "$raw" ] || return 0
+  # strict=False: 192.168.1.5/24 -> 192.168.1.0/24, чтобы не плодить правила
+  # на каждый хост и не зависеть от записи в .env.
+  net="$(python3 -c 'import ipaddress,sys; print(ipaddress.IPv4Network(sys.argv[1], strict=False))' "$raw" 2>/dev/null || true)"
+  if [ -z "$net" ]; then
+    warn "LAN_CIDR='$raw' не IPv4-сеть — пропускаю"
+    return 0
+  fi
+  if ! lan_net_is_private "$net"; then
+    warn "LAN_CIDR=$net не приватный — не добавляю"
+    return 0
+  fi
+  case " ${LAN_NETS[*]-} " in *" $net "*) return 0 ;; esac
+  LAN_NETS+=("$net")
+}
+
+add_lan_nets() { # add_lan_nets <значение LAN_CIDR>
+  local raw="${1:-}" token
+  local -a tokens
+  raw="${raw//,/ }"
+  read -r -a tokens <<< "$raw" || true
+  for token in ${tokens[@]+"${tokens[@]}"}; do
+    add_lan_net "$token"
+  done
+}
+
+if [ -n "$LAN_CIDR" ]; then
+  add_lan_nets "$LAN_CIDR"
+elif [ -n "$LAN_IFACE" ]; then
+  # Автоопределение: первый connected-префикс на LAN_IFACE, иначе первый
+  # глобальный IPv4-адрес. Все вызовы с || true: без маршрута/адреса скрипт
+  # не должен падать из-за pipefail, LAN просто останется закрытой.
+  lan_cidr_auto="$(ip -4 route show dev "$LAN_IFACE" scope link 2>/dev/null | awk 'NR==1{print $1}' || true)"
+  if [ -z "$lan_cidr_auto" ]; then
+    lan_cidr_auto="$(ip -4 -o addr show dev "$LAN_IFACE" scope global 2>/dev/null | awk 'NR==1{print $4}' || true)"
+  fi
+  if [ -n "$lan_cidr_auto" ]; then
+    add_lan_nets "$lan_cidr_auto"
+  fi
+fi
+
 TUN_IFACE="${TUN_IFACE:-Meta}"
 WG_SUBNET="${WG_SUBNET:-10.66.66.0/24}"
 # Вход Tailscale: сервер работает exit node, forwarded-трафик из tailscale0
@@ -178,6 +259,9 @@ done < <(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^wg' |
 # Пустые значения не добавляем: -i "" iptables не поймёт. LAN_IFACE может быть
 # пуст (не нашли NIC) — тогда остаются tailscale0/wdtt0 и подсети, а DROP для
 # сервисных портов всё равно ставится.
+# LAN в IN_IFACES намеренно нет: интерфейс без приватного source открывал бы
+# сервисы в WAN (VPS с публичным NIC, проброс порта). LAN-правила ниже требуют
+# сразу -i LAN_IFACE и -s LAN_NETS.
 IN_IFACES=()
 add_in_iface() {
   local iface="${1:-}"
@@ -192,7 +276,6 @@ add_in_net() {
   case " ${IN_NETS[*]-} " in *" $net "*) return 0 ;; esac
   IN_NETS+=("$net")
 }
-add_in_iface "$LAN_IFACE"
 add_in_iface "$TS_IFACE"
 add_in_iface "wdtt0"
 add_in_net "$WG_SUBNET"
@@ -371,6 +454,24 @@ start() {
       iptables -w 5 -A "$IN_CHAIN" -s "$net" -p udp --dport "$port" -j ACCEPT
     done
   done
+  # 7a. LAN — только при совпадении интерфейса И приватного источника.
+  #     Одного -i LAN_IFACE мало: на VPS это публичный NIC, а при пробросе
+  #     порта source приходит из WAN на LAN_IFACE. Без LAN_NETS LAN закрыт
+  #     (доступ остаётся через tailscale/wdtt/WG/SSH-туннель).
+  if [ -n "$LAN_IFACE" ] && [ "${LAN_NETS[*]-}" != "" ]; then
+    for port in ${IN_TCP_PORTS[@]+"${IN_TCP_PORTS[@]}"}; do
+      for net in ${LAN_NETS[@]+"${LAN_NETS[@]}"}; do
+        iptables -w 5 -A "$IN_CHAIN" -i "$LAN_IFACE" -s "$net" \
+          -p tcp --dport "$port" -j ACCEPT
+      done
+    done
+    for port in ${IN_UDP_PORTS[@]+"${IN_UDP_PORTS[@]}"}; do
+      for net in ${LAN_NETS[@]+"${LAN_NETS[@]}"}; do
+        iptables -w 5 -A "$IN_CHAIN" -i "$LAN_IFACE" -s "$net" \
+          -p udp --dport "$port" -j ACCEPT
+      done
+    done
+  fi
   for port in ${IN_TCP_PORTS[@]+"${IN_TCP_PORTS[@]}"}; do
     iptables -w 5 -A "$IN_CHAIN" -p tcp --dport "$port" -j DROP
   done
@@ -504,7 +605,7 @@ start() {
     ip rule add fwmark "$TS_NAT_MARK/$TS_NAT_MARK" lookup main priority "$TS_NAT_RULE_PRIO"
   fi
 
-  echo "ok: firewall started (QUIC_DROP=$QUIC_DROP, LAN=$LAN_IFACE, VPN=${VPN_IFACES[*]-нет}, TS=$TS_IFACE, TS_MODE=$TS_EXIT_MODE, SSH=$SSH_PORT, IN=${IN_TCP_PORTS[*]}/udp:${IN_UDP_PORTS[*]})"
+  echo "ok: firewall started (QUIC_DROP=$QUIC_DROP, LAN=$LAN_IFACE, LAN_CIDR=${LAN_NETS[*]-нет}, VPN=${VPN_IFACES[*]-нет}, TS=$TS_IFACE, TS_MODE=$TS_EXIT_MODE, SSH=$SSH_PORT, IN=${IN_TCP_PORTS[*]}/udp:${IN_UDP_PORTS[*]})"
 }
 
 stop() {
@@ -534,7 +635,7 @@ stop() {
 doctor() {
   local fails=0
   local fwd_rules in_rules input_rules
-  local port iface
+  local port iface net
 
   echo "== Базовый firewall: диагностика =="
 
@@ -655,14 +756,27 @@ doctor() {
         fails=$((fails + 1))
       fi
     done
+    for iface in ${IN_IFACES[@]+"${IN_IFACES[@]}"}; do
+      if has_all "$in_rules" "-i $iface" "-p tcp" "--dport 7890" "-j ACCEPT"; then
+        echo "OK: tcp/7890 разрешён из зоны $iface"
+      else
+        echo "WARN: нет ACCEPT tcp/7890 из зоны $iface — проверьте tailscale0/wdtt0"
+      fi
+    done
     if [ -n "$LAN_IFACE" ]; then
-      for iface in ${IN_IFACES[@]+"${IN_IFACES[@]}"}; do
-        if has_all "$in_rules" "-i $iface" "-p tcp" "--dport 7890" "-j ACCEPT"; then
-          echo "OK: tcp/7890 разрешён из зоны $iface"
-        else
-          echo "WARN: нет ACCEPT tcp/7890 из зоны $iface — проверьте LAN_IFACE/tailscale0/wdtt0"
-        fi
-      done
+      if [ "${LAN_NETS[*]-}" != "" ]; then
+        for net in ${LAN_NETS[@]+"${LAN_NETS[@]}"}; do
+          if has_all "$in_rules" "-i $LAN_IFACE" "-s $net" \
+            "-p tcp" "--dport 7890" "-j ACCEPT"; then
+            echo "OK: tcp/7890 разрешён из LAN (LAN_IFACE + net)"
+          else
+            echo "FAIL: нет ACCEPT tcp/7890 для -i $LAN_IFACE -s $net — LAN не сможет пользоваться сервисами; выполните systemctl restart routeweave-firewall"
+            fails=$((fails + 1))
+          fi
+        done
+      else
+        echo "WARN: сервисы не открыты в LAN (LAN_CIDR пуст или публичный), доступ через tailscale/wdtt/SSH-туннель"
+      fi
     fi
   fi
 

@@ -131,9 +131,8 @@ def test_fw_base_guard_ports_and_zones():
     ):
         assert snippet in text, f"нет {snippet!r}"
 
-    # Доверенные зоны: LAN, tailscale0, wdtt0 и подсети.
+    # Доверенные зоны: tailscale0, wdtt0 и подсети.
     for snippet in (
-        'add_in_iface "$LAN_IFACE"',
         'add_in_iface "$TS_IFACE"',
         'add_in_iface "wdtt0"',
         'add_in_net "$WG_SUBNET"',
@@ -142,15 +141,50 @@ def test_fw_base_guard_ports_and_zones():
     ):
         assert snippet in text, f"нет {snippet!r}"
 
+    # LAN нельзя доверять по одному интерфейсу: на VPS это публичный NIC, а
+    # при пробросе порта source приходит из WAN на LAN_IFACE.
+    assert 'add_in_iface "$LAN_IFACE"' not in text, (
+        "LAN_IFACE не должен попадать в IN_IFACES: нужен ещё приватный source"
+    )
+    assert 'LAN_CIDR="${LAN_CIDR:-}"' in text
+    assert "LAN_NETS=()" in text
+    # Приватность проверяется вхождением в RFC1918, а не is_private
+    # (is_private считает приватными loopback и link-local).
+    for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        assert net in text, f"нет проверки RFC1918-сети {net}"
+
     # Для каждого порта — разрешения по зонам и DROP из всех остальных.
+    joined = " ".join(text.replace("\\\n", " ").split())
     assert '-A "$IN_CHAIN" -i "$iface" -p tcp --dport "$port" -j ACCEPT' in text
     assert '-A "$IN_CHAIN" -s "$net" -p tcp --dport "$port" -j ACCEPT' in text
     assert '-A "$IN_CHAIN" -i "$iface" -p udp --dport "$port" -j ACCEPT' in text
+    # LAN-правило требует интерфейс И сеть — и для tcp, и для udp.
+    assert (
+        '-A "$IN_CHAIN" -i "$LAN_IFACE" -s "$net" -p tcp --dport "$port" -j ACCEPT'
+        in joined
+    ), "нет LAN-правила tcp с двумя условиями (-i LAN_IFACE -s LAN_NETS)"
+    assert (
+        '-A "$IN_CHAIN" -i "$LAN_IFACE" -s "$net" -p udp --dport "$port" -j ACCEPT'
+        in joined
+    ), "нет LAN-правила udp с двумя условиями (-i LAN_IFACE -s LAN_NETS)"
     assert '-A "$IN_CHAIN" -p tcp --dport "$port" -j DROP' in text
     assert '-A "$IN_CHAIN" -p udp --dport "$port" -j DROP' in text
 
     # Пустой LAN_IFACE не должен давать -i "" (правило не добавится).
     assert "[ -n \"$iface\" ] || return 0" in text
+
+
+def test_fw_base_autodetects_lan_cidr():
+    """Пустой LAN_CIDR определяется по маршруту/адресу LAN_IFACE."""
+    text = read(FW_BASE)
+    for needle in (
+        'ip -4 route show dev "$LAN_IFACE" scope link',
+        'ip -4 -o addr show dev "$LAN_IFACE" scope global',
+    ):
+        lines = [line for line in text.splitlines() if needle in line]
+        assert lines, f"нет автоопределения LAN_CIDR: {needle}"
+        # Без маршрута/адреса скрипт не должен падать из-за set -e/pipefail.
+        assert any("|| true" in line for line in lines), f"{needle} без || true"
 
 
 def test_fw_base_stop_removes_input_chain():
@@ -256,13 +290,34 @@ def test_fw_wan_rejects_reserved_marks_and_prios():
 
 def test_fw_wan_remove_ip_rule_is_exact():
     text = read(FW_WAN)
-    joined = " ".join(" ".join(code_lines(text)).split())
-    assert (
-        'ip rule del fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" '
-        'lookup main priority "$WAN_INGRESS_RULE_PRIO"' in joined
-    ), "remove_ip_rule должен удалять только точное совпадение правила"
-    # Удаления «всего по priority» быть не должно.
-    assert 'ip rule del priority "$WAN_INGRESS_RULE_PRIO"' not in text
+    body = text.split("remove_ip_rule() {", 1)[1].split("\n}", 1)[0]
+    joined = " ".join(" ".join(code_lines(body)).split())
+    # Точное удаление (метка + таблица + priority) сохраняется для любого
+    # priority: чужое правило на том же номере сносить нельзя.
+    exact = (
+        'while ip rule del fwmark "$WAN_INGRESS_MARK/$WAN_INGRESS_MARK" '
+        'lookup main priority "$WAN_INGRESS_RULE_PRIO" 2>/dev/null; do :; done'
+    )
+    assert exact in joined, (
+        "remove_ip_rule должен удалять только точное совпадение правила"
+    )
+    # 8993 зарезервирован за RouteWeave: там допустим снос всего по priority
+    # (дубли от старых версий), но только внутри проверки priority.
+    priority_loop = (
+        'while ip rule del priority "$WAN_INGRESS_RULE_PRIO" '
+        "2>/dev/null; do :; done"
+    )
+    assert priority_loop in joined, (
+        "для зарезервированного priority 8993 нужен цикл удаления по priority"
+    )
+    guard = joined[: joined.index(priority_loop)]
+    assert "if " in guard, "удаление по priority должно быть условным"
+    assert re.search(r"(?:-eq|=)\s*8993", guard), (
+        "удаление по priority разрешено только для 8993"
+    )
+    # Точное удаление идёт после ветки 8993 и работает для любого priority.
+    assert joined.index(exact) > joined.index(priority_loop)
+    assert "удалять всё нельзя" not in body.lower()
 
 
 def test_fw_wan_doctor_checks_forwarded_path():
@@ -313,6 +368,9 @@ WAN_IP = "198.51.100.1"
 PEER_WAN_IP = "198.51.100.5"
 LAN_IP = "192.168.50.1"
 PEER_LAN_IP = "192.168.50.5"
+# Публичный source, который не входит в LAN_CIDR, но приходит на LAN_IFACE
+# (имитация проброса порта с WAN / VPS с единственным публичным NIC).
+PUBLIC_SRC = "203.0.113.9"
 SSH_PORT = "2222"
 PANEL_PORT = "8080"
 GUARD_TCP = ("8080", "9090", "7890", "53")
@@ -323,6 +381,21 @@ import sys
 sock = socket.socket()
 sock.settimeout(0.6)
 try:
+    sock.connect((sys.argv[1], int(sys.argv[2])))
+    print("ok")
+except OSError:
+    print("fail")
+finally:
+    sock.close()
+"""
+
+CONNECT_FROM_SRC = """
+import socket
+import sys
+sock = socket.socket()
+sock.settimeout(0.6)
+try:
+    sock.bind((sys.argv[3], 0))
     sock.connect((sys.argv[1], int(sys.argv[2])))
     print("ok")
 except OSError:
@@ -384,6 +457,13 @@ def run_fw(etc, action):
 
 def connect_from(namespace, host, port):
     return ns_run(namespace, sys.executable, "-c", CONNECT, host, str(port))
+
+
+def connect_from_source(namespace, host, port, source):
+    return ns_run(
+        namespace, sys.executable, "-c", CONNECT_FROM_SRC,
+        host, str(port), source,
+    )
 
 
 def rule_counters():
@@ -455,6 +535,8 @@ def input_ns(tmp_path_factory):
             "WG_SUBNET": "10.77.0.0/24",
             "TS_SUBNET": "100.64.0.0/10",
             "WAN_INGRESS": "no",
+            # LAN_CIDR намеренно не задан: скрипт должен определить
+            # 192.168.50.0/24 по маршруту на lan0.
         },
     )
 
@@ -481,8 +563,14 @@ def input_ns(tmp_path_factory):
 
         ns_ok(PEER, "ip", "addr", "add", f"{PEER_LAN_IP}/24", "dev", "lan1")
         ns_ok(PEER, "ip", "addr", "add", f"{PEER_WAN_IP}/24", "dev", "wan1")
+        # Публичный source на LAN-интерфейсе: проверяем, что одного -i lan0
+        # недостаточно для ACCEPT сервисных портов.
+        ns_ok(PEER, "ip", "addr", "add", f"{PUBLIC_SRC}/32", "dev", "lan1")
         for iface in ("lan1", "wan1", "lo"):
             ns_ok(PEER, "ip", "link", "set", iface, "up")
+        # Обратный маршрут к PUBLIC_SRC в netns шлюза, чтобы rp_filter не
+        # отбросил пакет раньше ROUTEWEAVE-IN (проверяем именно нашу политику).
+        ns_ok(NS, "ip", "route", "replace", f"{PUBLIC_SRC}/32", "dev", "lan0")
 
         if ns_run(NS, "iptables", "-S").returncode != 0:
             pytest.skip("iptables внутри netns не работает")
@@ -551,6 +639,24 @@ class TestInputPolicy:
             f"{before_accept} -> {after_accept})"
         )
         assert counter("DROP", dpt=PANEL_PORT) == before_drop
+
+    def test_public_source_on_lan_iface_is_dropped(self, input_ns):
+        # Пакет приходит на LAN_IFACE, но source публичный (не из LAN_CIDR):
+        # это VPS с единственным NIC или проброс порта с WAN. ACCEPT по
+        # одному -i lan0 пропустил бы его, поэтому ждём DROP.
+        before_drop = counter("DROP", dpt=PANEL_PORT)
+        before_accept = counter("ACCEPT", dpt=PANEL_PORT, iface="lan0")
+        connect_from_source(PEER, LAN_IP, PANEL_PORT, PUBLIC_SRC)
+        after_drop = counter("DROP", dpt=PANEL_PORT)
+        after_accept = counter("ACCEPT", dpt=PANEL_PORT, iface="lan0")
+        assert after_drop > before_drop, (
+            f"tcp/{PANEL_PORT} с публичного source {PUBLIC_SRC} на lan0 не попал "
+            f"в DROP (счётчик не вырос: {before_drop} -> {after_drop})"
+        )
+        assert after_accept == before_accept, (
+            f"tcp/{PANEL_PORT} с публичного source {PUBLIC_SRC} попал в ACCEPT "
+            f"по iface lan0 ({before_accept} -> {after_accept})"
+        )
 
     def test_loopback_is_allowed(self, input_ns):
         # Правило lo — `-i lo -j ACCEPT` без --dport: разрешён весь вход с
