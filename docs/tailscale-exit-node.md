@@ -359,15 +359,37 @@ DoH в браузерах (Chrome, Edge, Firefox) и **Private DNS** на Androi
   `MIHOMO_ALLOW_LAN=yes`; по умолчанию mixed-port слушает localhost).
 
 Порты те же, что у LAN. Вход на шлюз ограничивает цепочка `ROUTEWEAVE-IN`:
-перечисленные порты открыты только из `tailscale0`, `100.64.0.0/10`,
-`LAN_IFACE`, `wdtt0` и `WG_SUBNET`. При активном ufw `install.sh` добавляет:
+перечисленные порты открыты из `tailscale0`, `100.64.0.0/10`, `wdtt0`,
+`WG_SUBNET`, а для LAN — только правилом с двумя условиями: `LAN_IFACE` и
+приватный `LAN_CIDR` (см. ниже). При активном ufw `install.sh` добавляет:
 
 - `ufw route allow in on tailscale0` и `ufw route allow out on tailscale0`;
 - `ufw allow 41641/udp` — прямые соединения Tailscale;
 - `ufw insert 1 deny in on LAN_IFACE from 100.64.0.0/10` — защита от
   CGNAT-спуфинга из LAN;
 - разрешения с `100.64.0.0/10` на `53/tcp+udp`, `7890`, `PANEL_PORT`, `9090`
-  (и `1443` при `INSTALL_TGWS=yes`) — тот же набор, что у LAN/WDTT.
+  (и `1443` при `INSTALL_TGWS=yes`) — тот же набор, что у LAN/WDTT;
+- `ufw route allow in on LAN_IFACE` и `ufw allow from LAN_CIDR` — только если
+  `LAN_CIDR` приватный (RFC1918). Для пустого или публичного CIDR эти правила
+  не добавляются, а установщик предупреждает.
+
+**Bind-адреса.** Порты в firewall — необходимое, но не достаточное условие:
+по умолчанию `PANEL_BIND`, `MIHOMO_BIND` и `DNS_BIND` равны `SERVER_IP`, и по
+`100.x.y.z` сервисы не отвечают. Для прямого доступа из tailnet задайте в
+`/etc/routeweave/.env`:
+
+- `PANEL_BIND`, `MIHOMO_BIND`, `DNS_BIND` — tailscale-адрес шлюза (`100.x.y.z`,
+  безопаснее) или `0.0.0.0` (осознанный opt-in: все интерфейсы, границей
+  остаётся `ROUTEWEAVE-IN`);
+- `PANEL_ALLOWED_HOSTS` — tailscale-IP и/или MagicDNS-имя, иначе панель
+  ответит `421`;
+- `MIHOMO_API='http://100.x.y.z:9090'` при bind на tailscale-адрес:
+  установщик уже записанное значение не пересчитывает;
+- `MIHOMO_ALLOW_LAN=yes` — иначе mixed-port `7890` слушает localhost и по
+  tailscale-адресу недоступен.
+
+Если LAN-интерфейса с приватной подсетью нет (VPS), сервисы остаются доступны
+через tailscale/WDTT/SSH-туннель; `doctor` в этом случае даёт WARN, а не FAIL.
 
 Если Tailscale установлен после Routeweave, повторите установщик:
 `sudo env INSTALL_TAILSCALE=yes bash install.sh` (поставит и настроит) или
