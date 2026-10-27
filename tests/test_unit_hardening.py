@@ -15,6 +15,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
 
+# Диагностика systemd-analyze в формате «/путь/к/юниту:строка: текст».
+_UNIT_DIAGNOSTIC = re.compile(
+    r"^(?P<path>[^:\s]+\.(?:service|socket|slice|timer|target|mount|automount"
+    r"|path|swap|device|scope)):\d+:"
+)
+
 
 def service(name):
     return (TEMPLATES / name).read_text(encoding="utf-8")
@@ -108,6 +114,19 @@ def test_panel_unit_keeps_its_exceptions():
     assert "ProtectSystem=strict" in text
 
 
+def is_foreign_unit_diagnostic(line, unit):
+    """Относится ли строка диагностики к другому юниту хоста.
+
+    systemd-analyze verify проверяет не только свой файл, но и зависимости,
+    поэтому на живом хосте в вывод попадают предупреждения о чужих юнитах
+    (например, «Support for option CPUAccounting= has been removed» из
+    xfs_scrub_all.service на systemd 258+). К проверяемому юниту такие строки
+    отношения не имеют.
+    """
+    match = _UNIT_DIAGNOSTIC.match(line.strip())
+    return bool(match) and Path(match.group("path")).name != unit
+
+
 @pytest.mark.skipif(
     shutil.which("systemd-analyze") is None, reason="systemd-analyze недоступен"
 )
@@ -130,9 +149,42 @@ def test_systemd_analyze_verify_has_no_syntax_errors(unit):
     )
     # Отсутствие бинарников (/usr/local/bin/mihomo и т.п.) — ожидаемо в
     # песочнице; синтаксических ошибок и неизвестных директив быть не должно.
+    # Чужие юниты хоста (зависимости) не наша зона ответственности.
     problems = [
         line
         for line in (proc.stdout + proc.stderr).splitlines()
-        if line.strip() and "is not executable" not in line
+        if line.strip()
+        and "is not executable" not in line
+        and not is_foreign_unit_diagnostic(line, unit)
     ]
     assert not problems, problems
+
+
+@pytest.mark.parametrize(
+    "line, unit, foreign",
+    [
+        (
+            (
+                "/usr/lib/systemd/system/xfs_scrub_all.service:26: Support for option "
+                "CPUAccounting= has been removed and it is ignored"
+            ),
+            "mihomo.service",
+            True,
+        ),
+        (
+            "/tmp/unit/mihomo.service:12: Unknown key name 'Foo'",
+            "mihomo.service",
+            False,
+        ),
+        ("mihomo.service:12: Unknown key name 'Foo'", "mihomo.service", False),
+        (
+            "Failed to prepare filename /etc/foo.service: Invalid argument",
+            "mihomo.service",
+            False,
+        ),
+        ("Unit mihomo.service has a bad unit file setting.", "mihomo.service", False),
+    ],
+)
+def test_foreign_unit_diagnostic_filter(line, unit, foreign):
+    # Фильтр обязан отбрасывать только чужие юниты и не прятать наши ошибки.
+    assert is_foreign_unit_diagnostic(line, unit) is foreign
