@@ -40,6 +40,8 @@ mihomo и zapret, генерирует конфиг, поднимает firewall
 - zashboard для соединений и трафика.
 - Опциональные tg-ws-proxy, WDTT-Plus и Tailscale.
 - Опциональный доступ к опубликованным портам из WAN (`WAN_INGRESS`).
+- Android-приложение «VPN Авто»: правила по доверенным Wi-Fi, автопереключение
+  Tailscale и WDTT-Plus, управление exit node.
 
 ## Требования
 
@@ -468,6 +470,15 @@ fake-ip `198.18.0.0/16` может конфликтовать с другим п
 
 Подробности, DNS и ограничения — в
 [`docs/tailscale-exit-node.md`](docs/tailscale-exit-node.md).
+
+## Опционально: Android-приложение
+
+В каталоге [`android/`](android/) — приложение «VPN Авто» для телефона. Правила:
+доверенная Wi-Fi → VPN выключен, незнакомая Wi-Fi → Tailscale + exit node,
+мобильная сеть → WDTT-Plus. Есть ручные команды для обоих VPN, список доверенных
+сетей и watchdog exit node. Готовый APK — в
+[Releases](https://github.com/Maxer1151/routeweave/releases), сборка и
+настройка — в [`android/README.md`](android/README.md).
 
 ## Порты
 

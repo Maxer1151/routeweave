@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VPN Авто</string>
+    <string name="app_version">1.2</string>
+    <string name="subtitle">Переключение Tailscale и WDTT Plus по типу сети и доверенным Wi-Fi</string>
+
+    <string name="section_status">Статус</string>
+    <string name="section_trusted_wifi">Доверенные Wi-Fi</string>
+    <string name="section_exit">Exit node</string>
+    <string name="section_rules">Правила</string>
+    <string name="section_diagnostics">Диагностика</string>
+    <string name="section_setup">Настройка</string>
+
+    <string name="label_network">Сеть</string>
+    <string name="label_vpn">VPN</string>
+    <string name="label_rule">Правило</string>
+    <string name="label_last">Последнее действие</string>
+    <string name="value_dash">—</string>
+
+    <string name="auto_title">Автопереключение</string>
+    <string name="auto_switch">Включить автопереключение</string>
+    <string name="auto_summary">Следит за сетью и переключает VPN автоматически</string>
+    <string name="monitor_running">Мониторинг активен</string>
+    <string name="monitor_stopped">Мониторинг выключен</string>
+    <string name="btn_apply">Применить сейчас</string>
+    <string name="btn_applying">Применяю…</string>
+
+    <string name="hero_badge_ok">По правилу</string>
+    <string name="hero_badge_switch">Нужно переключить</string>
+    <string name="hero_badge_applying">Переключение…</string>
+    <string name="hero_badge_error">Ошибка</string>
+    <string name="hero_badge_wait">Ожидание</string>
+
+    <string name="trusted_title">Учитывать авто-паузу WDTT Plus на его доверенных сетях</string>
+    <string name="trusted_wifi_summary">Сети из этого списка считаются доверенными: на них VPN отключается.</string>
+    <string name="trusted_hint">Список хранится в «VPN Авто» и не связан со списком «Доверенных сетей» в WDTT Plus. Доверенная Wi-Fi → VPN выключен; незнакомая Wi-Fi или недоступный SSID → Tailscale с exit node; мобильная сеть → WDTT Plus.</string>
+
+    <string name="label_current_ssid">Текущий SSID: %1$s</string>
+    <string name="ssid_trusted">Доверенная</string>
+    <string name="ssid_untrusted">Не доверена</string>
+    <string name="ssid_no_access">Нет доступа</string>
+    <string name="ssid_no_wifi">Wi-Fi не подключён</string>
+    <string name="ssid_location_off">Геолокация выключена</string>
+    <string name="ssid_unavailable">SSID недоступен</string>
+    <string name="trusted_list_hint">По одной сети в строке или через запятую</string>
+    <string name="btn_add_current">Добавить текущую</string>
+    <string name="btn_save_ssids">Сохранить</string>
+    <string name="trusted_count">Сохранено сетей: %1$d</string>
+    <string name="btn_ssid_permission">Разрешить доступ к местоположению</string>
+    <string name="btn_ssid_permission_granted">Доступ выдан</string>
+    <string name="btn_ssid_location_settings">Открыть настройки геолокации</string>
+    <string name="btn_ssid_background_location">Разрешить доступ всегда</string>
+    <string name="network_wifi_ssid">%1$s · %2$s</string>
+    <string name="network_wifi_no_access">Wi-Fi · нет доступа к SSID</string>
+    <string name="network_wifi_location_off">Wi-Fi · геолокация выключена</string>
+    <string name="network_wifi_ssid_unavailable">Wi-Fi · SSID недоступен</string>
+
+    <string name="exit_manage_title">Управлять exit node Tailscale</string>
+    <string name="exit_manage_summary">Включать exit node на незнакомой Wi-Fi и снимать при потере интернета</string>
+    <string name="exit_name_label">Имя ноды (как в списке Exit Nodes Tailscale)</string>
+    <string name="exit_name_hint">routeweave-exit</string>
+    <string name="exit_ip_label">Tailnet-IP сервера для проверки</string>
+    <string name="exit_ip_hint">100.64.0.1</string>
+    <string name="exit_allow_lan_title">Разрешить доступ к локальной сети</string>
+    <string name="exit_watchdog_title">Снимать при потере интернета</string>
+    <string name="btn_exit_off">Снять сейчас</string>
+    <string name="btn_exit_on">Включить сейчас</string>
+    <string name="exit_hint">Tailscale при этом остаётся подключён, доступ к домашней сети сохраняется. Имя должно совпадать с названием устройства в списке Exit Nodes в приложении Tailscale. Команда применяется, только когда Tailscale подключён; иначе она выполнится позже, при подключении.</string>
+
+    <string name="exit_state_disabled">Управление exit node выключено</string>
+    <string name="exit_state_no_tailscale">Tailscale не установлен</string>
+    <string name="exit_state_no_vpn">Tailscale не подключён — exit node не действует</string>
+    <string name="exit_state_on">Exit node: %1$s • активен</string>
+    <string name="exit_state_off">Exit node не активен</string>
+    <string name="exit_state_retry">повтор через %1$d мин</string>
+    <string name="exit_state_pending">ждёт подключения Tailscale</string>
+    <string name="exit_state_unconfirmed">команда отправлена, exit node ещё не активен</string>
+
+    <string name="btn_tailscale_on">Tailscale вкл</string>
+    <string name="btn_tailscale_off">Tailscale выкл</string>
+    <string name="btn_wdtt_on">WDTT вкл</string>
+    <string name="btn_wdtt_off">WDTT выкл</string>
+    <string name="btn_open_tailscale">Открыть Tailscale</string>
+    <string name="btn_open_wdtt">Открыть WDTT Plus</string>
+
+    <string name="diag_tailscale">Tailscale</string>
+    <string name="diag_wdtt">WDTT Plus</string>
+    <string name="diag_notifications">Уведомления</string>
+    <string name="diag_battery">Оптимизация батареи</string>
+    <string name="diag_ssid">Доступ к SSID</string>
+    <string name="btn_configure">Настроить</string>
+
+    <string name="diag_installed">Установлен</string>
+    <string name="diag_not_installed">Не установлен</string>
+    <string name="diag_notif_allowed">Разрешены</string>
+    <string name="diag_notif_denied">Запрещены</string>
+    <string name="diag_battery_off">Отключена</string>
+    <string name="diag_battery_on">Включена</string>
+    <string name="diag_allowed">Разрешён</string>
+    <string name="diag_denied">Нет доступа</string>
+    <string name="diag_location_off">Геолокация выключена</string>
+    <string name="diag_background_denied">Только при использовании</string>
+
+    <string name="setup_text">1. Tailscale: войдите в аккаунт и разрешите VPN-подключение.\n2. WDTT Plus: импортируйте профиль и разрешите VPN.\n3. Разрешите доступ к местоположению и выберите «Разрешить всегда»: без этого Android скрывает имя Wi-Fi.\n4. Добавьте домашнюю сеть в «Доверенные Wi-Fi».\n5. Разрешите уведомления и отключите оптимизацию батареи для «VPN Авто».\n6. Включите автопереключение.</string>
+
+    <string name="footer_version">Версия 1.2</string>
+
+    <string name="channel_monitor_name">Мониторинг VPN</string>
+    <string name="channel_monitor_desc">Постоянное уведомление о текущей сети и VPN</string>
+    <string name="channel_alerts_name">Оповещения VPN</string>
+    <string name="channel_alerts_desc">Ошибки переключения VPN</string>
+    <string name="notif_rule">Правило: %1$s</string>
+    <string name="notif_error_title">VPN Авто: требуется внимание</string>
+    <string name="action_apply">Применить</string>
+    <string name="action_open_app">Открыть приложение</string>
+    <string name="action_open_wdtt">Открыть WDTT</string>
+    <string name="action_open_tailscale">Открыть Tailscale</string>
+
+    <string name="toast_other_vpn">Сначала отключите другой VPN</string>
+    <string name="toast_not_installed">Приложение не установлено</string>
+    <string name="toast_open_failed">Не удалось открыть приложение</string>
+    <string name="toast_service_failed">Не удалось запустить мониторинг</string>
+    <string name="toast_settings_failed">Не удалось открыть настройки батареи</string>
+    <string name="toast_location_settings_failed">Не удалось открыть настройки геолокации</string>
+    <string name="toast_app_settings_failed">Не удалось открыть настройки приложения</string>
+    <string name="toast_already_connected">Этот VPN уже подключён</string>
+    <string name="toast_not_connected">Этот VPN не подключён</string>
+
+    <string name="toast_ssid_unavailable">SSID недоступен: подключитесь к Wi-Fi</string>
+    <string name="toast_location_disabled">Включите геолокацию, иначе Android скрывает имя Wi-Fi</string>
+    <string name="toast_ssid_permission_denied">Без доступа к местоположению нельзя определить SSID</string>
+    <string name="toast_ssid_permission_granted">Доступ к местоположению выдан</string>
+    <string name="toast_background_location_hint">В настройках приложения: Разрешения → Местоположение → «Разрешить всегда»</string>
+    <string name="toast_background_location_granted">Доступ к местоположению в фоне выдан</string>
+    <string name="toast_background_location_denied">Без доступа в фоне домашняя сеть может не определиться</string>
+    <string name="toast_ssid_added">Текущая сеть добавлена в доверенные</string>
+    <string name="toast_ssid_already">Эта сеть уже в списке</string>
+    <string name="toast_ssid_saved">Список доверенных сетей сохранён</string>
+</resources>

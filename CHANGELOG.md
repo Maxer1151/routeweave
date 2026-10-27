@@ -8,6 +8,10 @@
 
 ### Добавлено
 
+- Android-приложение «VPN Авто» (`android/`): правила по типу сети и доверенным
+  Wi-Fi (доверенная — VPN выключен, незнакомая — Tailscale + exit node,
+  мобильная — WDTT-Plus), ручные команды, список доверенных SSID и watchdog exit
+  node. APK публикуется в релизах.
 - Прямой NAT-режим exit node Tailscale (`TS_EXIT_MODE=nat`): трафик из
   `tailscale0` метится в mangle (`0x100000`), уходит в WAN по `ip rule`
   priority 8992 и маскарадится в `LAN_IFACE` — без userspace-стека mihomo.

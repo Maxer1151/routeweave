@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="rule_wifi_trusted">Доверенная Wi-Fi → VPN выключен</string>
+    <string name="rule_wifi_untrusted">Wi-Fi → Tailscale + exit node</string>
+    <string name="rule_mobile_wdtt">Моб. сеть → WDTT Plus</string>
+    <string name="rule_wait_network">Ожидание сети</string>
+</resources>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Базовые цвета: имена используются уведомлениями. -->
+    <color name="colorBackground">#0F1419</color>
+    <color name="colorCard">#161B22</color>
+    <color name="colorCardSoft">#1C2430</color>
+    <color name="colorStroke">#26303D</color>
+    <color name="colorAccent">#2F81F7</color>
+    <color name="colorText">#E6EDF3</color>
+    <color name="colorTextSecondary">#8B949E</color>
+    <color name="colorGreen">#3FB950</color>
+    <color name="colorRed">#F85149</color>
+    <color name="colorWhite">#FFFFFF</color>
+
+    <!-- Акценты состояний. -->
+    <color name="colorAmber">#D29922</color>
+    <color name="colorPurple">#A371F7</color>
+    <color name="colorMuted">#6E7681</color>
+
+    <!-- Поля ввода и hero-градиент. -->
+    <color name="colorInput">#0D1117</color>
+    <color name="colorInputStroke">#30363D</color>
+    <color name="colorHeroStart">#1B2838</color>
+    <color name="colorHeroEnd">#121A24</color>
+
+    <!-- Мягкие заливки для pill-бейджей (alpha около 12%). -->
+    <color name="colorGreenSoft">#1F3FB950</color>
+    <color name="colorAmberSoft">#1FD29922</color>
+    <color name="colorBlueSoft">#1F2F81F7</color>
+    <color name="colorPurpleSoft">#1FA371F7</color>
+    <color name="colorRedSoft">#1FF85149</color>
+    <color name="colorGraySoft">#1F8B949E</color>
+
+    <!-- Ripple для кнопок. -->
+    <color name="colorRipple">#33FFFFFF</color>
+    <color name="colorRippleDark">#1FFFFFFF</color>
+    <color name="colorTransparent">#00000000</color>
+
+    <color name="ic_launcher_background">#0F1419</color>
+</resources>
