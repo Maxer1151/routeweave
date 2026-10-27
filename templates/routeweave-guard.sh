@@ -133,7 +133,7 @@ PROBE_OUT=""
 PROBE_RC=0
 REASON=""
 STATE=0
-# 1 — check_all вызван как quiet: только флаги, без вывода.
+# 1 — подавить вывод problem/report (на время внутренних проверок).
 QUIET=0
 # 1 — предохранитель уже сработал: больше ни одного действия до конца прогона.
 FUSE_BLOWN=0
@@ -727,10 +727,8 @@ check_structural() {
   fi
 }
 
-check_all() { # check_all [quiet] — структурные проверки и пробы трафика
-  local quiet="${1:-}"
+check_all() { # check_all — структурные проверки и пробы трафика
   QUIET=0
-  if [ -n "$quiet" ]; then QUIET=1; fi
   check_structural
 
   if [ "$PROBE_DONE" -eq 0 ]; then
