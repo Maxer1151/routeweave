@@ -271,7 +271,7 @@ sudo-allowlist панели без wildcard. Карточки нет, если T
 
 - тянет Amnezia JSON (RU-домены) и `geoblock.lst` (гео-домены);
 - нормализует записи, подмешивает custom-списки;
-- исключает dpi-домены из geo;
+- исключает dpi-домены и домены из `ru-direct-custom.txt` из geo;
 - пишет `geo.txt` и `ru-direct.txt`;
 - перезагружает mihomo через API (`PUT /providers/rules/...`);
 - при ошибке API перезапускает mihomo.
@@ -285,6 +285,13 @@ journalctl -u routeweave-lists-update -n 50
 
 Важно: `geo.txt` и `ru-direct.txt` — генерируемые файлы. Правьте
 `geo-custom.txt`, `ru-direct-custom.txt` и `dpi.txt`.
+
+Приоритет списков: `dpi.txt` (zapret) > `geo-custom.txt` (SOCKS) >
+`ru-direct-custom.txt` (direct) > сгенерированные `geo.txt` / `ru-direct.txt`.
+Домен, который есть и в geo-листе, и в `ru-direct-custom.txt`, пойдёт
+напрямую: апдейтер вычитает его из апстримной части geo вместе с поддоменами.
+`geo-custom.txt` сильнее — запись оттуда остаётся в geo и уводит домен в
+SOCKS.
 
 ## Сторож маршрутизации и снимок состояния
 
@@ -802,7 +809,10 @@ geo/SOCKS, DPI и fake-ip DNS. `nat` делает прямой MASQUERADE в WAN
   `/etc/routeweave/zapret.conf`.
 - **Таймер затёр ручные правки.** Правьте `geo-custom.txt`,
   `ru-direct-custom.txt` и `dpi.txt`, а не генерируемые `geo.txt` /
-  `ru-direct.txt`.
+  `ru-direct.txt`. Домен из geo-листа, который должен идти напрямую, добавьте
+  в `ru-direct-custom.txt` и примените изменения (таймер или
+  `sudo systemctl start routeweave-lists-update.service`); `geo-custom.txt`
+  сильнее и оставит домен в geo (SOCKS).
 - **Панель не пускает.** Проверьте `PANEL_PASS` в `.env`; пустой пароль —
   панель не стартует. `421` означает неизвестный `Host` (добавьте его в
   `PANEL_ALLOWED_HOSTS`), `429` — сработал `PANEL_RATE_LIMIT` или

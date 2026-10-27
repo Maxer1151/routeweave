@@ -612,3 +612,131 @@ def test_run_fails_when_ru_below_min_count(tmp_path):
         geo_hosts
     )
     assert not (lists / "ru-direct.txt").exists()
+
+
+# --- ru-direct-custom сильнее апстримного geo ------------------------------
+
+
+def test_geo_subtracts_ru_direct_custom(tmp_path):
+    """Домен из ru-direct-custom вычитается из апстрима geo и идёт напрямую."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    ru_hosts = [f"h{i}.ru{i % 5}.example" for i in range(1200)]
+    geo_hosts = [
+        "4pda.to",
+        "www.4pda.to",
+        "not4pda.to",
+        *(f"g{i}.blocked{i % 7}.example" for i in range(50)),
+    ]
+    fixtures = make_fixtures(tmp_path, ru_hosts=ru_hosts, geo_hosts=geo_hosts)
+    (lists / "ru-direct-custom.txt").write_text(
+        "# явный direct-выбор\n4pda.to\ndirect.example\n", encoding="utf-8"
+    )
+    (etc / ".env").write_text(
+        "MIHOMO_API='http://10.0.0.5:9090/'\n", encoding="utf-8"
+    )
+    env = {"PATH": f"{bin_dir}:{BASE_ENV['PATH']}", "FIXTURES": str(fixtures)}
+
+    proc = run_script(etc, **env)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    geo = (lists / "geo.txt").read_text(encoding="utf-8").splitlines()
+    assert "+.4pda.to" not in geo
+    assert "+.www.4pda.to" not in geo
+    # Вычитание — по границе метки: not4pda.to не задет.
+    assert "+.not4pda.to" in geo
+    assert geo == expected_list(
+        [h for h in geo_hosts if h not in ("4pda.to", "www.4pda.to")]
+    ).splitlines()
+    ru = (lists / "ru-direct.txt").read_text(encoding="utf-8").splitlines()
+    assert "+.4pda.to" in ru
+    assert "+.direct.example" in ru
+    assert len(ru) == len(ru_hosts) + 2
+
+    # При тех же входных данных повторный прогон ничего не меняет.
+    again = run_script(etc, **env)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "SAME geo" in again.stdout
+    assert "Изменений нет" in again.stdout
+
+
+def test_geo_custom_wins_over_ru_direct_custom(tmp_path):
+    """geo-custom сильнее: вычитание не трогает его часть geo-листа."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    ru_hosts = [f"h{i}.ru{i % 5}.example" for i in range(1200)]
+    geo_hosts = [
+        "blocked.example",
+        *(f"g{i}.blocked{i % 7}.example" for i in range(50)),
+    ]
+    fixtures = make_fixtures(tmp_path, ru_hosts=ru_hosts, geo_hosts=geo_hosts)
+    (lists / "ru-direct-custom.txt").write_text("blocked.example\n", encoding="utf-8")
+    (lists / "geo-custom.txt").write_text(
+        "stay.blocked.example\n", encoding="utf-8"
+    )
+    (etc / ".env").write_text(
+        "MIHOMO_API='http://10.0.0.5:9090/'\n", encoding="utf-8"
+    )
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    geo = (lists / "geo.txt").read_text(encoding="utf-8").splitlines()
+    assert "+.stay.blocked.example" in geo
+    assert "+.blocked.example" not in geo
+    assert geo == expected_list(
+        [h for h in geo_hosts if h != "blocked.example"]
+        + ["stay.blocked.example"]
+    ).splitlines()
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "ru_hosts", "error"),
+    [
+        (
+            {"FAIL_RU": "1"},
+            [f"h{i}.ru{i % 5}.example" for i in range(1200)],
+            "ОШИБКА: ru-direct: fetch/json",
+        ),
+        (
+            {},
+            ["a.example"],
+            "ОШИБКА: ru-direct: 1 < 1000",
+        ),
+    ],
+)
+def test_geo_subtracts_ru_direct_custom_when_ru_source_fails(
+    tmp_path, extra_env, ru_hosts, error
+):
+    """Вычитание работает и при отказе RU-источника: geo пишется, код 1."""
+    etc, lists = make_lists(tmp_path)
+    bin_dir = install_tools(tmp_path)
+    geo_hosts = [
+        "4pda.to",
+        "www.4pda.to",
+        *(f"g{i}.blocked{i % 7}.example" for i in range(50)),
+    ]
+    fixtures = make_fixtures(tmp_path, ru_hosts=ru_hosts, geo_hosts=geo_hosts)
+    (lists / "ru-direct-custom.txt").write_text("4pda.to\n", encoding="utf-8")
+    (etc / ".env").write_text(
+        "MIHOMO_API='http://10.0.0.5:9090/'\n", encoding="utf-8"
+    )
+
+    proc = run_script(
+        etc,
+        PATH=f"{bin_dir}:{BASE_ENV['PATH']}",
+        FIXTURES=str(fixtures),
+        **extra_env,
+    )
+
+    assert proc.returncode != 0, proc.stdout
+    assert error in proc.stdout
+    assert "reload geo-domains -> 204" in proc.stdout
+    assert (lists / "geo.txt").read_text(encoding="utf-8") == expected_list(
+        [h for h in geo_hosts if h not in ("4pda.to", "www.4pda.to")]
+    )
+    assert not (lists / "ru-direct.txt").exists()

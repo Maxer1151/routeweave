@@ -94,6 +94,10 @@ fetch(){ # fetch <url> <out>: прямое соединение, при нали
 
 norm(){ tr -d '\r' | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//;s/^\*\.//;s/^\+\.//;s/^\.//' | grep -E '^[A-Za-z0-9_.-]+\.[A-Za-z]{2,}$' | LC_ALL=C sort -u || true; }
 
+filter_list(){ # filter_list <list> <exclude>: убрать записи и их поддомены (граница метки)
+  awk -v f="$2" 'BEGIN{while((getline d < f)>0)D[d]=1}{g=$0;s=0;for(x in D)if(g==x||(length(g)>length(x)&&index(g,"."x)==length(g)-length(x))){s=1;break}if(!s)print g}' "$1"
+}
+
 put(){ # put <new> <dest> <label>: staging + chmod/chown + атомарный mv
   local n=$1 d=$2 l=$3 t
   # cmp только для обычного файла: чтение через симлинк недопустимо.
@@ -220,12 +224,16 @@ main(){
 
   T=$(mktemp -d)
   trap 'rm -rf -- "$T"' EXIT
+  # Явный direct-выбор нужен и geo-ветке: он вычитается из апстримной части
+  # даже тогда, когда RU-источник не скачался или не прошёл порог.
+  : > "$T/ruc"
+  norm <"$L/ru-direct-custom.txt" > "$T/ruc" || true
   # R/G: 1 — источник обновлён. rfail/gfail: 1 — источник отказал и итог не
   # может считаться успешным, даже если второй источник обновился.
   local R=0 G=0 n st=0 rfail=0 gfail=0
   if fetch https://raw.githubusercontent.com/lib4u/amnezia-tunneling-ru/main/amnezia.json "$T/a.json" && jq -e . "$T/a.json" >/dev/null 2>&1; then
     jq -r '.[].hostname // empty' "$T/a.json" | norm > "$T/ru"; n=$(wc -l <"$T/ru")
-    if [ "$n" -ge 1000 ]; then norm <"$L/ru-direct-custom.txt" > "$T/ruc" || true
+    if [ "$n" -ge 1000 ]; then
       cat "$T/ru" "$T/ruc" | LC_ALL=C sort -u | sed 's/^/+./' > "$T/ruf"
       st=0
       put "$T/ruf" "$L/ru-direct.txt" ru-direct || st=$?
@@ -236,8 +244,18 @@ main(){
   else log "ОШИБКА: ru-direct: fetch/json"; rfail=1; fi
   if fetch https://raw.githubusercontent.com/Internet-Helper/Unblock-for-Russia/main/geoblock.lst "$T/g.lst"; then
     norm <"$T/g.lst" > "$T/g"; n=$(wc -l <"$T/g")
-    if [ "$n" -ge 50 ]; then norm <"$L/dpi.txt" > "$T/dpi" || true; norm <"$L/geo-custom.txt" > "$T/gc" || true
-      cat "$T/g" "$T/gc" | LC_ALL=C sort -u | awk -v f="$T/dpi" 'BEGIN{while((getline d < f)>0)D[d]=1}{g=$0;s=0;for(x in D)if(g==x||(length(g)>length(x)&&index(g,"."x)==length(g)-length(x))){s=1;break}if(!s)print g}' | sed 's/^/+./' > "$T/gf"
+    if [ "$n" -ge 50 ]; then
+      # Пустые файлы создаются заранее: dpi.txt может отсутствовать, а фильтр
+      # читает исключения из файлов.
+      : > "$T/dpi"; : > "$T/gc"
+      norm <"$L/dpi.txt" > "$T/dpi" || true; norm <"$L/geo-custom.txt" > "$T/gc" || true
+      log "geo: исключаются dpi.txt и ru-direct-custom.txt"
+      # dpi и явный direct вычитаются только из апстримной части, поэтому
+      # geo-custom остаётся сильнее ru-direct-custom.
+      LC_ALL=C sort -u "$T/dpi" "$T/ruc" > "$T/gex"
+      filter_list "$T/g" "$T/gex" > "$T/gm"
+      filter_list "$T/gc" "$T/dpi" > "$T/gcm"
+      cat "$T/gm" "$T/gcm" | LC_ALL=C sort -u | sed 's/^/+./' > "$T/gf"
       st=0
       put "$T/gf" "$L/geo.txt" geo || st=$?
       if [ "$st" = 0 ]; then G=1; elif [ "$st" != 1 ]; then
