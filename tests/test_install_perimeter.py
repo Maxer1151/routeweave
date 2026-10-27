@@ -221,6 +221,33 @@ def test_wan_mark_reserved_message_and_env_check():
     assert "Метка connmark для WAN_INGRESS (например 0x200000)" in text
 
 
+def test_wan_mark_migrates_legacy_env_default():
+    """Старый .env из main с 0x40000 не должен валить установку.
+
+    Миграция допустима только для значения из файла: явный 0x40000 в
+    окружении установщика остаётся осознанным override и отвергается
+    valid_wan_mark (см. test_valid_wan_mark_rejects_reserved).
+    """
+    text = INSTALL.read_text(encoding="utf-8")
+    env_mark = 'WAN_INGRESS_MARK_ENV="${WAN_INGRESS_MARK:-}"'
+    assert env_mark in text
+    # Источник запоминается до чтения .env, иначе различие потеряется.
+    env_pos = text.find(env_mark)
+    get_pos = text.find(
+        'WAN_INGRESS_MARK=$(env_get WAN_INGRESS_MARK', env_pos
+    )
+    assert get_pos > env_pos
+    assert '[ -z "$WAN_INGRESS_MARK_ENV" ]' in text
+    assert '[ "${WAN_INGRESS_MARK,,}" = "0x40000" ]' in text
+    assert "WAN_INGRESS_MARK=0x200000" in text
+    assert "мигрирую на 0x200000" in text
+    # Миграция не отменяет строгую валидацию остальных зарезервированных меток.
+    assert (
+        'require_valid_optional WAN_INGRESS_MARK "$WAN_INGRESS_MARK" '
+        "valid_wan_mark" in text
+    )
+
+
 # ------------------------------------------------------------ MIHOMO_API
 
 
@@ -416,3 +443,219 @@ def test_port53_occupied_marks_failure():
     assert "FAIL=1" in block
     assert "PORT53_BLOCKED=1" in block
     assert "порт 53 занят неизвестным сервисом" in text
+
+
+# ---------------------------------------------------------------- LAN_CIDR
+
+
+def lan_cidr_script():
+    """Настоящие helpers нормализации: код возврата и stdout — вердикт."""
+    return (
+        'warn() { printf "WARN:%s\\n" "$*" >&2; }\n'
+        + extract_function("valid_cidr")
+        + extract_function("canonical_cidr")
+        + extract_function("is_private_cidr")
+        + extract_function("normalize_lan_cidr")
+        + '\nnormalize_lan_cidr "$1"\n'
+    )
+
+
+@pytest.mark.parametrize(
+    ("cidr", "expected"),
+    [
+        ("10.0.0.0/8", True),
+        ("10.20.30.0/24", True),
+        ("172.16.0.0/12", True),
+        ("172.31.255.0/24", True),
+        ("192.168.0.0/16", True),
+        ("192.168.1.0/24", True),
+        ("172.32.0.0/16", False),  # вне 172.16/12
+        ("192.169.0.0/16", False),  # вне 192.168/16
+        ("203.0.113.0/24", False),  # публичный TEST-NET-3
+        ("127.0.0.0/8", False),  # loopback не RFC1918
+        ("169.254.0.0/16", False),  # link-local не RFC1918
+        ("0.0.0.0/0", False),  # нулевая сеть
+    ],
+)
+def test_is_private_cidr_only_rfc1918(cidr, expected):
+    # is_private в ipaddress включает loopback/link-local, поэтому helper
+    # обязан проверять именно три RFC1918-сети.
+    script = extract_function("is_private_cidr") + '\nis_private_cidr "$1"\n'
+    proc = run_bash(script, cidr)
+    assert (proc.returncode == 0) is expected, (cidr, proc.returncode, proc.stderr)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("192.168.1.5/24", "192.168.1.0/24"),  # хост-биты сброшены
+        ("10.1.2.3/8", "10.0.0.0/8"),
+        ("172.20.5.5/16", "172.20.0.0/16"),
+        ("192.168.1.5/24 10.1.2.3/8", "192.168.1.0/24 10.0.0.0/8"),
+        ("10.1.2.3/8,192.168.1.5/24", "10.0.0.0/8 192.168.1.0/24"),
+        ("10.0.0.0/8 10.0.0.0/8", "10.0.0.0/8"),  # дубликаты схлопнуты
+    ],
+)
+def test_normalize_lan_cidr_canonicalizes_private_ranges(raw, expected):
+    proc = run_bash(lan_cidr_script(), raw)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "203.0.113.0/24",  # публичный
+        "8.8.8.8/32",  # публичный
+        "0.0.0.0/0",  # нулевая сеть
+        "127.0.0.0/8",  # loopback
+        "169.254.0.0/16",  # link-local
+        "not-a-cidr",  # мусор
+        "fe80::/10",  # IPv6 не поддерживается
+    ],
+)
+def test_normalize_lan_cidr_drops_non_rfc1918(raw):
+    proc = run_bash(lan_cidr_script(), raw)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    assert "LAN_CIDR" in proc.stderr
+
+
+def test_normalize_lan_cidr_keeps_private_part_of_mixed_list():
+    proc = run_bash(lan_cidr_script(), "203.0.113.0/24,10.0.0.0/8")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "10.0.0.0/8"
+    assert "203.0.113.0/24" in proc.stderr
+
+
+def test_lan_cidr_read_derived_and_written():
+    text = INSTALL.read_text(encoding="utf-8")
+    # Читается из .env/окружения сразу после LAN_IFACE и нормализуется до
+    # первого использования (ufw-блок идёт намного ниже).
+    assert 'LAN_CIDR=$(env_get LAN_CIDR "${LAN_CIDR:-}")' in text
+    assert 'LAN_CIDR=$(normalize_lan_cidr "$LAN_CIDR")' in text
+    assert text.find('LAN_CIDR=$(env_get LAN_CIDR') < text.find(
+        'lan_cidr_is_private "$LAN_CIDR"'
+    )
+    # Канонизация — через ipaddress (strict=False сбрасывает хост-биты).
+    canon = extract_function("canonical_cidr")
+    assert "ipaddress.IPv4Network(sys.argv[1], strict=False)" in canon
+    private = extract_function("is_private_cidr")
+    for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        assert net in private
+    # Фолбэк из физического интерфейса: connected-маршрут и адрес NIC.
+    assert 'ip -4 route show dev "$DETECTED_IFACE" scope link' in text
+    assert 'ip -4 -o addr show dev "$DETECTED_IFACE" scope global' in text
+    assert 'if is_private_cidr "$__lan_cidr"; then' in text
+    # Публичный NIC: явное предупреждение про доступ только через туннели.
+    assert "публичный интерфейс" in text
+    assert "Tailscale/WDTT/SSH-туннель" in text
+    # Запись в свежий .env и upsert существующего (в конце списка, чтобы не
+    # ломать статическую проверку "PANEL_BIND MIHOMO_API SSH_PORT").
+    assert 'env_line LAN_CIDR "$LAN_CIDR"' in text
+    assert "PANEL_BIND MIHOMO_API SSH_PORT LAN_CIDR; do" in text
+
+
+def test_ufw_lan_rules_are_guarded_by_private_check():
+    text = INSTALL.read_text(encoding="utf-8")
+    # Повторного вычисления LAN_CIDR из ip addr в ufw-блоке больше нет.
+    assert 'LAN_CIDR=$(ip -4 addr show' not in text
+    guard = 'if [ -n "$LAN_CIDR" ] && lan_cidr_is_private "$LAN_CIDR"; then'
+    start = text.find(guard)
+    assert start != -1, "ufw: нет guard-проверки приватности LAN_CIDR"
+    # Разрешение LAN стоит ровно один раз и только внутри guard-блока.
+    ufw_lan = 'ufw route allow in on "$LAN_IFACE"'
+    assert text.count(ufw_lan) == 1
+    else_pos = text.find("\n  else\n", start)
+    assert else_pos > start, "guard-блок LAN_CIDR без else"
+    guarded = text[start:else_pos]
+    assert ufw_lan in guarded
+    assert "LAN_OPEN=1" in guarded
+    # Публичный/пустой список обнуляется до цикла открытия портов.
+    assert 'LAN_CIDR=""' in text[else_pos : text.find("PORTS_TCP=", else_pos)]
+    # LAN_CIDR раскрывается по словам: каждое правило — одна сеть.
+    assert 'for src in "$WG_SUBNET" $LAN_CIDR "${TS_CIDR:-}"; do' in text
+    assert '"$WG_SUBNET" "$LAN_CIDR"' not in text
+    # Итоговая сводка не врёт про открытый LAN при пустом списке.
+    assert 'LAN: не открыт' in text
+    assert 'if [ "$LAN_OPEN" = 1 ]; then' in text
+
+
+# ------------------------------------------------------- порядок ip_forward
+
+
+def test_ip_forward_orig_captured_before_forwarding_enabled():
+    """ip_forward.orig снимается до fw-base.sh/Tailscale/WDTT.
+
+    Раньше захват стоял в ufw-разделе — после install_tailscale, чей
+    `systemctl restart routeweave-firewall` уже включал ip_forward=1, и при
+    переустановке в файл попадала единица вместо исходного значения.
+    """
+    text = INSTALL.read_text(encoding="utf-8")
+    marker = 'if [ ! -e "$ETC/ip_forward.orig" ]'
+    assert text.count(marker) == 1, "захват ip_forward.orig продублирован"
+    assert text.count("tr -d '\\n' < /proc/sys/net/ipv4/ip_forward") == 1
+    capture = text.find(marker)
+    # Каталог $ETC уже создан, но параметры ещё не читались/не спрашивались.
+    etc = text.find('install -d -m 0755 "$ETC"')
+    assert 0 <= etc < capture
+
+    for needle in (
+        "install_tailscale()",  # определение: внутри перезапуск firewall
+        "install_tailscale || FAIL=1",
+        "install_wdtt || FAIL=1",
+    ):
+        idx = text.find(needle)
+        assert idx != -1, f"не найден {needle}"
+        assert capture < idx, f"{needle} раньше захвата ip_forward.orig"
+
+    # Перезапуски внутри определений функций не выполняются при объявлении,
+    # поэтому проверяем поток установки: строки верхнего уровня и вызов
+    # внутри install_tailscale (именно он ломал переустановку).
+    top_level = [
+        m.start()
+        for m in re.finditer(
+            r"^systemctl restart routeweave-firewall", text, re.MULTILINE
+        )
+    ]
+    assert top_level, "нет перезапуска routeweave-firewall в потоке установки"
+    assert capture < min(top_level)
+    ts_def = text.find("install_tailscale()")
+    ts_restart = text.find("systemctl restart routeweave-firewall", ts_def)
+    assert ts_restart != -1
+    assert capture < ts_restart
+
+
+# ------------------------------------------------------------ PANEL_BIND
+
+
+def test_panel_bind_wildcard_warns_after_validation():
+    text = INSTALL.read_text(encoding="utf-8")
+    guard = 'if [ "$PANEL_BIND" = "0.0.0.0" ]; then'
+    start = text.find(guard)
+    assert start != -1, "нет предупреждения для PANEL_BIND=0.0.0.0"
+    # Предупреждение стоит после require_valid PANEL_BIND.
+    assert text.find('require_valid PANEL_BIND "$PANEL_BIND"') < start
+    end = text.find("\nfi\n", start)
+    assert end > start
+    block = text[start:end]
+    assert "слушает все интерфейсы" in block
+    assert "ROUTEWEAVE-IN" in block
+    assert "при его остановке порт открыт" in block
+    assert "tailscale" in block
+
+
+# --------------------------------------------------------------- пароль
+
+
+def test_generated_panel_password_printed_only_in_tty():
+    text = INSTALL.read_text(encoding="utf-8")
+    guard = 'if [ -t 1 ] && [ "$PANEL_PASS_GENERATED" = 1 ]; then'
+    pos = text.find(guard)
+    assert pos != -1
+    # Проверка TTY и признак генерации — в одной условной конструкции.
+    assert "[ -t 1 ]" in text[pos : pos + 120]
+    assert "PANEL_PASS_GENERATED" in text[pos : pos + 120]
+    assert "см. $ETC/.env → PANEL_PASS" in text
+    # --help больше не обещает пароль в логах/пайпах.
+    assert "в пайпе/логе/CI его нет" in text

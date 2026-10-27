@@ -112,8 +112,9 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
   PANEL_PASS     — пароль входа в веб-панель (пишется в .env);
   MIHOMO_SECRET  — Bearer-секрет API mihomo/zashboard;
   TG_SECRET      — секрет MTProto-прокси (только при INSTALL_TGWS=yes).
-Сгенерированный PANEL_PASS печатается в итоговой сводке; остальные секреты
-остаются только в .env.
+Сгенерированный PANEL_PASS печатается в итоговой сводке только при запуске
+в терминале ([ -t 1 ]); в пайпе/логе/CI его нет — смотрите .env. Остальные
+секреты остаются только в .env.
 
 После установки: панель http://<SERVER_IP>:<PANEL_PORT>, логин PANEL_USER.
 EOF
@@ -406,6 +407,59 @@ default_mihomo_api() { # <mihomo_bind> <server_ip> -> http://host:9090
 # shellcheck disable=SC2329,SC2317
 valid_cidr() {
   python3 -c 'import ipaddress,sys; ipaddress.IPv4Network(sys.argv[1], strict=False)' "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2329,SC2317
+canonical_cidr() { # каноническая запись IPv4-сети (хост-биты сбрасываются)
+  python3 -c 'import ipaddress,sys; print(ipaddress.IPv4Network(sys.argv[1], strict=False))' "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2329,SC2317
+is_private_cidr() { # только RFC1918: 10/8, 172.16/12, 192.168/16
+  # ipaddress.is_private считает приватными ещё loopback, link-local и CGNAT,
+  # поэтому проверяем вложенность в три RFC1918-сети явно.
+  python3 -c 'import ipaddress,sys
+net = ipaddress.IPv4Network(sys.argv[1], strict=False)
+rfc1918 = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+sys.exit(0 if any(net.subnet_of(p) for p in rfc1918) else 1)' "$1" 2>/dev/null
+}
+
+# shellcheck disable=SC2329,SC2317
+normalize_lan_cidr() { # список через пробел/запятую -> канонический список RFC1918
+  local raw=${1-} tok net out=""
+  raw=${raw//,/ }
+  # shellcheck disable=SC2086 # список намеренно разбивается по пробелам
+  for tok in $raw; do
+    if ! valid_cidr "$tok"; then
+      warn "LAN_CIDR: «$tok» не IPv4-сеть — пропускаю"
+      continue
+    fi
+    net=$(canonical_cidr "$tok") || continue
+    if ! is_private_cidr "$net"; then
+      warn "LAN_CIDR=$net не входит в RFC1918 (10/8, 172.16/12, 192.168/16) — пропускаю"
+      continue
+    fi
+    case " $out " in
+      *" $net "*) continue ;;
+    esac
+    out="${out:+$out }$net"
+  done
+  printf '%s' "$out"
+}
+
+# shellcheck disable=SC2329,SC2317
+lan_cidr_is_private() { # весь список LAN_CIDR — только RFC1918
+  local net
+  [ -n "${1-}" ] || return 1
+  # shellcheck disable=SC2086 # список намеренно разбивается по пробелам
+  for net in $1; do
+    is_private_cidr "$net" || return 1
+  done
+  return 0
 }
 
 normalize_yn() { # yes/no (регистронезависимо); rc=1 если мусор
@@ -863,6 +917,15 @@ install -d -m 0700 "$BACKUP_DIR"
 touch "$OWNED"
 chmod 0644 "$OWNED"
 
+# uninstall восстанавливает прежнее значение net.ipv4.ip_forward, поэтому
+# запоминаем его один раз — до того как fw-base.sh, Tailscale и WDTT включат
+# форвардинг. Повторная установка оригинал не перезаписывает.
+if [ ! -e "$ETC/ip_forward.orig" ] && [ -r /proc/sys/net/ipv4/ip_forward ]; then
+  tr -d '\n' < /proc/sys/net/ipv4/ip_forward > "$ETC/ip_forward.orig"
+  printf '\n' >> "$ETC/ip_forward.orig"
+  chmod 0644 "$ETC/ip_forward.orig"
+fi
+
 # При повторной установке берём параметры из существующего .env: иначе
 # ip route get уходит в TUN mihomo (dev Meta) вместо физического NIC.
 # ВАЖНО: .env НЕ исполняется как shell (никаких `.`/source/eval) — он
@@ -870,6 +933,11 @@ chmod 0644 "$OWNED"
 # $(...)/backtick в значении. Читаем построчно через env_get и явно
 # присваиваем только известные ключи; в окружение ничего не экспортируем.
 LAN_IFACE=$(env_get LAN_IFACE "${LAN_IFACE:-}")
+# LAN_CIDR — подсети, которым разрешён доступ к панели и портам. В .env или
+# окружении это список через пробел/запятую; каждый токен проверяем,
+# канонизируем и отбрасываем всё, что не входит в RFC1918.
+LAN_CIDR=$(env_get LAN_CIDR "${LAN_CIDR:-}")
+LAN_CIDR=$(normalize_lan_cidr "$LAN_CIDR")
 SERVER_IP=$(env_get SERVER_IP "${SERVER_IP:-}")
 SOCKS_URL=$(env_get SOCKS_URL "${SOCKS_URL:-}")
 BASE_DOMAIN=$(env_get BASE_DOMAIN "${BASE_DOMAIN:-}")
@@ -893,7 +961,15 @@ MIHOMO_TUN_MTU=$(env_get MIHOMO_TUN_MTU "${MIHOMO_TUN_MTU:-}")
 MIHOMO_ALLOW_LAN=$(env_get MIHOMO_ALLOW_LAN "${MIHOMO_ALLOW_LAN:-}")
 PANEL_RATE_LIMIT=$(env_get PANEL_RATE_LIMIT "${PANEL_RATE_LIMIT:-}")
 WAN_INGRESS=$(env_get WAN_INGRESS "${WAN_INGRESS:-}")
+# Различаем источник метки: если 0x40000 пришла из старого .env (в окружении
+# установщика её не было), это устаревший дефолт — мигрируем. Явный 0x40000
+# в окружении — осознанный override, его по-прежнему отвергаем в валидации.
+WAN_INGRESS_MARK_ENV="${WAN_INGRESS_MARK:-}"
 WAN_INGRESS_MARK=$(env_get WAN_INGRESS_MARK "${WAN_INGRESS_MARK:-}")
+if [ -z "$WAN_INGRESS_MARK_ENV" ] && [ "${WAN_INGRESS_MARK,,}" = "0x40000" ]; then
+  warn "WAN_INGRESS_MARK=0x40000 из $ETC/.env зарезервирован за Tailscale — мигрирую на 0x200000"
+  WAN_INGRESS_MARK=0x200000
+fi
 WAN_INGRESS_RULE_PRIO=$(env_get WAN_INGRESS_RULE_PRIO "${WAN_INGRESS_RULE_PRIO:-}")
 WAN_PORTS=$(env_get WAN_PORTS "${WAN_PORTS:-}")
 # TS_IFACE/TS_SUBNET установщик не пишет, но ufw-блок ниже их использует:
@@ -913,6 +989,33 @@ DETECTED_IFACE="${LAN_IFACE:-$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;
 [ -n "$DETECTED_IFACE" ] || die "Не удалось определить сетевой интерфейс"
 DETECTED_IP="${SERVER_IP:-$(ip -4 addr show "$DETECTED_IFACE" | awk '/inet /{print $2; exit}' | cut -d/ -f1)}"
 [ -n "$DETECTED_IP" ] || die "Не удалось определить IP интерфейса $DETECTED_IFACE"
+
+# LAN_CIDR не задан — выводим подсеть из физического интерфейса. Сначала
+# connected-маршрут (scope link): он даёт сеть NIC, а не адрес пира; fallback —
+# глобальный адрес интерфейса. Принимаем только RFC1918, иначе LAN не
+# открываем: публичный CIDR в ufw означал бы доступ из интернета.
+if [ -z "$LAN_CIDR" ]; then
+  __lan_cidr=$(ip -4 route show dev "$DETECTED_IFACE" scope link 2>/dev/null \
+    | awk 'NR==1{print $1}')
+  if [ -z "$__lan_cidr" ]; then
+    __lan_cidr=$(ip -4 -o addr show dev "$DETECTED_IFACE" scope global 2>/dev/null \
+      | awk 'NR==1{print $4}')
+  fi
+  if [ -n "$__lan_cidr" ] && valid_cidr "$__lan_cidr"; then
+    __lan_cidr=$(canonical_cidr "$__lan_cidr")
+    if is_private_cidr "$__lan_cidr"; then
+      LAN_CIDR=$__lan_cidr
+      info "LAN_CIDR определён по $DETECTED_IFACE: $LAN_CIDR"
+    fi
+  fi
+  unset __lan_cidr
+fi
+if [ -z "$LAN_CIDR" ]; then
+  warn "LAN_CIDR не определён — доступ из LAN к панели и портам не открывается"
+  if ! python3 -c 'import ipaddress,sys; sys.exit(0 if ipaddress.IPv4Address(sys.argv[1]).is_private else 1)' "$DETECTED_IP" 2>/dev/null; then
+    warn "$DETECTED_IFACE/$DETECTED_IP — публичный интерфейс: сервисы будут доступны только через Tailscale/WDTT/SSH-туннель"
+  fi
+fi
 
 # WDTT/WG уже настроен у пользователя?
 WG_DETECTED=$(ip link show type wireguard 2>/dev/null | awk -F: '/^[0-9]+:/{print $2}' | tr -d ' ' | head -n1 || true)
@@ -1053,6 +1156,9 @@ if [ -z "$MIHOMO_API" ]; then
 fi
 SSH_PORT="${SSH_PORT:-22}"
 require_valid PANEL_BIND "$PANEL_BIND" valid_ipv4 "ожидается IPv4"
+if [ "$PANEL_BIND" = "0.0.0.0" ]; then
+  warn "PANEL_BIND=0.0.0.0: панель слушает все интерфейсы; доступ ограничивает только firewall (ROUTEWEAVE-IN), при его остановке порт открыт — рекомендуется SERVER_IP ($SERVER_IP) или tailscale-адрес"
+fi
 require_valid MIHOMO_API "$MIHOMO_API" valid_api_url "ожидается http(s)://host:port"
 require_valid SSH_PORT "$SSH_PORT" valid_port "целое число 1..65535"
 
@@ -1373,6 +1479,8 @@ if [ ! -f "$ETC/.env" ]; then
     echo "# IP/хост для tg://-ссылки (пусто = SERVER_IP)"
     env_line TG_LINK_IP "$TG_LINK_IP"
     env_line WG_SUBNET "$WG_SUBNET"
+    echo "# Подсети LAN, которым разрешён доступ к панели/портам (только приватные RFC1918: 10/8, 172.16/12, 192.168/16; пусто — LAN не открывать)"
+    env_line LAN_CIDR "$LAN_CIDR"
     env_line PANEL_PORT "$PANEL_PORT"
     env_line PANEL_USER "$PANEL_USER"
     env_line PANEL_PASS "$PANEL_PASS"
@@ -1401,7 +1509,7 @@ else
   for key in LAN_IFACE SERVER_IP SOCKS_URL BASE_DOMAIN TG_CF_WORKER_DOMAIN \
              TG_LINK_IP WG_SUBNET PANEL_PORT PANEL_USER PANEL_PASS \
              MIHOMO_SECRET TG_SECRET QUIC_DROP FAKEIP_EXTRA \
-             PANEL_BIND MIHOMO_API SSH_PORT; do
+             PANEL_BIND MIHOMO_API SSH_PORT LAN_CIDR; do
     env_upsert "$ETC/.env" "$key" "${!key:-}"
   done
   # Необязательные ключи: пишем только заданные, отсутствующие не трогаем.
@@ -1829,19 +1937,22 @@ else
 fi
 
 # ---------- 12. Firewall / ufw ----------
-# uninstall восстанавливает прежнее значение net.ipv4.ip_forward, поэтому
-# запоминаем его один раз — до того как fw-скрипты включат форвардинг.
-if [ ! -e "$ETC/ip_forward.orig" ] && [ -r /proc/sys/net/ipv4/ip_forward ]; then
-  tr -d '\n' < /proc/sys/net/ipv4/ip_forward > "$ETC/ip_forward.orig"
-  printf '\n' >> "$ETC/ip_forward.orig"
-  chmod 0644 "$ETC/ip_forward.orig"
-fi
-
+# ip_forward.orig уже снят в начале установки (до fw-base.sh/Tailscale/WDTT):
+# здесь только используем нормализованный LAN_CIDR, не вычисляя его заново.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  info "ufw активен — добавляю разрешения для локалки..."
-  ufw route allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
+  info "ufw активен — добавляю разрешения для приватных сетей..."
+  # LAN открываем только для проверенной приватной подсети: пустой LAN_CIDR
+  # или публичный диапазон не должны открывать порты в WAN.
+  LAN_OPEN=0
+  if [ -n "$LAN_CIDR" ] && lan_cidr_is_private "$LAN_CIDR"; then
+    LAN_OPEN=1
+    ufw route allow in on "$LAN_IFACE" >/dev/null 2>&1 || true
+  else
+    [ -z "$LAN_CIDR" ] \
+      || warn "LAN_CIDR=$LAN_CIDR не приватная сеть — правила для LAN не добавляю"
+    LAN_CIDR=""
+  fi
 
-  LAN_CIDR=$(ip -4 addr show "$LAN_IFACE" | awk '/inet /{print $2; exit}')
   PORTS_TCP="53 7890 $PANEL_PORT 9090"
   if [ "$INSTALL_TGWS" = "yes" ]; then
     PORTS_TCP="$PORTS_TCP 1443"
@@ -1866,18 +1977,27 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     ufw insert 1 deny in on "$LAN_IFACE" from "$TS_CIDR" >/dev/null 2>&1 || true
   fi
 
-  # Один и тот же набор портов — для WDTT-подсети, LAN-подсети и tailnet.
-  for src in "$WG_SUBNET" "$LAN_CIDR" "${TS_CIDR:-}"; do
+  # Один и тот же набор портов — для WDTT-подсети, LAN-подсетей и tailnet.
+  # LAN_CIDR — канонический список через пробел, поэтому раскрываем его по
+  # словам: каждое правило ufw должно получить ровно одну сеть. Пустой
+  # LAN_CIDR просто исчезает при разбиении (публичный сюда не попадает).
+  # shellcheck disable=SC2086 # LAN_CIDR — проверенный список сетей через пробел
+  for src in "$WG_SUBNET" $LAN_CIDR "${TS_CIDR:-}"; do
     [ -n "$src" ] || continue
     for p in $PORTS_TCP; do
       ufw allow from "$src" to any port "$p" proto tcp >/dev/null 2>&1 || true
     done
     ufw allow from "$src" to any port 53 proto udp >/dev/null 2>&1 || true
   done
-  if [ -n "$TS_CIDR" ]; then
-    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53; tailscale: $TS_CIDR через $TS_IFACE, 41641/udp; спуф с $LAN_IFACE запрещён)"
+  if [ "$LAN_OPEN" = 1 ]; then
+    LAN_NOTE="LAN: $LAN_CIDR"
   else
-    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53)"
+    LAN_NOTE="LAN: не открыт (LAN_CIDR пуст или не приватный)"
+  fi
+  if [ -n "$TS_CIDR" ]; then
+    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53; $LAN_NOTE; tailscale: $TS_CIDR через $TS_IFACE, 41641/udp; спуф с $LAN_IFACE запрещён)"
+  else
+    ok "ufw: правила добавлены (tcp: $PORTS_TCP; udp: 53; $LAN_NOTE)"
   fi
 fi
 
@@ -1962,7 +2082,9 @@ fi
 echo
 echo -e "${C_G}================ Установка завершена ================${C_N}"
 echo -e "Панель:        ${C_B}http://$SERVER_IP:$PANEL_PORT${C_N}  (логин: $PANEL_USER)"
-if [ "$PANEL_PASS_GENERATED" = 1 ]; then
+# Пароль печатаем только в живой терминал: при `| tee`/в CI он иначе попал бы
+# в лог. Признак генерации (PANEL_PASS_GENERATED) сам по себе этого не решает.
+if [ -t 1 ] && [ "$PANEL_PASS_GENERATED" = 1 ]; then
   echo -e "Пароль панели: ${C_Y}$PANEL_PASS${C_N}  (сохранён в $ETC/.env → PANEL_PASS)"
 else
   echo -e "Пароль панели: см. $ETC/.env → PANEL_PASS"
