@@ -30,11 +30,16 @@
 #   ProtectHome, PrivateTmp, RestrictAddressFamilies и sudo-allowlist без
 #   wildcard) остаются в силе.
 #
-# Почему ProtectSystem=strict и ReadWritePaths только три пути:
+# Почему ProtectSystem=strict и ReadWritePaths только нужные пути:
 #   панель не должна писать в /etc, /opt, /usr — это делает установщик от
 #   root. Единственное, что ей реально нужно на запись: каталог списков
-#   (/etc/routeweave/lists — правка/загрузка dpi.txt), /run (рантайм-файлы,
-#   например /run/routeweave) и /var/log/routeweave (снимки диагностики).
+#   (/etc/routeweave/lists — правка/загрузка dpi.txt), staging апдейтера
+#   (/etc/routeweave/.staging — применение списка панель выполняет через
+#   `sudo -n /usr/local/sbin/routeweave-update-lists.sh`, root-helper
+#   наследует mount-namespace юнита и пишет новые списки через staging;
+#   сам каталог остаётся 0700 root:root, поэтому пользователь routeweave
+#   писать в него не может), /run (рантайм-файлы, например /run/routeweave)
+#   и /var/log/routeweave (снимки диагностики).
 #   ProtectSystem=strict делает всю остальную ФС read-only, ReadWritePaths
 #   открывает ровно эти пути. Снимок пишет root-helper, запущенный панелью
 #   через `sudo -n`: он наследует mount-namespace этого юнита, поэтому без
@@ -74,7 +79,7 @@ NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/etc/routeweave/lists /run -/var/log/routeweave
+ReadWritePaths=/etc/routeweave/lists /etc/routeweave/.staging /run -/var/log/routeweave
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT
 

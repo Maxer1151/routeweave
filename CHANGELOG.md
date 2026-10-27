@@ -126,6 +126,13 @@
 
 ### Исправлено
 
+- Панель: применение списка падало с `read-only file system` (EROFS, errno 30).
+  `routeweave-panel.service` с `ProtectSystem=strict` не открывал на запись
+  `/etc/routeweave/.staging`, хотя панель запускает
+  `routeweave-update-lists.sh` через `sudo -n`, а root-helper наследует
+  mount-namespace юнита. Каталог добавлен в `ReadWritePaths`; сам он остаётся
+  `0700 root:root`, поэтому пользователь `routeweave` писать в него не может.
+
 - Регрессия `919f6eb`: `auto-redirect` mihomo снова включён по умолчанию и не
   выключается при `WAN_INGRESS=yes`, а DNS по умолчанию слушает `0.0.0.0:53`.
   На шлюзе с `WAN_INGRESS=yes` локальный TCP уходил в TUN и зацикливался, DNS

@@ -65,6 +65,17 @@ def test_lists_directory_is_writable():
     assert "/etc/routeweave/lists" in paths
 
 
+def test_staging_directory_is_writable():
+    """Апдейтер запускается панелью через sudo в её mount-namespace.
+
+    routeweave-update-lists.sh пишет новые списки через /etc/routeweave/.staging.
+    Без этого пути в ReadWritePaths ProtectSystem=strict отдаёт root-helper'у
+    EROFS (os error 30) при применении списка.
+    """
+    paths = service_value("ReadWritePaths").split()
+    assert "/etc/routeweave/.staging" in paths
+
+
 def test_diagnostics_directory_is_writable():
     """Снимок пишет root-helper через sudo в namespace панели.
 
