@@ -140,11 +140,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Проверить docker compose и поставить pyyaml
+      - name: Проверить docker compose и поставить pyyaml, pytest
         run: |
           docker compose version
           python -m pip install --upgrade pip
-          python -m pip install pyyaml
+          python -m pip install pyyaml pytest
 
       # env_file в compose указывает на /etc/routeweave/.env.tgws, которого
       # на runner'е нет: `compose config` читает env_file и без файла ругается.
