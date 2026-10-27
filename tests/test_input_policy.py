@@ -333,6 +333,35 @@ def test_fw_wan_doctor_checks_forwarded_path():
     assert "FAIL: нет ip rule priority" in doctor
 
 
+def test_fw_wan_doctor_checks_geo_selector():
+    text = read(FW_WAN)
+    doctor = text.split("doctor() {")[1].split('case "${1:-}"')[0]
+    # Выбор группы mihomo хранится в cache.db, а не в config.yaml, поэтому
+    # селектор GEO читается через API — и только при заданном SOCKS_URL.
+    assert "/proxies/GEO" in doctor
+    assert "Authorization: Bearer" in doctor
+    assert "SOCKS_URL не задан" in doctor
+    # socks-out — штатное значение, DIRECT — предупреждение с командой
+    # переключения (без jq: значение "now" разбирается sed'ом).
+    assert '"now"' in doctor
+    assert "селектор GEO = socks-out" in doctor
+    direct = doctor.split('"$geo_now" = "DIRECT"')[1].split("else")[0]
+    assert "/proxies/GEO" in direct and "-X PUT" in direct
+
+    # Это WARN, а не FAIL: doctor по-прежнему возвращает 0, когда всё
+    # остальное в порядке.
+    geo = doctor.split('if [ -z "${SOCKS_URL:-}" ]')[1].split("# 9.")[0]
+    assert geo, "блок проверки GEO не найден"
+    assert "fails=" not in geo, "проверка селектора GEO не должна менять fails"
+    # Секрет в вывод не попадает: в WARN-подсказке печатается имя
+    # переменной, а не её значение (то есть $ экранирован).
+    for line in code_lines(geo):
+        if line.lstrip().startswith("echo") and "Bearer" in line:
+            assert "\\$MIHOMO_SECRET" in line, (
+                "doctor печатает секрет mihomo вместо имени переменной"
+            )
+
+
 def test_fw_wan_warns_about_quic_port():
     text = read(FW_WAN)
     assert "ports_include_udp_443" in text

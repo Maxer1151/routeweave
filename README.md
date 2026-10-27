@@ -657,8 +657,11 @@ sudo /etc/routeweave/fw-wan.sh status
 Диагностика — `sudo /etc/routeweave/fw-wan.sh doctor`: проверяет цепочки и
 прыжки, наличие правила `8993`, что его приоритет меньше правил таблицы
 `2022`, что forwarded-путь помеченного пакета (от адреса клиента в `LAN_IFACE`,
-а не от `SERVER_IP`) уходит не в TUN, а также конфиг mihomo: предупреждает,
-только если в `config.yaml` выключен `auto-redirect`.
+а не от `SERVER_IP`) уходит не в TUN, а также mihomo: предупреждает, если в
+`config.yaml` выключен `auto-redirect` или если при заданном `SOCKS_URL`
+селектор `GEO` стоит на `DIRECT` — выбор группы хранится в `cache.db`
+(`profile.store-selected: true`), а не в конфиге, и `geo.txt` в этом случае
+идёт напрямую мимо апстрима.
 
 `auto-redirect` включён штатно и WAN-доступу не мешает: nft-таблица mihomo
 исключает из redirect адреса из `inet4_local_address_set` (локальные и

@@ -87,6 +87,11 @@
   `tests/test_uninstall.py`, `tests/test_compose.py`; в CI добавлен job
   `compose` (`docker compose config`) и проверка, что netns-тесты не
   пропускаются.
+- `fw-wan.sh doctor`: предупреждение, если при заданном `SOCKS_URL` селектор
+  `GEO` в mihomo стоит на `DIRECT`. Выбор группы хранится в `cache.db`
+  (`profile.store-selected: true`), поэтому при правильном `config.yaml` весь
+  `geo.txt` может молча идти напрямую, мимо апстрима. Это WARN, код возврата
+  `doctor` не меняется.
 
 ### Изменено
 

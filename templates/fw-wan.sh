@@ -528,7 +528,7 @@ status() {
 
 doctor() {
   local fails=0 line prio min_2022="" route_out dev_if client=""
-  local rules jumps_pre jumps_out chain_rules
+  local rules jumps_pre jumps_out chain_rules geo_now=""
 
   if [ "$WAN_INGRESS" != "yes" ]; then
     echo "OK: WAN_INGRESS=no, доступ из WAN выключен (настраивать нечего)"
@@ -659,7 +659,35 @@ doctor() {
     echo "WARN: $ETC/config.yaml не найден — проверка auto-redirect пропущена"
   fi
 
-  # 8. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
+  # 8. Селектор GEO. mihomo хранит выбор группы в cache.db
+  #    (profile.store-selected: true), поэтому config.yaml может выглядеть
+  #    правильно, а geo-домены уходить в DIRECT мимо SOCKS_URL: RU-правило
+  #    сработает раньше, и заблокированные домены молча не откроются.
+  #    Это предупреждение, а не FAIL: WAN-доступ от селектора не зависит.
+  if [ -z "${SOCKS_URL:-}" ]; then
+    echo "OK: SOCKS_URL не задан — geo-домены идут напрямую"
+  elif [ -z "${MIHOMO_SECRET:-}" ]; then
+    echo "WARN: MIHOMO_SECRET пуст — проверка селектора GEO пропущена"
+  elif ! command -v curl >/dev/null 2>&1; then
+    echo "WARN: curl не найден — проверка селектора GEO пропущена"
+  else
+    # jq может отсутствовать: значение "now" вытаскиваем sed'ом.
+    geo_now=$(curl -sS --max-time 3 \
+      -H "Authorization: Bearer $MIHOMO_SECRET" \
+      "http://127.0.0.1:9090/proxies/GEO" 2>/dev/null \
+      | sed -n 's/.*"now"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
+    if [ -z "$geo_now" ]; then
+      echo "WARN: mihomo API не отвечает — проверка селектора GEO пропущена"
+    elif [ "$geo_now" = "socks-out" ]; then
+      echo "OK: селектор GEO = socks-out (geo-домены идут через SOCKS)"
+    elif [ "$geo_now" = "DIRECT" ]; then
+      echo "WARN: селектор GEO = DIRECT — домены из geo.txt идут напрямую мимо SOCKS_URL, заблокированные не откроются; переключите в zashboard или: curl -sS -X PUT http://127.0.0.1:9090/proxies/GEO -H \"Authorization: Bearer \$MIHOMO_SECRET\" -H 'Content-Type: application/json' -d '{\"name\":\"socks-out\"}'"
+    else
+      echo "WARN: селектор GEO = $geo_now, ожидался socks-out"
+    fi
+  fi
+
+  # 9. Счётчики: по ним видно, доходят ли пакеты до цепочки и метятся ли они.
   if chain_exists "$CHAIN"; then
     echo "--- counters $CHAIN ---"
     iptables -w 5 -t mangle -L "$CHAIN" -vn 2>/dev/null || true
