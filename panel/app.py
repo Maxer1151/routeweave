@@ -21,6 +21,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -718,20 +719,41 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client and request.client.host else "unknown"
 
 
+def _evict_oldest_bucket(buckets: dict) -> None:
+    """Удаляет окно с самой старой последней активностью (``deque[-1]``)."""
+    if not buckets:
+        return
+    oldest = min(
+        buckets,
+        key=lambda item: buckets[item][-1] if buckets[item] else float("-inf"),
+    )
+    buckets.pop(oldest, None)
+
+
 def _prune_buckets(buckets: dict, now: float, window: int) -> None:
+    """Удаляет истёкшие окна и при переполнении вытесняет самые старые.
+
+    Полная очистка запрещена: поток новых ключей не должен обнулять лимиты
+    уже отслеживаемых клиентов.
+    """
     stale = [key for key, bucket in buckets.items() if not bucket or now - bucket[-1] >= window]
     for key in stale:
         buckets.pop(key, None)
-    if len(buckets) > RATE_MAX_KEYS:
-        buckets.clear()
+    while len(buckets) > RATE_MAX_KEYS:
+        _evict_oldest_bucket(buckets)
 
 
 def _rate_limited(buckets: dict, key: str, limit: int, window: int) -> bool:
     """True, если лимит запросов key за скользящее окно уже исчерпан."""
     now = time.monotonic()
     with RATE_LOCK:
-        if len(buckets) > RATE_MAX_KEYS:
+        if len(buckets) > RATE_MAX_KEYS or (key not in buckets and len(buckets) >= RATE_MAX_KEYS):
             _prune_buckets(buckets, now, window)
+        # Новому ключу освобождаем место вытеснением, а не очисткой всех окон:
+        # существующие ключи сохраняют свою историю запросов.
+        if key not in buckets:
+            while buckets and len(buckets) >= RATE_MAX_KEYS:
+                _evict_oldest_bucket(buckets)
         bucket = buckets.setdefault(key, deque())
         while bucket and now - bucket[0] >= window:
             bucket.popleft()
@@ -944,24 +966,50 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _read_list_file(path: Path) -> str:
+    """Читает файл списка, не следуя симлинкам и не превышая MAX_LIST_BYTES.
+
+    Ошибки открытия/типа файла отдаются нейтральным 400: цель ссылки и
+    реальный путь наружу не раскрываются. Отсутствующий файл — пустой список.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.warning("Не удалось открыть список %s: %s", path, exc)
+        raise HTTPException(400, "Список недоступен") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(400, "Список недоступен")
+        if info.st_size > MAX_LIST_BYTES:
+            raise HTTPException(413, "Список больше 200 КБ")
+        chunks: list[bytes] = []
+        total = 0
+        # Файл мог вырасти между fstat и чтением: читаем не больше лимита + 1.
+        while total <= MAX_LIST_BYTES:
+            chunk = os.read(fd, min(65536, MAX_LIST_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > MAX_LIST_BYTES:
+            raise HTTPException(413, "Список больше 200 КБ")
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "Список должен быть в кодировке UTF-8") from exc
+
+
 @app.get("/api/lists/{name}")
 def api_list_get(name: str):
     path = _list_path(name)
-    try:
-        size = path.stat().st_size
-    except FileNotFoundError:
-        size = 0
-    except OSError as exc:
-        logger.exception("Не удалось прочитать список %s", path)
-        raise HTTPException(500, f"Не удалось прочитать список: {exc}") from exc
-    if size > MAX_LIST_BYTES:
-        raise HTTPException(413, "Список больше 200 КБ")
-    try:
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-    except OSError as exc:
-        logger.exception("Не удалось прочитать список %s", path)
-        raise HTTPException(500, f"Не удалось прочитать список: {exc}") from exc
-    return {"name": name, "content": content}
+    return {"name": name, "content": _read_list_file(path)}
 
 
 @app.put("/api/lists/{name}")

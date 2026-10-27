@@ -610,6 +610,47 @@ def test_list_get_unknown_404(panel):
     assert panel.client.get("/api/lists/nope", auth=AUTH).status_code == 404
 
 
+def test_list_get_does_not_follow_symlink(panel, tmp_path, monkeypatch):
+    """Симлинк из LISTS_DIR наружу не читается и цель не раскрывается."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET-LEAK\n", encoding="utf-8")
+    lists_dir = tmp_path / "lists"
+    lists_dir.mkdir()
+    (lists_dir / "geo-custom.txt").symlink_to(secret)
+    monkeypatch.setattr(panel.module, "LISTS_DIR", lists_dir)
+
+    response = panel.client.get("/api/lists/geo-custom", auth=AUTH)
+    assert response.status_code in (400, 404)
+    assert "SECRET-LEAK" not in response.text
+    assert str(secret) not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_list_get_regular_file_content(panel):
+    target = panel.etc / "lists" / "geo-custom.txt"
+    target.write_text("+.good.com\nexample.com\n", encoding="utf-8")
+    response = panel.client.get("/api/lists/geo-custom", auth=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {
+        "name": "geo-custom",
+        "content": "+.good.com\nexample.com\n",
+    }
+
+
+def test_list_get_missing_file_returns_empty(panel):
+    response = panel.client.get("/api/lists/dpi", auth=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"name": "dpi", "content": ""}
+
+
+def test_list_get_non_regular_file_400(panel):
+    # Каталог на месте файла списка: не обычный файл — нейтральный 400.
+    (panel.etc / "lists" / "geo-custom.txt").mkdir()
+    response = panel.client.get("/api/lists/geo-custom", auth=AUTH)
+    assert response.status_code == 400
+    assert "Список недоступен" in response.json()["detail"]
+
+
 def test_list_put_unknown_404(panel):
     assert panel.client.put("/api/lists/nope", content="a.com\n", auth=AUTH).status_code == 404
 
@@ -784,6 +825,59 @@ def test_rate_limit_plain_integer_and_garbage(etc, monkeypatch):
     assert module._parse_rate_limit("7/5", 120, 60) == (7, 5)
     assert module._parse_rate_limit("7", 120, 60) == (7, 60)
     assert module._parse_rate_limit("0/5", 120, 60) == (120, 60)
+
+
+def test_rate_limit_new_keys_do_not_reset_existing(panel, monkeypatch):
+    """Поток новых ключей вытесняет самые старые, но не обнуляет все окна."""
+    module = panel.module
+    monkeypatch.setattr(module, "RATE_MAX_KEYS", 3)
+    buckets = {}
+    limit, window = 2, 60
+
+    for key in ("a", "b", "c"):
+        assert module._rate_limited(buckets, key, limit, window) is False
+        assert module._rate_limited(buckets, key, limit, window) is False
+        assert module._rate_limited(buckets, key, limit, window) is True
+    assert len(buckets) <= module.RATE_MAX_KEYS == 3
+
+    # Новый ключ: место освобождается вытеснением одного самого старого окна.
+    assert module._rate_limited(buckets, "d", limit, window) is False
+    assert len(buckets) <= module.RATE_MAX_KEYS
+    assert "d" in buckets
+
+    # Окна существующих ключей не сброшены: лимит по-прежнему исчерпан.
+    assert module._rate_limited(buckets, "b", limit, window) is True
+    assert module._rate_limited(buckets, "c", limit, window) is True
+
+
+def test_rate_limit_prune_removes_only_expired(panel, monkeypatch):
+    module = panel.module
+    monkeypatch.setattr(module, "RATE_MAX_KEYS", 1)
+    buckets = {
+        "old": module.deque([time.monotonic() - 3600]),
+        "fresh": module.deque([time.monotonic()]),
+    }
+    module._prune_buckets(buckets, time.monotonic(), 60)
+    assert "old" not in buckets
+    assert "fresh" in buckets
+    assert len(buckets) == module.RATE_MAX_KEYS
+
+
+def test_rate_limit_cap_via_http(etc, monkeypatch):
+    """Новый ключ не обнуляет окна: старый ключ остаётся, лимит клиента — 429."""
+    monkeypatch.setenv("PANEL_RATE_LIMIT", "1/60")
+    module, client, _ = make_client(monkeypatch)
+    monkeypatch.setattr(module, "RATE_MAX_KEYS", 2)
+    now = time.monotonic()
+    module.RATE_BUCKETS["203.0.113.9"] = module.deque([now - 10])
+    module.RATE_BUCKETS["198.51.100.7"] = module.deque([now - 5])
+
+    assert client.get("/api/jobs/apply", auth=AUTH).status_code == 200
+    assert len(module.RATE_BUCKETS) <= module.RATE_MAX_KEYS
+    # Вытеснен только самый старый ключ, остальные окна сохранены.
+    assert "198.51.100.7" in module.RATE_BUCKETS
+
+    assert client.get("/api/jobs/apply", auth=AUTH).status_code == 429
 
 
 def test_auth_failure_rate_limit_429(etc, monkeypatch):
