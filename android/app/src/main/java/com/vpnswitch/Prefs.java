@@ -3,6 +3,7 @@ package com.vpnswitch;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -24,6 +25,7 @@ public final class Prefs {
 
     private static final String KEY_EXIT_MANAGE_ENABLED = "exit_manage_enabled";
     private static final String KEY_EXIT_NODE_NAME = "exit_node_name";
+    private static final String KEY_EXIT_NODE_APPLIED_NAME = "exit_node_applied_name";
     private static final String KEY_EXIT_NODE_IP = "exit_node_ip";
     private static final String KEY_EXIT_NODE_ALLOW_LAN = "exit_node_allow_lan";
     private static final String KEY_EXIT_WATCHDOG_ENABLED = "exit_watchdog_enabled";
@@ -31,6 +33,9 @@ public final class Prefs {
     private static final String KEY_EXIT_NODE_PENDING_ON = "exit_node_pending_on";
     private static final String KEY_EXIT_RETRY_AT = "exit_retry_at";
     private static final String KEY_EXIT_FAIL_COUNT = "exit_fail_count";
+    private static final String KEY_EXIT_RETRY_COUNT = "exit_retry_count";
+    private static final String KEY_EXIT_RETRY_BLOCKED = "exit_retry_blocked";
+    private static final String KEY_EXIT_CONFIRM_AT = "exit_confirm_at";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
     public static final String DEFAULT_EXIT_NODE_IP = "";
@@ -65,21 +70,17 @@ public final class Prefs {
      * двойных кавычек. Пустой или null превращается в "".
      */
     public static String normalizeSsid(String ssid) {
-        if (ssid == null) {
-            return "";
-        }
-        String value = ssid.trim();
-        if (value.length() >= 2
-                && value.charAt(0) == '"'
-                && value.charAt(value.length() - 1) == '"') {
-            value = value.substring(1, value.length() - 1).trim();
-        }
-        return value;
+        return Logic.normalizeSsid(ssid);
     }
 
-    /** Новая копия списка доверенных SSID без кавычек и пустых значений. */
-    public Set<String> getTrustedSsids() {
-        Set<String> result = new LinkedHashSet<>();
+    /**
+     * Доверенные сети как пары SSID+BSSID. Старые записи без BSSID читаются
+     * как {@link Logic.Trust#UNBOUND} и не считаются доверенными (fail-closed).
+     * Несколько точек одного SSID — несколько записей: так поддерживаются mesh
+     * и роуминг между точками.
+     */
+    public Set<Logic.TrustedEntry> getTrustedNetworks() {
+        Set<Logic.TrustedEntry> result = new LinkedHashSet<>();
         Set<String> stored;
         try {
             stored = prefs.getStringSet(KEY_TRUSTED_SSIDS, null);
@@ -90,53 +91,66 @@ public final class Prefs {
             return result;
         }
         for (String raw : stored) {
-            String ssid = normalizeSsid(raw);
-            if (ssid.length() > 0) {
-                result.add(ssid);
+            Logic.TrustedEntry entry = Logic.parseTrustedEntry(raw);
+            if (entry != null) {
+                result.add(entry);
             }
         }
         return result;
     }
 
-    /** Сохраняет нормализованный список; null означает пустой список. */
-    public void setTrustedSsids(Set<String> ssids) {
-        Set<String> normalized = new LinkedHashSet<>();
-        if (ssids != null) {
-            for (String raw : ssids) {
-                String ssid = normalizeSsid(raw);
-                if (ssid.length() > 0) {
-                    normalized.add(ssid);
+    /** Сохраняет записи в формате {@code ssid + "\t" + bssid}; null — пустой список. */
+    public void setTrustedNetworks(Collection<Logic.TrustedEntry> entries) {
+        Set<String> formatted = new LinkedHashSet<>();
+        if (entries != null) {
+            for (Logic.TrustedEntry entry : entries) {
+                if (entry == null) {
+                    continue;
+                }
+                String raw = Logic.formatTrustedEntry(entry.ssid, entry.bssid);
+                if (raw.length() > 0) {
+                    formatted.add(raw);
                 }
             }
         }
-        prefs.edit().putStringSet(KEY_TRUSTED_SSIDS, normalized).apply();
+        prefs.edit().putStringSet(KEY_TRUSTED_SSIDS, formatted).apply();
     }
 
-    /** true, если SSID после нормализации точно совпадает с элементом списка. */
-    public boolean isTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        return normalized.length() > 0 && getTrustedSsids().contains(normalized);
+    /**
+     * Добавляет пару SSID+BSSID. Если для этого SSID была старая запись без
+     * привязки к точке, она заменяется привязанной. true — список изменился.
+     */
+    public boolean addTrustedNetwork(String ssid, String bssid) {
+        String normalizedSsid = Logic.normalizeSsid(ssid);
+        if (normalizedSsid.length() == 0) {
+            return false;
+        }
+        String normalizedBssid = Logic.normalizeBssid(bssid);
+        Set<Logic.TrustedEntry> entries = getTrustedNetworks();
+        if (normalizedBssid != null) {
+            entries.remove(new Logic.TrustedEntry(normalizedSsid, ""));
+        }
+        boolean changed = entries.add(new Logic.TrustedEntry(normalizedSsid, normalizedBssid));
+        if (changed) {
+            setTrustedNetworks(entries);
+        }
+        return changed;
     }
 
-    public void addTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        if (normalized.length() == 0) {
-            return;
-        }
-        Set<String> ssids = getTrustedSsids();
-        ssids.add(normalized);
-        setTrustedSsids(ssids);
+    /** Уровень доверия по паре SSID+BSSID текущей сети. */
+    public Logic.Trust trustLevel(String ssid, String bssid, boolean openNetwork) {
+        return Logic.trustLevel(getTrustedNetworks(), ssid, bssid, openNetwork);
     }
 
-    public void removeTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        if (normalized.length() == 0) {
-            return;
+    /** Уникальные SSID из списка доверенных сетей. Для счётчика записей есть getTrustedNetworks(). */
+    public Set<String> getTrustedSsids() {
+        Set<String> result = new LinkedHashSet<>();
+        for (Logic.TrustedEntry entry : getTrustedNetworks()) {
+            if (entry.ssid.length() > 0) {
+                result.add(entry.ssid);
+            }
         }
-        Set<String> ssids = getTrustedSsids();
-        if (ssids.remove(normalized)) {
-            setTrustedSsids(ssids);
-        }
+        return result;
     }
 
     /**
@@ -195,12 +209,7 @@ public final class Prefs {
     }
 
     public boolean hasLeftWifiRecently(long windowMs) {
-        long at = getLeftWifiAt();
-        if (at <= 0L) {
-            return false;
-        }
-        long diff = System.currentTimeMillis() - at;
-        return diff >= 0L && diff <= windowMs;
+        return Logic.withinWindow(System.currentTimeMillis(), getLeftWifiAt(), windowMs);
     }
 
     // --- Exit node Tailscale -------------------------------------------------
@@ -221,6 +230,21 @@ public final class Prefs {
 
     public void setExitNodeName(String name) {
         prefs.edit().putString(KEY_EXIT_NODE_NAME, name == null ? "" : name.trim()).apply();
+    }
+
+    /**
+     * Имя ноды, для которой приложение отправило команду включения. Хранится
+     * отдельно от текущего имени: пользователь может переименовать ноду, пока
+     * идёт подтверждение, а снять или заменить нужно именно применённую.
+     */
+    public String getExitNodeAppliedName() {
+        String value = prefs.getString(KEY_EXIT_NODE_APPLIED_NAME, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitNodeAppliedName(String name) {
+        prefs.edit().putString(KEY_EXIT_NODE_APPLIED_NAME,
+                name == null ? "" : name.trim()).apply();
     }
 
     /** Tailnet-IP сервера для TCP-проверки перед возвратом exit node. */
@@ -285,6 +309,37 @@ public final class Prefs {
         prefs.edit().putInt(KEY_EXIT_FAIL_COUNT, Math.max(0, count)).apply();
     }
 
+    /** Номер попытки автовосстановления exit node (для backoff 5/10/20/30 мин). */
+    public int getExitRetryCount() {
+        return Math.max(0, prefs.getInt(KEY_EXIT_RETRY_COUNT, 0));
+    }
+
+    public void setExitRetryCount(int count) {
+        prefs.edit().putInt(KEY_EXIT_RETRY_COUNT, Math.max(0, count)).apply();
+    }
+
+    /**
+     * true, если автовосстановление exit node остановлено: исчерпаны попытки,
+     * нет IP сервера для проверки или Tailscale не принимает команду. Правило
+     * Wi-Fi в этом состоянии не перезапускает команду — нужен ручной запуск.
+     */
+    public boolean isExitRetryBlocked() {
+        return prefs.getBoolean(KEY_EXIT_RETRY_BLOCKED, false);
+    }
+
+    public void setExitRetryBlocked(boolean blocked) {
+        prefs.edit().putBoolean(KEY_EXIT_RETRY_BLOCKED, blocked).apply();
+    }
+
+    /** Время (System.currentTimeMillis) подтверждения включения exit node; 0 — не ждём. */
+    public long getExitConfirmAt() {
+        return prefs.getLong(KEY_EXIT_CONFIRM_AT, 0L);
+    }
+
+    public void setExitConfirmAt(long timeMs) {
+        prefs.edit().putLong(KEY_EXIT_CONFIRM_AT, Math.max(0L, timeMs)).apply();
+    }
+
     /** Сохраняет последний статус, результат и время. error == null очищает прошлую ошибку. */
     public void record(String status, boolean ok, String error) {
         SharedPreferences.Editor editor = prefs.edit()
@@ -297,5 +352,16 @@ public final class Prefs {
             editor.putString(KEY_LAST_ERROR, error);
         }
         editor.apply();
+    }
+
+    /**
+     * Нейтральный статус: меняет только текст и время, не трогая прошлый
+     * результат (last_ok) и прошлую ошибку (last_error).
+     */
+    public void recordNeutral(String status) {
+        prefs.edit()
+                .putString(KEY_LAST_STATUS, status == null ? "" : status)
+                .putLong(KEY_LAST_TIME, System.currentTimeMillis())
+                .apply();
     }
 }

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">VPN Авто</string>
-    <string name="app_version">1.2</string>
+    <string name="app_version_format">v%1$s</string>
     <string name="subtitle">Переключение Tailscale и WDTT Plus по типу сети и доверенным Wi-Fi</string>
 
     <string name="section_status">Статус</string>
@@ -38,6 +38,10 @@
     <string name="label_current_ssid">Текущий SSID: %1$s</string>
     <string name="ssid_trusted">Доверенная</string>
     <string name="ssid_untrusted">Не доверена</string>
+    <string name="ssid_trust_unbound">SSID без привязки к точке: откройте приложение рядом с сетью и нажмите «Добавить текущую»</string>
+    <string name="ssid_trust_mismatch">Другая точка с этим SSID — VPN не отключается</string>
+    <string name="ssid_bssid_unavailable">BSSID недоступен: сеть не считается доверенной, VPN не отключается</string>
+    <string name="ssid_open_network">Открытая сеть не считается доверенной — VPN не отключается</string>
     <string name="ssid_no_access">Нет доступа</string>
     <string name="ssid_no_wifi">Wi-Fi не подключён</string>
     <string name="ssid_location_off">Геолокация выключена</string>
@@ -74,7 +78,9 @@
     <string name="exit_state_off">Exit node не активен</string>
     <string name="exit_state_retry">повтор через %1$d мин</string>
     <string name="exit_state_pending">ждёт подключения Tailscale</string>
+    <string name="exit_state_confirm">команда отправлена, подтверждение…</string>
     <string name="exit_state_unconfirmed">команда отправлена, exit node ещё не активен</string>
+    <string name="exit_state_name_required">Укажите имя exit node: без него включение невозможно</string>
 
     <string name="btn_tailscale_on">Tailscale вкл</string>
     <string name="btn_tailscale_off">Tailscale выкл</string>
@@ -103,12 +109,19 @@
 
     <string name="setup_text">1. Tailscale: войдите в аккаунт и разрешите VPN-подключение.\n2. WDTT Plus: импортируйте профиль и разрешите VPN.\n3. Разрешите доступ к местоположению и выберите «Разрешить всегда»: без этого Android скрывает имя Wi-Fi.\n4. Добавьте домашнюю сеть в «Доверенные Wi-Fi».\n5. Разрешите уведомления и отключите оптимизацию батареи для «VPN Авто».\n6. Включите автопереключение.</string>
 
-    <string name="footer_version">Версия 1.2</string>
+    <string name="footer_version_format">Версия %1$s</string>
 
     <string name="channel_monitor_name">Мониторинг VPN</string>
     <string name="channel_monitor_desc">Постоянное уведомление о текущей сети и VPN</string>
     <string name="channel_alerts_name">Оповещения VPN</string>
+    <string name="channel_alerts_v2_name">Важные оповещения VPN</string>
     <string name="channel_alerts_desc">Ошибки переключения VPN</string>
+    <string name="notif_banner_text">Уведомления выключены — важные предупреждения не показываются</string>
+    <string name="notif_banner_settings">Настройки</string>
+    <string name="notif_needed_title">Уведомления выключены</string>
+    <string name="notif_needed_message">Без уведомлений вы не увидите ошибки переключения VPN и сбои exit node. Разрешите уведомления, чтобы приложение могло предупредить о проблеме.</string>
+    <string name="notif_needed_allow">Разрешить</string>
+    <string name="notif_needed_later">Позже</string>
     <string name="notif_rule">Правило: %1$s</string>
     <string name="notif_error_title">VPN Авто: требуется внимание</string>
     <string name="action_apply">Применить</string>
@@ -125,6 +138,7 @@
     <string name="toast_app_settings_failed">Не удалось открыть настройки приложения</string>
     <string name="toast_already_connected">Этот VPN уже подключён</string>
     <string name="toast_not_connected">Этот VPN не подключён</string>
+    <string name="toast_operation_busy">Операция уже выполняется</string>
 
     <string name="toast_ssid_unavailable">SSID недоступен: подключитесь к Wi-Fi</string>
     <string name="toast_location_disabled">Включите геолокацию, иначе Android скрывает имя Wi-Fi</string>
@@ -136,4 +150,8 @@
     <string name="toast_ssid_added">Текущая сеть добавлена в доверенные</string>
     <string name="toast_ssid_already">Эта сеть уже в списке</string>
     <string name="toast_ssid_saved">Список доверенных сетей сохранён</string>
+    <string name="toast_bssid_unavailable">BSSID недоступен: подойдите ближе к точке и включите геолокацию</string>
+    <string name="toast_open_network_not_trusted">Открытую сеть нельзя сделать доверенной: VPN не будет отключаться</string>
+    <string name="toast_exit_name_required">Укажите имя exit node — без него включение невозможно</string>
+    <string name="error_foreground_failed">Не удалось запустить фоновый мониторинг: система отклонила foreground-сервис. Проверьте разрешения и уведомления.</string>
 </resources>

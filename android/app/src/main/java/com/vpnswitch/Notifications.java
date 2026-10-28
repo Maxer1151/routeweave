@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.drawable.Icon;
 import android.os.Build;
+import android.os.SystemClock;
 import android.util.Log;
 
 /** Каналы и уведомления приложения. */
@@ -17,9 +18,14 @@ public final class Notifications {
 
     public static final String CHANNEL_MONITOR = "vpn_monitor";
     public static final String CHANNEL_ALERTS = "vpn_alerts";
+    /** Важные алерты: высокий приоритет, звук и вибрация по умолчанию. */
+    public static final String CHANNEL_ALERTS_V2 = "vpn_alerts_v2";
 
     public static final int NOTIF_MONITOR = 1001;
     public static final int NOTIF_ERROR = 1002;
+
+    /** Снимок для уведомления живёт не дольше 25 с: tick сервиса обновляет его. */
+    private static final long MONITOR_CACHE_TTL_MS = 25000L;
 
     private static final int REQ_MONITOR_CONTENT = 100;
     private static final int REQ_MONITOR_APPLY = 200;
@@ -62,13 +68,77 @@ public final class Notifications {
             alerts.setSound(null, null);
             alerts.enableVibration(false);
             nm.createNotificationChannel(alerts);
+
+            // Новый канал для важных ошибок: старый оставлен для совместимости,
+            // но больше не используется.
+            NotificationChannel alertsV2 = new NotificationChannel(
+                    CHANNEL_ALERTS_V2,
+                    context.getString(R.string.channel_alerts_v2_name),
+                    NotificationManager.IMPORTANCE_HIGH);
+            alertsV2.setDescription(context.getString(R.string.channel_alerts_desc));
+            alertsV2.setShowBadge(true);
+            alertsV2.enableVibration(true);
+            nm.createNotificationChannel(alertsV2);
         } catch (Throwable t) {
             Log.e(TAG, "ensureChannels failed", t);
         }
     }
 
+    /** Готовые строки уведомления; считаются не чаще, чем раз в 25 с. */
+    private static final class MonitorSnapshot {
+        final String currentLine;
+        final String rule;
+        final long at;
+
+        MonitorSnapshot(String currentLine, String rule, long at) {
+            this.currentLine = currentLine;
+            this.rule = rule;
+            this.at = at;
+        }
+    }
+
+    private static volatile MonitorSnapshot cachedMonitorSnapshot;
+
+    /**
+     * Снимок состояния для мониторингового уведомления. При устаревании старше
+     * 25 с пересчитывается один раз; частота обновления задаётся tick'ом сервиса.
+     */
+    private static MonitorSnapshot monitorSnapshot(Context context) {
+        MonitorSnapshot cached = cachedMonitorSnapshot;
+        long now = SystemClock.elapsedRealtime();
+        if (cached != null && now - cached.at < MONITOR_CACHE_TTL_MS) {
+            return cached;
+        }
+        return captureMonitorSnapshot(context);
+    }
+
+    /** Принудительно пересчитывает снимок: вызывается tick'ом MonitorService. */
+    public static void refreshMonitorSnapshot(Context context) {
+        cachedMonitorSnapshot = captureMonitorSnapshot(context);
+    }
+
+    private static MonitorSnapshot captureMonitorSnapshot(Context context) {
+        long now = SystemClock.elapsedRealtime();
+        NetKind kind = NetworkUtils.currentKind(context);
+        VpnState vpn = NetworkUtils.detectVpn(context);
+        NetworkUtils.WifiAccess access = kind == NetKind.WIFI
+                ? NetworkUtils.currentWifiAccess(context, kind) : NetworkUtils.WifiAccess.none();
+        MonitorSnapshot fresh = new MonitorSnapshot(
+                StatusText.currentLine(kind, vpn),
+                StatusText.desiredRule(context, kind, access),
+                now);
+        cachedMonitorSnapshot = fresh;
+        return fresh;
+    }
+
+    /** Сбрасывает снимок уведомления: следующая сборка перечитает сеть. */
+    public static void invalidateMonitorSnapshot() {
+        cachedMonitorSnapshot = null;
+    }
+
     /** Постоянное уведомление мониторинга с кнопкой «Применить». */
     public static Notification buildMonitor(Context context) {
+        MonitorSnapshot snapshot = monitorSnapshot(context);
         Intent content = new Intent(context, MainActivity.class);
         content.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent contentPi =
@@ -86,9 +156,8 @@ public final class Notifications {
 
         return new Notification.Builder(context, CHANNEL_MONITOR)
                 .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(StatusText.currentLine(context))
-                .setContentText(context.getString(R.string.notif_rule,
-                        StatusText.desiredRule(context)))
+                .setContentTitle(snapshot.currentLine)
+                .setContentText(context.getString(R.string.notif_rule, snapshot.rule))
                 .setContentIntent(contentPi)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -122,6 +191,10 @@ public final class Notifications {
     public static void showError(Context context, String text, String targetPackage) {
         try {
             Notifications.ensureChannels(context);
+            if (!alertsEnabled(context)) {
+                Log.w(TAG, "showError: уведомления выключены, сообщение не показано: " + text);
+                return;
+            }
             NotificationManager nm =
                     (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null) {
@@ -148,7 +221,7 @@ public final class Notifications {
                     actionLabel,
                     actionPi).build();
 
-            Notification notification = new Notification.Builder(context, CHANNEL_ALERTS)
+            Notification notification = new Notification.Builder(context, CHANNEL_ALERTS_V2)
                     .setSmallIcon(R.drawable.ic_notification)
                     .setContentTitle(context.getString(R.string.notif_error_title))
                     .setContentText(text)
@@ -175,6 +248,34 @@ public final class Notifications {
             }
         } catch (Throwable t) {
             Log.e(TAG, "clearError failed", t);
+        }
+    }
+
+    /**
+     * true, если уведомления приложения не заблокированы пользователем, выдано
+     * POST_NOTIFICATIONS и канал важных алертов не отключён вручную.
+     */
+    public static boolean alertsEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            NotificationManager nm =
+                    (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null || !nm.areNotificationsEnabled()) {
+                return false;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = nm.getNotificationChannel(CHANNEL_ALERTS_V2);
+                // Канал ещё не создан (первый запуск) — считаем включённым:
+                // ensureChannels создаст его с важностью по умолчанию.
+                return channel == null
+                        || channel.getImportance() != NotificationManager.IMPORTANCE_NONE;
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.d(TAG, "alertsEnabled: " + t);
+            return true;
         }
     }
 
