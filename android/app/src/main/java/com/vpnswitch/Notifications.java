@@ -192,7 +192,10 @@ public final class Notifications {
         try {
             Notifications.ensureChannels(context);
             if (!alertsEnabled(context)) {
-                Log.w(TAG, "showError: уведомления выключены, сообщение не показано: " + text);
+                // Сам текст не логируем: в нём может быть имя exit node или
+                // другой хост, а маскировать произвольную строку ненадёжно.
+                Log.w(TAG, "showError: уведомления выключены, сообщение не показано"
+                        + " (длина " + (text == null ? 0 : text.length()) + ")");
                 return;
             }
             NotificationManager nm =
