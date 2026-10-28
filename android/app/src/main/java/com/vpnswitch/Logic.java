@@ -487,6 +487,81 @@ public final class Logic {
                 ? ExitOffStep.BLOCKED : ExitOffStep.FAILED;
     }
 
+    // --- Цель exit node и долг снятия --------------------------------------
+
+    /** Что делать с активным долгом снятия при обнаружении смены сети. */
+    public enum OffDebtAction {
+        /** Сеть та же или смену доказать нельзя: состояние не меняется. */
+        KEEP,
+        /** Новая сеть требует exit node: долг снятия отменяется. */
+        CANCEL,
+        /** Новая сеть не требует exit node: попытки снятия перезапускаются. */
+        RESTART
+    }
+
+    /**
+     * Правило Wi-Fi требует включённый exit node: управление включено, имя
+     * задано, сеть незнакомая. Доверенная Wi-Fi, мобильная сеть и пустое имя
+     * ноду не требуют.
+     */
+    public static boolean ruleRequiresExitNode(boolean manageEnabled, boolean hasName,
+                                               NetKind kind, boolean trusted) {
+        return manageEnabled && hasName && kind == NetKind.WIFI && !trusted;
+    }
+
+    /**
+     * Итоговая цель с учётом ручного снятия: пользовательский запрет важнее
+     * правила. Пока запрет действует, exit node включать нельзя.
+     */
+    public static boolean exitNodeWanted(boolean ruleWants, boolean manualOff) {
+        return ruleWants && !manualOff;
+    }
+
+    /**
+     * Решение по долгу снятия при смене сети. Если новая сеть требует exit
+     * node, команду off отправлять нельзя: долг отменяется, и правило снова
+     * включает нужную ноду. Иначе попытки снятия перезапускаются.
+     */
+    public static OffDebtAction offDebtActionOnNetworkChange(boolean networkChanged,
+                                                             boolean exitNodeWanted) {
+        if (!networkChanged) {
+            return OffDebtAction.KEEP;
+        }
+        return exitNodeWanted ? OffDebtAction.CANCEL : OffDebtAction.RESTART;
+    }
+
+    /**
+     * true, если активную попытку снятия нужно приостановить: Tailscale не
+     * подключён и правило больше не требует exit node. Владение при этом не
+     * очищается — оно хранится до фактического подтверждения.
+     */
+    public static boolean shouldDeferExitOff(boolean tailscaleActive, boolean exitNodeWanted) {
+        return !tailscaleActive && !exitNodeWanted;
+    }
+
+    /** true, если приложению всё ещё принадлежит включённый exit node. */
+    public static boolean hasExitOffOwnership(boolean applied, boolean appliedNamePresent) {
+        return applied || appliedNamePresent;
+    }
+
+    /**
+     * true, если отложенное снятие пора возобновить: Tailscale подключён,
+     * правило не требует exit node, а владение сохранено.
+     */
+    public static boolean shouldResumeOwnedOff(boolean tailscaleActive, boolean exitNodeWanted,
+                                               boolean ownership) {
+        return tailscaleActive && !exitNodeWanted && ownership;
+    }
+
+    /**
+     * Адресная очистка уведомления об ошибке: requested == null — очистить
+     * любую; пустой current — ошибка старого формата без источника.
+     */
+    public static boolean errorSourceMatches(String current, String requested) {
+        return requested == null || current == null || current.length() == 0
+                || requested.equals(current);
+    }
+
     /**
      * Маскирует хост для логов: IPv4 — первый октет, IPv6 — первая группа,
      * имя — первый символ. Используется только для диагностики, не для UI.

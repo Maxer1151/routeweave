@@ -988,10 +988,14 @@ public class MainActivity extends Activity {
         boolean manualOff = Logic.manualOffApplies(prefs.getExitManualOffKey(),
                 snapshot.kind,
                 snapshot.access == null ? null : snapshot.access.ssid);
+        boolean ruleRequires = Logic.ruleRequiresExitNode(prefs.isExitManageEnabled(),
+                prefs.getExitNodeName().trim().length() > 0,
+                snapshot.kind,
+                snapshot.access != null && snapshot.access.trust == Logic.Trust.TRUSTED);
         setTextIfChanged(tvExitState, StatusText.exitStateLine(this, prefs,
                 snapshot.tsInstalled,
                 snapshot.vpn.active && snapshot.vpn.type == VpnType.TAILSCALE,
-                snapshot.exitActive, manualOff));
+                snapshot.exitActive, manualOff, ruleRequires));
         if (snapshot.exitActive) {
             setTextColorIfChanged(tvExitState, R.color.colorGreen);
         } else if (manualOff || prefs.isExitPendingOff()

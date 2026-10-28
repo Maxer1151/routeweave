@@ -654,7 +654,7 @@ public final class VpnController {
         new Prefs(context).record(status, ok, error);
         if (ok) {
             // Успешное действие снимает старое уведомление об ошибке.
-            Notifications.clearError(context);
+            Notifications.clearError(context, Notifications.ERROR_SOURCE_VPN);
             Log.i(TAG, "OK: " + status);
         } else {
             Log.i(TAG, "FAIL: " + status);
@@ -669,7 +669,8 @@ public final class VpnController {
                 : message.replace(targetPackage, Logic.maskHost(targetPackage));
         Log.d(TAG, "FAIL: " + logMessage);
         Notifications.updateMonitor(context);
-        Notifications.showError(context, message, targetPackage);
+        Notifications.showError(context, message, targetPackage,
+                Notifications.ERROR_SOURCE_VPN);
     }
 
     private static String packageOf(VpnType type) {

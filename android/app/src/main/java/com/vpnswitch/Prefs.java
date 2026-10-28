@@ -21,6 +21,7 @@ public final class Prefs {
     private static final String KEY_LAST_OK = "last_ok";
     private static final String KEY_LAST_TIME = "last_time";
     private static final String KEY_LAST_ERROR = "last_error";
+    private static final String KEY_ERROR_SOURCE = "error_source";
     private static final String KEY_LAST_NET_KIND = "last_net_kind";
     private static final String KEY_LEFT_WIFI_AT = "left_wifi_at";
 
@@ -199,6 +200,15 @@ public final class Prefs {
 
     public String getLastError() {
         return prefs.getString(KEY_LAST_ERROR, "");
+    }
+
+    /** Источник показанной ошибки: по нему уведомление очищается адресно. */
+    public String getErrorSource() {
+        return prefs.getString(KEY_ERROR_SOURCE, "");
+    }
+
+    public void setErrorSource(String source) {
+        prefs.edit().putString(KEY_ERROR_SOURCE, source == null ? "" : source.trim()).apply();
     }
 
     /** Последний известный тип сети; при отсутствии или ошибке разбора — NONE. */

@@ -24,6 +24,11 @@ public final class Notifications {
     public static final int NOTIF_MONITOR = 1001;
     public static final int NOTIF_ERROR = 1002;
 
+    /** Источники ошибок: по ним уведомление очищается адресно. */
+    public static final String ERROR_SOURCE_VPN = "vpn";
+    public static final String ERROR_SOURCE_EXIT_NODE = "exit_node";
+    public static final String ERROR_SOURCE_MONITOR = "monitor";
+
     /** Снимок для уведомления живёт не дольше 25 с: tick сервиса обновляет его. */
     private static final long MONITOR_CACHE_TTL_MS = 25000L;
 
@@ -189,6 +194,12 @@ public final class Notifications {
      * targetPackage == null — открывается само приложение.
      */
     public static void showError(Context context, String text, String targetPackage) {
+        showError(context, text, targetPackage, ERROR_SOURCE_VPN);
+    }
+
+    /** Показывает ошибку и запоминает источник для адресной очистки. */
+    public static void showError(Context context, String text, String targetPackage,
+                                 String source) {
         try {
             Notifications.ensureChannels(context);
             if (!alertsEnabled(context)) {
@@ -236,6 +247,7 @@ public final class Notifications {
                     .build();
 
             nm.notify(NOTIF_ERROR, notification);
+            new Prefs(context).setErrorSource(source);
         } catch (Throwable t) {
             Log.e(TAG, "showError failed", t);
         }
@@ -243,12 +255,26 @@ public final class Notifications {
 
     /** Убирает уведомление об ошибке после успешного восстановления VPN. */
     public static void clearError(Context context) {
+        clearError(context, null);
+    }
+
+    /**
+     * Убирает уведомление об ошибке, только если оно относится к source.
+     * source == null — очистить любую; пустой сохранённый источник — ошибка
+     * старой версии, когда источник ещё не записывался.
+     */
+    public static void clearError(Context context, String source) {
         try {
+            Prefs prefs = new Prefs(context);
+            if (!Logic.errorSourceMatches(prefs.getErrorSource(), source)) {
+                return;
+            }
             NotificationManager nm =
                     (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm != null) {
                 nm.cancel(NOTIF_ERROR);
             }
+            prefs.setErrorSource("");
         } catch (Throwable t) {
             Log.e(TAG, "clearError failed", t);
         }

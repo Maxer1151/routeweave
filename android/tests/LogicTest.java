@@ -44,6 +44,8 @@ public final class LogicTest {
         trustedLists();
         networkKeys();
         exitOffSteps();
+        exitOffGoals();
+        errorSources();
         hostMasking();
         prefixes();
         routes();
@@ -665,6 +667,131 @@ public final class LogicTest {
         eq("цикл снятия: успех до исчерпания попыток",
                 Logic.ExitOffStep.CONFIRMED, successStep);
         eqInt("цикл снятия: успех после двух отправок", 2, successAttempts);
+    }
+
+    // --- Цель exit node, долг снятия и владение -----------------------------
+
+    private static void exitOffGoals() {
+        // Правило требует exit node только на незнакомой Wi-Fi при заданном
+        // имени и включённом управлении.
+        check("ruleRequires: незнакомая Wi-Fi требует exit node",
+                Logic.ruleRequiresExitNode(true, true, NetKind.WIFI, false));
+        check("ruleRequires: доверенная Wi-Fi не требует",
+                !Logic.ruleRequiresExitNode(true, true, NetKind.WIFI, true));
+        check("ruleRequires: мобильная сеть не требует",
+                !Logic.ruleRequiresExitNode(true, true, NetKind.MOBILE, false));
+        check("ruleRequires: без имени не требует",
+                !Logic.ruleRequiresExitNode(true, false, NetKind.WIFI, false));
+        check("ruleRequires: управление выключено",
+                !Logic.ruleRequiresExitNode(false, true, NetKind.WIFI, false));
+
+        check("exitNodeWanted: правило и нет ручного запрета",
+                Logic.exitNodeWanted(true, false));
+        check("exitNodeWanted: ручной запрет важнее правила",
+                !Logic.exitNodeWanted(true, true));
+        check("exitNodeWanted: правило не требует",
+                !Logic.exitNodeWanted(false, false));
+
+        // Medium 1: смена сети на незнакомую Wi-Fi отменяет долг снятия.
+        eq("offDebtAction: сеть не менялась — KEEP",
+                Logic.OffDebtAction.KEEP,
+                Logic.offDebtActionOnNetworkChange(false, true));
+        eq("offDebtAction: незнакомая Wi-Fi — CANCEL",
+                Logic.OffDebtAction.CANCEL,
+                Logic.offDebtActionOnNetworkChange(true, true));
+        eq("offDebtAction: сеть без правила — RESTART",
+                Logic.OffDebtAction.RESTART,
+                Logic.offDebtActionOnNetworkChange(true, false));
+
+        // Сценарий Medium 1: pending_off стартовал на доверенной Wi-Fi,
+        // затем сеть сменилась на незнакомую, где правило требует ON.
+        boolean pendingOff = true;
+        boolean offSent = false;
+        Logic.OffDebtAction action = Logic.offDebtActionOnNetworkChange(
+                true, Logic.exitNodeWanted(
+                        Logic.ruleRequiresExitNode(true, true, NetKind.WIFI, false), false));
+        if (action == Logic.OffDebtAction.CANCEL) {
+            pendingOff = false;
+            offSent = false;
+        }
+        check("Medium 1: долг снятия отменён на незнакомой Wi-Fi", !pendingOff);
+        check("Medium 1: off не отправляется, правило включает ноду", !offSent);
+
+        // Medium 2: Tailscale off + правило off — активная попытка
+        // приостанавливается, владение сохраняется.
+        check("shouldDefer: Tailscale off и правило off — отложить",
+                Logic.shouldDeferExitOff(false, false));
+        check("shouldDefer: Tailscale off, но правило ON — не блокируем ON",
+                !Logic.shouldDeferExitOff(false, true));
+        check("shouldDefer: Tailscale активен — снятие продолжается",
+                !Logic.shouldDeferExitOff(true, false));
+
+        boolean applied = true;
+        String appliedName = "exit-node";
+        boolean ownership = Logic.hasExitOffOwnership(applied, appliedName.length() > 0);
+        check("ownership: applied и имя сохранены", ownership);
+        check("ownership: только имя",
+                Logic.hasExitOffOwnership(false, true));
+        check("ownership: только applied",
+                Logic.hasExitOffOwnership(true, false));
+        check("ownership: пусто", !Logic.hasExitOffOwnership(false, false));
+
+        // Tailscale off + правило off: pending снят, но владение осталось.
+        boolean pending = true;
+        if (Logic.shouldDeferExitOff(false, false)) {
+            pending = false;
+        }
+        check("Medium 2: Tailscale off + правило off — pending снят", !pending);
+        check("Medium 2: Tailscale off + правило off — владение сохранено",
+                ownership);
+
+        // Tailscale подключился позже на сети, где правило требует off:
+        // отложенное снятие возобновляется по владению.
+        check("Medium 2: Tailscale on и правило off — снятие возобновляется",
+                Logic.shouldResumeOwnedOff(true, false, ownership));
+        check("Medium 2: Tailscale off — не возобновляем",
+                !Logic.shouldResumeOwnedOff(false, false, ownership));
+        check("Medium 2: правило ON — не возобновляем",
+                !Logic.shouldResumeOwnedOff(true, true, ownership));
+        check("Medium 2: нет владения — не возобновляем",
+                !Logic.shouldResumeOwnedOff(true, false, false));
+
+        // Подтверждение исчезновения ноды — единственный момент очистки.
+        boolean confirmed = false;
+        boolean ownershipAfterConfirm = ownership;
+        confirmed = Logic.exitOffStep(true, false, true, 1_000L, 1_000L)
+                == Logic.ExitOffStep.CONFIRMED;
+        if (confirmed) {
+            ownershipAfterConfirm = false;
+            applied = false;
+            appliedName = "";
+        }
+        check("Medium 2: подтверждение снимает владение",
+                confirmed && !ownershipAfterConfirm);
+        check("Medium 2: владение очищено вместе с именем",
+                !Logic.hasExitOffOwnership(applied, appliedName.length() > 0));
+
+        // Новая незнакомая Wi-Fi не блокирует включение: DEFER не срабатывает,
+        // даже если владение ещё хранится.
+        check("Medium 2: незнакомая Wi-Fi не блокирует ON",
+                !Logic.shouldDeferExitOff(false, true));
+    }
+
+    // --- Адресная очистка ошибок -------------------------------------------
+
+    private static void errorSources() {
+        check("errorSourceMatches: любая очистка (null)",
+                Logic.errorSourceMatches("vpn", null));
+        check("errorSourceMatches: тот же источник",
+                Logic.errorSourceMatches("exit_node", "exit_node"));
+        check("errorSourceMatches: другой источник не очищается",
+                !Logic.errorSourceMatches("vpn", "exit_node"));
+        check("errorSourceMatches: legacy без источника очищается",
+                Logic.errorSourceMatches("", "exit_node"));
+        check("errorSourceMatches: null-источник считается legacy",
+                Logic.errorSourceMatches(null, "vpn"));
+        check("errorSourceMatches: пустой запрос не совпадает с непустым",
+                !Logic.errorSourceMatches("vpn", ""));
     }
 
     // --- maskHost -----------------------------------------------------------

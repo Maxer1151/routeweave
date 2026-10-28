@@ -214,7 +214,8 @@ public class MonitorService extends Service {
         }
         prefs.record(message, false, message);
         Log.e(TAG, "MonitorService: foreground не запущен, сервис остановлен");
-        Notifications.showError(this, message, null);
+        Notifications.showError(this, message, null,
+                Notifications.ERROR_SOURCE_MONITOR);
         stopSelf();
     }
 

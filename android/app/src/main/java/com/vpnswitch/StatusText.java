@@ -61,7 +61,7 @@ public final class StatusText {
      */
     public static String exitStateLine(Context context, Prefs prefs, boolean tsInstalled,
                                        boolean tailscaleActive, boolean exitActive,
-                                       boolean manualOff) {
+                                       boolean manualOff, boolean ruleRequires) {
         if (!prefs.isExitManageEnabled()) {
             return context.getString(R.string.exit_state_disabled);
         }
@@ -69,6 +69,10 @@ public final class StatusText {
             return context.getString(R.string.exit_state_no_tailscale);
         }
 
+        boolean wanted = ruleRequires && !manualOff;
+        boolean ownership = Logic.hasExitOffOwnership(prefs.isExitNodeApplied(),
+                prefs.getExitNodeAppliedName().length() > 0)
+                || prefs.getExitConfirmAt() > 0L;
         StringBuilder sb = new StringBuilder();
         if (prefs.isExitPendingOff()) {
             // Снятие начато, но фактическое состояние ещё не подтверждено:
@@ -80,6 +84,10 @@ public final class StatusText {
                         ? R.string.exit_state_off_checking
                         : R.string.exit_state_off_deferred));
             }
+        } else if (!tailscaleActive && !wanted && ownership) {
+            // Владение сохранено, но попытки приостановлены до подключения
+            // Tailscale: фактическое снятие ещё не подтверждено.
+            sb.append(context.getString(R.string.exit_state_off_deferred));
         } else if (manualOff && !exitActive) {
             sb.append(context.getString(R.string.exit_state_manual_off));
         } else if (exitActive) {
@@ -94,7 +102,9 @@ public final class StatusText {
             sb.append(context.getString(R.string.exit_state_no_vpn));
         }
 
-        if (prefs.isExitPendingOff() || manualOff) {
+        if (prefs.isExitPendingOff()
+                || (!tailscaleActive && !wanted && ownership)
+                || manualOff) {
             // Пока идёт снятие или действует ручной запрет, подтверждение
             // включения и retry не показываем: они относятся к другому режиму.
             return sb.toString();

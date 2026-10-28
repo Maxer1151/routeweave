@@ -102,11 +102,9 @@ public final class ExitNodeController {
                 @Override
                 public void run() {
                     try {
-                        Prefs prefs = new Prefs(app);
-                        if (!prefs.isExitManageEnabled()) {
-                            return;
-                        }
-                        reconcile(app, prefs);
+                        // Полный tick, а не только reconcile: при смене сети
+                        // нужно успеть пересмотреть и незавершённое снятие.
+                        tick(app);
                     } catch (Throwable t) {
                         Log.e(TAG, "exitnode: onNetworkChanged crashed", t);
                     }
@@ -250,6 +248,9 @@ public final class ExitNodeController {
         boolean tailscaleActive = vpn.active && vpn.type == VpnType.TAILSCALE;
         boolean exitActive = tailscaleActive && NetworkUtils.hasDefaultRoute(context);
 
+        boolean manualOff = isManualOffActive(context, prefs);
+        boolean wanted = Logic.exitNodeWanted(ruleRequiresExitNode(context, prefs), manualOff);
+        boolean ownership = hasExitOffCommand(prefs);
         StringBuilder sb = new StringBuilder();
         if (prefs.isExitPendingOff()) {
             if (prefs.isExitOffBlocked()) {
@@ -259,7 +260,11 @@ public final class ExitNodeController {
                         ? R.string.exit_state_off_checking
                         : R.string.exit_state_off_deferred));
             }
-        } else if (isManualOffActive(context, prefs) && !exitActive) {
+        } else if (!tailscaleActive && !wanted && ownership) {
+            // Активная попытка приостановлена, но владение сохранено: после
+            // подключения Tailscale снятие продолжится, «снят» писать нельзя.
+            sb.append(context.getString(R.string.exit_state_off_deferred));
+        } else if (manualOff && !exitActive) {
             sb.append(context.getString(R.string.exit_state_manual_off));
         } else if (exitActive) {
             // Показываем имя, для которого отправляли команду: текущее имя могло
@@ -274,7 +279,8 @@ public final class ExitNodeController {
         }
 
         if (prefs.isExitPendingOff()
-                || (isManualOffActive(context, prefs) && !exitActive)) {
+                || (!tailscaleActive && !wanted && ownership)
+                || (manualOff && !exitActive)) {
             return sb.toString();
         }
 
@@ -316,18 +322,19 @@ public final class ExitNodeController {
         // Незавершённое снятие имеет приоритет: пока оно не подтверждено,
         // правило не должно включать exit node обратно.
         if (prefs.isExitPendingOff()) {
-            resetOffBackoffOnNetworkChange(context, prefs);
-            stepExitOff(context, prefs);
-            if (!prefs.isExitPendingOff()) {
+            if (!resetOffBackoffOnNetworkChange(context, prefs)) {
+                // Пока долг активен, остальные проверки не выполняются:
+                // tick только подтверждает фактическое исчезновение ноды.
+                stepExitOff(context, prefs);
                 return;
             }
-            // BLOCKED: автоматические SEND прекращены, но tick продолжается,
-            // чтобы работали reconcile/watchdog/retry. Включать exit node они
-            // не могут: reconcile, consumePending, watchdog и retry сами
-            // проверяют pending_off.
+            // Долг отменён: новая сеть требует exit node, применяем правило.
         }
         boolean manualOff = isManualOffActive(context, prefs);
         if (manualOff) {
+            // Ручной запрет не даёт включить ноду, но отложенное снятие
+            // нужно завершить, когда Tailscale подключится.
+            resumeDeferredOff(context, prefs);
             Log.d(TAG, "exitnode: ручное снятие на этой сети, правило пропущено");
             return;
         }
@@ -357,8 +364,7 @@ public final class ExitNodeController {
             // Имя очистили: нода, включённая приложением, больше не нужна.
             // Снимаем её по фактическому признаку, а не только по applied:
             // команда могла не подтвердиться, но успеть примениться.
-            boolean commandPending = prefs.isExitNodeApplied()
-                    || prefs.getExitNodeAppliedName().length() > 0;
+            boolean commandPending = hasExitOffCommand(prefs);
             if (commandPending) {
                 applyOff(context, prefs, "имя exit node очищено", false);
             } else {
@@ -382,9 +388,14 @@ public final class ExitNodeController {
         }
 
         // Мобильная сеть, Ethernet и отсутствие сети: Tailscale с exit node —
-        // не наш сценарий. Только сбрасываем отложенные состояния.
+        // не наш сценарий. Отложенное включение сбрасываем, а свою ноду
+        // снимаем, когда Tailscale активен (иначе владение ждёт подключения).
+        boolean commandPending = hasExitOffCommand(prefs);
         cancelPendingAndRetry(prefs);
         prefs.setExitConfirmAt(0L);
+        if (commandPending) {
+            applyOff(context, prefs, "правило не требует exit node", false);
+        }
         Log.d(TAG, "exitnode: сеть " + kind + ", правило exit node не действует");
     }
 
@@ -392,18 +403,14 @@ public final class ExitNodeController {
     private static void handleTrustedWifi(Context context, Prefs prefs) {
         // applied_name непусто — команда когда-то отправлялась, даже если
         // подтверждение не пришло: снятие в этом случае тоже нужно.
-        boolean commandPending = prefs.isExitNodeApplied()
-                || prefs.getExitConfirmAt() > 0L
-                || prefs.getExitNodeAppliedName().length() > 0
-                || prefs.isExitPendingOff();
+        boolean commandPending = hasExitOffCommand(prefs) || prefs.isExitPendingOff();
         cancelPendingAndRetry(prefs);
         prefs.setExitConfirmAt(0L);
         if (!commandPending) {
             return;
         }
-        // applyOff сам решит, можно ли отправить команду. Если Tailscale уже
-        // выключен, а правило ноду не требует, долг закрывается сразу, без
-        // ожидания переподключения; иначе владение сохраняется до отправки.
+        // applyOff приостановит попытку при неактивном Tailscale, но сохранит
+        // владение до фактического подтверждения снятия.
         applyOff(context, prefs, "доверенная Wi-Fi", false);
     }
 
@@ -638,7 +645,8 @@ public final class ExitNodeController {
         Log.i(TAG, "exitnode: " + message);
         prefs.record(message, false, message);
         Notifications.updateMonitor(context);
-        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                Notifications.ERROR_SOURCE_EXIT_NODE);
     }
 
     /** Фиксирует подтверждённое включение exit node и снимает ошибки. */
@@ -661,7 +669,7 @@ public final class ExitNodeController {
         String status = "Exit node включён: " + appliedName;
         Log.d(TAG, "exitnode: подтверждён " + Logic.maskHost(appliedName));
         prefs.record(status, true, null);
-        Notifications.clearError(context);
+        Notifications.clearError(context, Notifications.ERROR_SOURCE_EXIT_NODE);
         Notifications.updateMonitor(context);
     }
 
@@ -720,7 +728,8 @@ public final class ExitNodeController {
                 + ", повтор через " + (delay / 60000L) + " мин");
         prefs.record(message, false, message);
         Notifications.updateMonitor(context);
-        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                Notifications.ERROR_SOURCE_EXIT_NODE);
     }
 
     private static void applyOn(Context context, Prefs prefs, String reason) {
@@ -738,7 +747,8 @@ public final class ExitNodeController {
             Log.i(TAG, "exitnode: " + message + " (" + reason + ")");
             prefs.record(message, false, message);
             Notifications.updateMonitor(context);
-            Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+            Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                    Notifications.ERROR_SOURCE_EXIT_NODE);
             return;
         }
 
@@ -772,7 +782,8 @@ public final class ExitNodeController {
                     + Logic.maskHost(name) + " (" + reason + ")");
             prefs.record(message, false, message);
             Notifications.updateMonitor(context);
-            Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+            Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                    Notifications.ERROR_SOURCE_EXIT_NODE);
             return;
         }
 
@@ -799,24 +810,17 @@ public final class ExitNodeController {
 
     /**
      * Начинает снятие exit node, не очищая владение до фактического
-     * подтверждения. При неактивном Tailscale команда не отправляется, но долг
-     * сохраняется: applied/applied_name остаются, чтобы после переподключения
-     * Tailscale приложение не потеряло ноду, которую тот мог восстановить.
-     *
-     * Исключение — случай, когда правило уже не требует exit node (доверенная
-     * Wi-Fi, мобильная сеть), имя ноды задано, а Tailscale не активен: цель
-     * достигнута, и долг не хранится до следующего подключения. При пустом
-     * имени владение сохраняется, чтобы снять восстановленную ноду после
-     * переподключения Tailscale.
+     * подтверждения. Если Tailscale не подключён и правило уже не требует
+     * exit node, активная попытка приостанавливается, а applied/applied_name
+     * сохраняются: после переподключения Tailscale снятие продолжится, чтобы
+     * не потерять ноду, которую тот мог восстановить.
      */
     private static void applyOff(Context context, Prefs prefs, String reason, boolean error) {
-        if (offGoalReachedWithoutTailscale(context, prefs)) {
-            boolean hadDebt = prefs.isExitPendingOff();
-            Log.i(TAG, "exitnode: снятие не требуется — Tailscale не активен,"
+        boolean tailscaleActive = isTailscaleActive(context);
+        if (Logic.shouldDeferExitOff(tailscaleActive, exitNodeWanted(context, prefs))) {
+            Log.i(TAG, "exitnode: снятие приостановлено — Tailscale не активен,"
                     + " правило не требует exit node (" + reason + ")");
-            finishExitOff(context, prefs, hadDebt
-                    ? "Снятие exit node отменено: Tailscale не подключён"
-                    : "Снятие exit node не требуется: Tailscale не подключён");
+            deferExitOff(context, prefs, reason);
             return;
         }
         if (prefs.isExitPendingOff()) {
@@ -835,7 +839,7 @@ public final class ExitNodeController {
         prefs.setExitRetryBlocked(false);
         prefs.setExitConfirmAt(0L);
 
-        if (!isTailscaleActive(context)) {
+        if (!tailscaleActive) {
             String status = "Снятие exit node отложено: Tailscale не подключён";
             Log.i(TAG, "exitnode: " + status + " (" + reason + ")");
             prefs.record(status, !error, error ? status : null);
@@ -850,11 +854,10 @@ public final class ExitNodeController {
     private static void stepExitOff(Context context, Prefs prefs) {
         for (int i = 0; i < 4; i++) {
             boolean tailscaleActive = isTailscaleActive(context);
-            if (!tailscaleActive && offGoalReachedWithoutTailscale(context, prefs)) {
-                // Правило больше не требует exit node, а Tailscale выключен:
-                // снимать нечего, долг не должен ждать переподключения.
-                finishExitOff(context, prefs,
-                        "Снятие exit node не требуется: Tailscale не подключён");
+            if (Logic.shouldDeferExitOff(tailscaleActive, exitNodeWanted(context, prefs))) {
+                // Активные попытки прекращаем, но владение сохраняем: после
+                // подключения Tailscale снятие продолжится.
+                deferExitOff(context, prefs, "правило не требует exit node");
                 return;
             }
             boolean exitActive = tailscaleActive && isExitNodeActive(context);
@@ -892,7 +895,8 @@ public final class ExitNodeController {
                     if (failed <= 3) {
                         prefs.record(message, false, message);
                         Notifications.updateMonitor(context);
-                        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+                        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                                Notifications.ERROR_SOURCE_EXIT_NODE);
                     }
                     if (failed >= Logic.MAX_EXIT_OFF_ATTEMPTS) {
                         blockExitOff(context, prefs, failed);
@@ -918,7 +922,8 @@ public final class ExitNodeController {
                     if (failed <= 3) {
                         prefs.record(message, false, message);
                         Notifications.updateMonitor(context);
-                        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+                        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                                Notifications.ERROR_SOURCE_EXIT_NODE);
                     }
                     if (failed >= Logic.MAX_EXIT_OFF_ATTEMPTS) {
                         blockExitOff(context, prefs, failed);
@@ -954,12 +959,14 @@ public final class ExitNodeController {
         Log.w(TAG, "exitnode: " + message);
         prefs.record(message, false, message);
         Notifications.updateMonitor(context);
-        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE);
+        Notifications.showError(context, message, NetworkUtils.PKG_TAILSCALE,
+                Notifications.ERROR_SOURCE_EXIT_NODE);
     }
 
     /** Снятие подтверждено: только теперь очищаем владение и состояние. */
     private static void finishExitOff(Context context, Prefs prefs, String status) {
         boolean hadState = prefs.isExitPendingOff()
+                || prefs.getExitConfirmAt() > 0L
                 || prefs.isExitNodeApplied()
                 || prefs.getExitNodeAppliedName().length() > 0;
         prefs.setExitNodeApplied(false);
@@ -977,15 +984,19 @@ public final class ExitNodeController {
             prefs.record(status, true, null);
         }
         // Подтверждённое снятие делает прежнюю ошибку неактуальной.
-        Notifications.clearError(context);
+        Notifications.clearError(context, Notifications.ERROR_SOURCE_EXIT_NODE);
         Notifications.updateMonitor(context);
     }
 
     /**
-     * Смена сети перезапускает автоматические попытки снятия: долг остаётся,
-     * но счётчик и блокировка сбрасываются. Недоступный SSID сменой не считается.
+     * Смена сети пересматривает долг снятия. Если новая сеть требует exit node,
+     * активная попытка отменяется: иначе через 12 секунд ушла бы команда off,
+     * хотя правило требует включить ноду. Иначе попытки перезапускаются с
+     * чистым счётчиком. Недоступный SSID сменой не считается.
+     *
+     * @return true, если долг снятия отменён и tick должен применить правило ON
      */
-    private static void resetOffBackoffOnNetworkChange(Context context, Prefs prefs) {
+    private static boolean resetOffBackoffOnNetworkChange(Context context, Prefs prefs) {
         String current = currentNetworkKey(context);
         String stored = prefs.getExitOffNetworkKey();
         if (stored.length() > 0) {
@@ -995,10 +1006,26 @@ public final class ExitNodeController {
                     // SSID появился после WIFI||: сохраняем более точный ключ.
                     prefs.setExitOffNetworkKey(canonical);
                 }
-                return;
+                return false;
             }
-        } else if (stored.equals(current)) {
-            return;
+        }
+        Logic.OffDebtAction action = Logic.offDebtActionOnNetworkChange(true,
+                exitNodeWanted(context, prefs));
+        if (action == Logic.OffDebtAction.CANCEL) {
+            Log.i(TAG, "exitnode: сеть сменилась на незнакомую Wi-Fi —"
+                    + " снятие отменено, правило включит exit node");
+            prefs.setExitPendingOff(false);
+            prefs.setExitOffDeadline(0L);
+            prefs.setExitOffSent(false);
+            prefs.setExitOffBlocked(false);
+            prefs.setExitFailCount(0);
+            prefs.setExitOffNetworkKey("");
+            // Долг снятия отменён вместе с retry: правило ON важнее.
+            prefs.setExitRetryAt(0L);
+            prefs.setExitRetryCount(0);
+            prefs.setExitRetryBlocked(false);
+            prefs.setExitConfirmAt(0L);
+            return true;
         }
         prefs.setExitOffNetworkKey(current);
         prefs.setExitFailCount(0);
@@ -1008,6 +1035,7 @@ public final class ExitNodeController {
             prefs.setExitOffBlocked(false);
             Log.i(TAG, "exitnode: сеть сменилась — попытки снятия снова разрешены");
         }
+        return false;
     }
 
     /** Ключ текущей сети: по нему запоминается ручное снятие exit node. */
@@ -1039,15 +1067,54 @@ public final class ExitNodeController {
     }
 
     /**
-     * true, если долг снятия можно закрыть без Tailscale: правило не требует
-     * exit node (доверенная Wi-Fi, мобильная сеть), Tailscale выключен и имя
-     * ноды не очищено. При пустом имени владение сохраняется, чтобы снять ноду
-     * после переподключения Tailscale (H2).
+     * Tailscale не подключён, а правило уже не требует exit node: активную
+     * попытку прекращаем, чтобы не держать pending_off вечно, но владение
+     * (applied/applied_name) сохраняем. Очистка владения возможна только после
+     * фактического подтверждения снятия.
      */
-    private static boolean offGoalReachedWithoutTailscale(Context context, Prefs prefs) {
-        return !isTailscaleActive(context)
-                && trimmed(prefs.getExitNodeName()).length() > 0
-                && !ruleRequiresExitNode(context, prefs);
+    private static void deferExitOff(Context context, Prefs prefs, String reason) {
+        boolean wasPending = prefs.isExitPendingOff();
+        boolean wasBlocked = prefs.isExitOffBlocked();
+        prefs.setExitPendingOff(false);
+        prefs.setExitOffDeadline(0L);
+        prefs.setExitOffSent(false);
+        prefs.setExitOffBlocked(false);
+        prefs.setExitFailCount(0);
+        prefs.setExitOffNetworkKey("");
+        if (!wasPending && !wasBlocked) {
+            return;
+        }
+        String status = "Снятие exit node отложено: Tailscale не подключён";
+        Log.i(TAG, "exitnode: " + status + " (" + reason + ")");
+        prefs.recordNeutral(status);
+        Notifications.updateMonitor(context);
+    }
+
+    /** true, если приложение включало ноду и ещё не подтвердило снятие. */
+    private static boolean hasExitOffCommand(Prefs prefs) {
+        return hasExitOffOwnership(prefs) || prefs.getExitConfirmAt() > 0L;
+    }
+
+    /** true, если applied/applied_name указывают на нашу ноду. */
+    private static boolean hasExitOffOwnership(Prefs prefs) {
+        return Logic.hasExitOffOwnership(prefs.isExitNodeApplied(),
+                prefs.getExitNodeAppliedName().length() > 0);
+    }
+
+    /**
+     * Ручное снятие важнее правила, но отложенное владение всё равно нужно
+     * закрыть: если Tailscale подключился позже, отправляем снятие.
+     */
+    private static void resumeDeferredOff(Context context, Prefs prefs) {
+        if (prefs.isExitPendingOff()) {
+            stepExitOff(context, prefs);
+            return;
+        }
+        if (!Logic.shouldResumeOwnedOff(isTailscaleActive(context),
+                exitNodeWanted(context, prefs), hasExitOffCommand(prefs))) {
+            return;
+        }
+        applyOff(context, prefs, "отложенное ручное снятие", false);
     }
 
     /**
@@ -1056,14 +1123,17 @@ public final class ExitNodeController {
      * имени правило ноду не требует.
      */
     private static boolean ruleRequiresExitNode(Context context, Prefs prefs) {
-        if (!prefs.isExitManageEnabled()
-                || trimmed(prefs.getExitNodeName()).length() == 0) {
-            return false;
-        }
-        if (NetworkUtils.currentKind(context) != NetKind.WIFI) {
-            return false;
-        }
-        return NetworkUtils.currentWifiAccess(context).trust != Logic.Trust.TRUSTED;
+        NetKind kind = NetworkUtils.currentKind(context);
+        boolean trusted = kind == NetKind.WIFI
+                && NetworkUtils.currentWifiAccess(context, kind).trust == Logic.Trust.TRUSTED;
+        return Logic.ruleRequiresExitNode(prefs.isExitManageEnabled(),
+                trimmed(prefs.getExitNodeName()).length() > 0, kind, trusted);
+    }
+
+    /** Итоговая цель: правило и отсутствие ручного запрета. */
+    private static boolean exitNodeWanted(Context context, Prefs prefs) {
+        return Logic.exitNodeWanted(ruleRequiresExitNode(context, prefs),
+                isManualOffActive(context, prefs));
     }
 
     /** Явное выключение управления: очистка флагов и снятие exit node. */
@@ -1121,6 +1191,8 @@ public final class ExitNodeController {
         Log.i(TAG, "exitnode: управление выключено, exit node "
                 + (commandPending ? (delivered && tailscaleActive ? "снятие отправлено" : "не снят")
                 : "не был включён приложением"));
+        // Ошибка снятия/блокировки больше не актуальна: управление выключено.
+        Notifications.clearError(context, Notifications.ERROR_SOURCE_EXIT_NODE);
     }
 
     /** Планирует пробуждение state machine через таймаут подтверждения. */
