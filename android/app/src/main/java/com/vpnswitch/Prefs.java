@@ -43,6 +43,7 @@ public final class Prefs {
     private static final String KEY_EXIT_OFF_SENT = "exit_off_sent";
     private static final String KEY_EXIT_OFF_BLOCKED = "exit_off_blocked";
     private static final String KEY_EXIT_OFF_NETWORK_KEY = "exit_off_network_key";
+    private static final String KEY_EXIT_OFF_BSSID = "exit_off_bssid";
     private static final String KEY_EXIT_MANUAL_OFF_KEY = "exit_manual_off_key";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
@@ -427,6 +428,25 @@ public final class Prefs {
             prefs.edit().remove(KEY_EXIT_OFF_NETWORK_KEY).apply();
         } else {
             prefs.edit().putString(KEY_EXIT_OFF_NETWORK_KEY, value).apply();
+        }
+    }
+
+    /**
+     * BSSID точки, на которой взведён долг снятия. SSID-ключ намеренно не
+     * включает BSSID: роуминг не должен его сбрасывать, но смена точки с тем
+     * же SSID — уже другая сеть для долга снятия.
+     */
+    public String getExitOffBssid() {
+        String value = prefs.getString(KEY_EXIT_OFF_BSSID, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffBssid(String bssid) {
+        String value = bssid == null ? "" : bssid.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_BSSID).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_BSSID, value).apply();
         }
     }
 

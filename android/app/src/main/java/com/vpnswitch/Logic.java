@@ -321,6 +321,26 @@ public final class Logic {
     }
 
     /**
+     * true, если долг снятия относится уже к другой сети. Смена BSSID у того
+     * же SSID — тоже смена сети: долг снятия привязан к точке, а не только к
+     * имени сети.
+     */
+    public static boolean offNetworkChanged(boolean ssidChanged, boolean bssidChanged) {
+        return ssidChanged || bssidChanged;
+    }
+
+    /**
+     * true, если сохранённый и текущий BSSID известны и различаются. Пустой
+     * BSSID смену не доказывает: на API 29 и без разрешений он может быть
+     * недоступен, и тогда сеть считается прежней.
+     */
+    public static boolean offBssidChanged(String savedBssid, String currentBssid) {
+        String saved = normalizeBssid(savedBssid);
+        String current = normalizeBssid(currentBssid);
+        return saved != null && current != null && !saved.equals(current);
+    }
+
+    /**
      * true, если сохранённый ручной запрет всё ещё относится к текущей сети.
      * Сравниваются тип сети и SSID; старые ключи с BSSID читаются так же.
      * Пустой сохранённый SSID считается «сеть не опознана» и сохраняет запрет,
@@ -497,6 +517,23 @@ public final class Logic {
         CANCEL,
         /** Новая сеть не требует exit node: попытки снятия перезапускаются. */
         RESTART
+    }
+
+    /** Источник запуска exit node: штатный периодический tick или сеть. */
+    public enum TickSource {
+        /** Штатный tick сервиса: правило, подтверждение, watchdog и retry. */
+        PERIODIC,
+        /** Сетевое событие: только правило и пересчёт долга, без проб. */
+        NETWORK
+    }
+
+    /**
+     * Watchdog и retry выполняются только в штатном периодическом tick.
+     * Сетевые callback'и приходят пачками (onAvailable/onLost/...), и пробы
+     * интернета в них давали бы ложные снятия exit node.
+     */
+    public static boolean runsBackgroundChecks(TickSource source) {
+        return source == TickSource.PERIODIC;
     }
 
     /**

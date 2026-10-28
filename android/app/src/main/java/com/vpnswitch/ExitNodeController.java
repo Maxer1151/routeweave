@@ -88,9 +88,10 @@ public final class ExitNodeController {
     }
 
     /**
-     * Правило exit node для текущей сети, независимо от автопереключения.
-     * Незнакомая Wi-Fi — включить, доверенная — снять, мобильная/нет сети —
-     * только сбросить pending/retry.
+     * Сетевое событие: применяет правило exit node и пересматривает долг
+     * снятия, но не запускает watchdog/retry. Они остаются в периодическом
+     * tick: callback'и приходят пачками, и пробы интернета на каждый
+     * onAvailable/onCapabilitiesChanged давали бы ложные снятия.
      */
     public static void onNetworkChangedAsync(Context context) {
         if (context == null) {
@@ -102,9 +103,7 @@ public final class ExitNodeController {
                 @Override
                 public void run() {
                     try {
-                        // Полный tick, а не только reconcile: при смене сети
-                        // нужно успеть пересмотреть и незавершённое снятие.
-                        tick(app);
+                        tick(app, Logic.TickSource.NETWORK);
                     } catch (Throwable t) {
                         Log.e(TAG, "exitnode: onNetworkChanged crashed", t);
                     }
@@ -148,6 +147,7 @@ public final class ExitNodeController {
                             prefs.setExitOffBlocked(false);
                             prefs.setExitFailCount(0);
                             prefs.setExitOffNetworkKey("");
+                            prefs.setExitOffBssid("");
                             applyOn(app, prefs, "команда");
                         } else {
                             // Ручное снятие запоминаем для текущей сети и
@@ -169,6 +169,7 @@ public final class ExitNodeController {
                             prefs.setExitOffBlocked(false);
                             prefs.setExitFailCount(0);
                             prefs.setExitOffNetworkKey(currentNetworkKey(app));
+                            prefs.setExitOffBssid(currentBssid(app));
                             applyOff(app, prefs, "ручное снятие", false);
                         }
                     } catch (Throwable t) {
@@ -314,6 +315,14 @@ public final class ExitNodeController {
     // ------------------------------------------------------------------
 
     private static void tick(Context context) {
+        tick(context, Logic.TickSource.PERIODIC);
+    }
+
+    /**
+     * @param source PERIODIC — штатный tick сервиса с watchdog/retry;
+     *               NETWORK — сетевое событие: только правило и долг снятия
+     */
+    private static void tick(Context context, Logic.TickSource source) {
         Prefs prefs = new Prefs(context);
         if (!prefs.isExitManageEnabled()) {
             return;
@@ -342,8 +351,10 @@ public final class ExitNodeController {
         confirmIfDue(context, prefs);
         reconcile(context, prefs);
         consumePending(context, prefs);
-        runWatchdog(context, prefs);
-        runRetry(context, prefs);
+        if (Logic.runsBackgroundChecks(source)) {
+            runWatchdog(context, prefs);
+            runRetry(context, prefs);
+        }
     }
 
     /** Периодическая сверка желаемого и фактического состояния exit node. */
@@ -553,6 +564,17 @@ public final class ExitNodeController {
             return;
         }
         long retryAt = prefs.getExitRetryAt();
+        if (trimmed(prefs.getExitNodeName()).length() == 0) {
+            // Имя очистили: applyOn("") бессмыслен и оставил бы retry висеть.
+            if (retryAt > 0L || prefs.getExitRetryCount() > 0
+                    || prefs.isExitRetryBlocked()) {
+                cancelPendingAndRetry(prefs);
+                String status = "Exit node: имя не задано — автовосстановление отменено";
+                Log.i(TAG, "exitnode: " + status);
+                recordExitNodeOutcome(context, prefs, status);
+            }
+            return;
+        }
         if (retryAt == 0L || System.currentTimeMillis() < retryAt) {
             return;
         }
@@ -739,6 +761,7 @@ public final class ExitNodeController {
         prefs.setExitOffSent(false);
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
+        prefs.setExitOffBssid("");
         String name = trimmed(prefs.getExitNodeName());
         if (name.length() == 0) {
             prefs.setExitNodePendingOn(false);
@@ -833,6 +856,7 @@ public final class ExitNodeController {
         prefs.setExitOffBlocked(false);
         prefs.setExitFailCount(0);
         prefs.setExitOffNetworkKey(currentNetworkKey(context));
+        prefs.setExitOffBssid(currentBssid(context));
         prefs.setExitNodePendingOn(false);
         prefs.setExitRetryAt(0L);
         prefs.setExitRetryCount(0);
@@ -976,6 +1000,7 @@ public final class ExitNodeController {
         prefs.setExitOffSent(false);
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
+        prefs.setExitOffBssid("");
         prefs.setExitNodePendingOn(false);
         prefs.setExitConfirmAt(0L);
         prefs.setExitFailCount(0);
@@ -989,25 +1014,49 @@ public final class ExitNodeController {
     }
 
     /**
+     * Нейтральный/успешный итог exit node: прошлую ошибку очищаем только если
+     * она относилась к exit node, чтобы не погасить unrelated-ошибку WDTT.
+     */
+    private static void recordExitNodeOutcome(Context context, Prefs prefs, String status) {
+        if (Notifications.ERROR_SOURCE_EXIT_NODE.equals(prefs.getErrorSource())) {
+            prefs.record(status, true, null);
+        } else {
+            prefs.recordNeutral(status);
+        }
+        Notifications.clearError(context, Notifications.ERROR_SOURCE_EXIT_NODE);
+        Notifications.updateMonitor(context);
+    }
+
+    /**
      * Смена сети пересматривает долг снятия. Если новая сеть требует exit node,
      * активная попытка отменяется: иначе через 12 секунд ушла бы команда off,
      * хотя правило требует включить ноду. Иначе попытки перезапускаются с
-     * чистым счётчиком. Недоступный SSID сменой не считается.
+     * чистым счётчиком. Смена BSSID у того же SSID тоже считается сменой сети:
+     * долг снятия привязан к точке, а не только к имени сети. Недоступный
+     * SSID/BSSID сменой не считается.
      *
      * @return true, если долг снятия отменён и tick должен применить правило ON
      */
     private static boolean resetOffBackoffOnNetworkChange(Context context, Prefs prefs) {
         String current = currentNetworkKey(context);
         String stored = prefs.getExitOffNetworkKey();
-        if (stored.length() > 0) {
-            String canonical = Logic.manualOffKeyAfterCheck(stored, current);
-            if (canonical.length() > 0) {
-                if (!canonical.equals(stored)) {
-                    // SSID появился после WIFI||: сохраняем более точный ключ.
-                    prefs.setExitOffNetworkKey(canonical);
-                }
-                return false;
+        String currentBssid = currentBssid(context);
+        String storedBssid = prefs.getExitOffBssid();
+        boolean bssidChanged = Logic.offBssidChanged(storedBssid, currentBssid);
+        String canonical = stored.length() > 0
+                ? Logic.manualOffKeyAfterCheck(stored, current) : "";
+        boolean networkChanged = Logic.offNetworkChanged(
+                stored.length() == 0 || canonical.length() == 0, bssidChanged);
+        if (!networkChanged) {
+            if (!canonical.equals(stored)) {
+                // SSID появился после WIFI||: сохраняем более точный ключ.
+                prefs.setExitOffNetworkKey(canonical);
             }
+            if (currentBssid.length() > 0) {
+                // Миграция долга, созданного до появления BSSID в ключе.
+                prefs.setExitOffBssid(currentBssid);
+            }
+            return false;
         }
         Logic.OffDebtAction action = Logic.offDebtActionOnNetworkChange(true,
                 exitNodeWanted(context, prefs));
@@ -1020,14 +1069,19 @@ public final class ExitNodeController {
             prefs.setExitOffBlocked(false);
             prefs.setExitFailCount(0);
             prefs.setExitOffNetworkKey("");
+            prefs.setExitOffBssid("");
             // Долг снятия отменён вместе с retry: правило ON важнее.
             prefs.setExitRetryAt(0L);
             prefs.setExitRetryCount(0);
             prefs.setExitRetryBlocked(false);
             prefs.setExitConfirmAt(0L);
+            // Красная ошибка «снятие не удалось» больше не актуальна.
+            recordExitNodeOutcome(context, prefs,
+                    "Снятие exit node отменено: сеть требует exit node");
             return true;
         }
         prefs.setExitOffNetworkKey(current);
+        prefs.setExitOffBssid(currentBssid);
         prefs.setExitFailCount(0);
         prefs.setExitOffSent(false);
         prefs.setExitOffDeadline(0L);
@@ -1044,6 +1098,16 @@ public final class ExitNodeController {
         NetworkUtils.WifiAccess access = kind == NetKind.WIFI
                 ? NetworkUtils.currentWifiAccess(context, kind) : null;
         return Logic.networkKey(kind, access == null ? null : access.ssid);
+    }
+
+    /** BSSID текущей Wi-Fi или пустая строка, если он недоступен. */
+    private static String currentBssid(Context context) {
+        NetKind kind = NetworkUtils.currentKind(context);
+        if (kind != NetKind.WIFI) {
+            return "";
+        }
+        String bssid = NetworkUtils.currentWifiAccess(context, kind).bssid;
+        return bssid == null ? "" : bssid;
     }
 
     /** true, если на этой сети пользователь снял exit node вручную. */
@@ -1081,6 +1145,7 @@ public final class ExitNodeController {
         prefs.setExitOffBlocked(false);
         prefs.setExitFailCount(0);
         prefs.setExitOffNetworkKey("");
+        prefs.setExitOffBssid("");
         if (!wasPending && !wasBlocked) {
             return;
         }
@@ -1163,6 +1228,7 @@ public final class ExitNodeController {
         prefs.setExitOffSent(false);
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
+        prefs.setExitOffBssid("");
         prefs.setExitManualOffKey("");
 
         boolean delivered = true;

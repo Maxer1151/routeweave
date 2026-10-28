@@ -45,6 +45,7 @@ public final class LogicTest {
         networkKeys();
         exitOffSteps();
         exitOffGoals();
+        networkTickPolicy();
         errorSources();
         hostMasking();
         prefixes();
@@ -775,6 +776,50 @@ public final class LogicTest {
         // даже если владение ещё хранится.
         check("Medium 2: незнакомая Wi-Fi не блокирует ON",
                 !Logic.shouldDeferExitOff(false, true));
+    }
+
+    // --- Сетевой tick, долг и BSSID ----------------------------------------
+
+    private static void networkTickPolicy() {
+        // Medium: сетевые callback'и не запускают watchdog/retry с пробами
+        // интернета. Они остаются только в штатном периодическом tick.
+        check("сетевой tick: watchdog/retry не запускаются",
+                !Logic.runsBackgroundChecks(Logic.TickSource.NETWORK));
+        check("периодический tick: watchdog/retry запускаются",
+                Logic.runsBackgroundChecks(Logic.TickSource.PERIODIC));
+
+        // Medium 1 не должен регрессировать: сетевой путь по-прежнему
+        // пересматривает долг и отменяет его на незнакомой Wi-Fi.
+        eq("сетевой tick: незнакомая Wi-Fi отменяет долг снятия",
+                Logic.OffDebtAction.CANCEL,
+                Logic.offDebtActionOnNetworkChange(true,
+                        Logic.exitNodeWanted(
+                                Logic.ruleRequiresExitNode(true, true, NetKind.WIFI, false),
+                                false)));
+
+        // Low: долг снятия привязан к SSID+BSSID, поэтому смена точки с тем
+        // же SSID — смена сети. Ручной запрет при этом остаётся на SSID.
+        check("offBssidChanged: тот же BSSID в другом регистре",
+                !Logic.offBssidChanged("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff"));
+        check("offBssidChanged: другая точка того же SSID",
+                Logic.offBssidChanged("aa:bb:cc:dd:ee:ff", "aa:bb:cc:dd:ee:00"));
+        check("offBssidChanged: сохранённый BSSID неизвестен",
+                !Logic.offBssidChanged("", "aa:bb:cc:dd:ee:ff"));
+        check("offBssidChanged: текущий BSSID недоступен",
+                !Logic.offBssidChanged("aa:bb:cc:dd:ee:ff", null));
+        check("offBssidChanged: оба BSSID неизвестны",
+                !Logic.offBssidChanged(null, ""));
+
+        // Решение о смене сети складывается из SSID и BSSID: долг снятия
+        // пересматривается, если изменился хотя бы один известный признак.
+        check("offNetworkChanged: та же сеть",
+                !Logic.offNetworkChanged(false, false));
+        check("offNetworkChanged: сменился SSID",
+                Logic.offNetworkChanged(true, false));
+        check("offNetworkChanged: сменился BSSID у того же SSID",
+                Logic.offNetworkChanged(false, true));
+        check("offNetworkChanged: сменились SSID и BSSID",
+                Logic.offNetworkChanged(true, true));
     }
 
     // --- Адресная очистка ошибок -------------------------------------------

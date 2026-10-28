@@ -198,6 +198,14 @@ public class MonitorService extends Service {
             } else {
                 startForeground(Notifications.NOTIF_MONITOR, n);
             }
+            // Предыдущий отказ FGS больше не актуален: сервис запустился.
+            // Источник ошибки проверяем, чтобы не погасить чужую ошибку,
+            // если она успела записаться после неудачного запуска.
+            Prefs current = prefs != null ? prefs : new Prefs(this);
+            if (Notifications.ERROR_SOURCE_MONITOR.equals(current.getErrorSource())) {
+                current.record(getString(R.string.monitor_running), true, null);
+            }
+            Notifications.clearError(this, Notifications.ERROR_SOURCE_MONITOR);
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "MonitorService: startForeground failed", t);
