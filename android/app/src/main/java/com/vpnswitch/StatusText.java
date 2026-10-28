@@ -60,7 +60,8 @@ public final class StatusText {
      * tsInstalled/tailscaleActive/exitActive уже посчитаны вызывающим.
      */
     public static String exitStateLine(Context context, Prefs prefs, boolean tsInstalled,
-                                       boolean tailscaleActive, boolean exitActive) {
+                                       boolean tailscaleActive, boolean exitActive,
+                                       boolean manualOff) {
         if (!prefs.isExitManageEnabled()) {
             return context.getString(R.string.exit_state_disabled);
         }
@@ -69,7 +70,15 @@ public final class StatusText {
         }
 
         StringBuilder sb = new StringBuilder();
-        if (exitActive) {
+        if (prefs.isExitPendingOff()) {
+            // Снятие начато, но фактическое состояние ещё не подтверждено:
+            // «снят» показывать нельзя.
+            sb.append(context.getString(tailscaleActive
+                    ? R.string.exit_state_off_checking
+                    : R.string.exit_state_off_deferred));
+        } else if (manualOff && !exitActive) {
+            sb.append(context.getString(R.string.exit_state_manual_off));
+        } else if (exitActive) {
             // Имя, для которого отправляли команду: текущее могло быть изменено
             // и ещё не применено.
             String appliedName = prefs.getExitNodeAppliedName();
@@ -79,6 +88,12 @@ public final class StatusText {
             sb.append(context.getString(R.string.exit_state_off));
         } else {
             sb.append(context.getString(R.string.exit_state_no_vpn));
+        }
+
+        if (prefs.isExitPendingOff() || manualOff) {
+            // Пока идёт снятие или действует ручной запрет, подтверждение
+            // включения и retry не показываем: они относятся к другому режиму.
+            return sb.toString();
         }
 
         long retryAt = prefs.getExitRetryAt();

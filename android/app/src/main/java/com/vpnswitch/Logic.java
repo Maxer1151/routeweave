@@ -249,6 +249,101 @@ public final class Logic {
         return Trust.MISMATCH;
     }
 
+    // --- Ручное снятие exit node -------------------------------------------
+
+    /**
+     * Ключ текущей сети для запоминания ручного снятия exit node. SSID и BSSID
+     * нормализуются, поэтому запись переживает перезапуск. Ключ сравнивается
+     * целиком, а «|» внутри SSID не ломает разбор типа сети и проверку пустого
+     * SSID.
+     */
+    public static String networkKey(NetKind kind, String ssid, String bssid) {
+        String kindName = (kind == null ? NetKind.NONE : kind).name();
+        String normalizedBssid = nullToEmpty(normalizeBssid(bssid));
+        return kindName + "|" + normalizeSsid(ssid) + "|" + normalizedBssid;
+    }
+
+    /**
+     * true, если сохранённый ручной запрет всё ещё относится к текущей сети.
+     * Запрет снимается при смене типа сети или при переходе на другую Wi-Fi.
+     * Если Wi-Fi не опознана (SSID недоступен), смену сети доказать нельзя —
+     * запрет сохраняется, чтобы exit node не вернулся «сам».
+     */
+    public static boolean manualOffApplies(String savedKey, String currentKey) {
+        if (savedKey == null || savedKey.length() == 0) {
+            return false;
+        }
+        if (currentKey == null || currentKey.length() == 0) {
+            return true;
+        }
+        if (savedKey.equals(currentKey)) {
+            return true;
+        }
+        int savedBar = savedKey.indexOf('|');
+        int currentBar = currentKey.indexOf('|');
+        if (savedBar < 0 || currentBar < 0) {
+            return false;
+        }
+        if (!savedKey.substring(0, savedBar).equals(currentKey.substring(0, currentBar))) {
+            // Другой тип сети: Wi-Fi -> мобильная или наоборот.
+            return false;
+        }
+        // Тип тот же, но SSID не прочитан: считаем, что сеть могла не меняться.
+        String rest = currentKey.substring(currentBar + 1);
+        int ssidEnd = rest.indexOf('|');
+        String currentSsid = ssidEnd < 0 ? rest : rest.substring(0, ssidEnd);
+        return currentSsid.length() == 0;
+    }
+
+    /** Удобная форма для UI: сравнить сохранённый ключ с текущей сетью. */
+    public static boolean manualOffApplies(String savedKey, NetKind kind,
+                                           String ssid, String bssid) {
+        return manualOffApplies(savedKey, networkKey(kind, ssid, bssid));
+    }
+
+    /**
+     * Шаг снятия exit node. Вызывается только при активном «долге» снятия:
+     *
+     * DEFER — Tailscale не подключён, команду отправить нельзя;
+     * START — начать стартовое окно (deadline ещё не задан): Tailscale получает
+     *         время восстановить сохранённый exit node;
+     * SEND — отправить команду снятия (в том числе повтор);
+     * WAIT — идёт окно, подтверждение ещё не наступило;
+     * CONFIRMED — exit node фактически не активен после окна;
+     * FAILED — окно истекло, exit node всё ещё активен.
+     *
+     * Окно нужно, чтобы Tailscale успел восстановить exit node после
+     * переподключения: «не активен» сразу после connect не считается снятием.
+     */
+    public enum ExitOffStep {
+        DEFER,
+        START,
+        SEND,
+        WAIT,
+        CONFIRMED,
+        FAILED
+    }
+
+    public static ExitOffStep exitOffStep(boolean tailscaleActive, boolean exitActive,
+                                          boolean sent, long deadline, long now) {
+        if (!tailscaleActive) {
+            return ExitOffStep.DEFER;
+        }
+        if (deadline <= 0L) {
+            return ExitOffStep.START;
+        }
+        boolean windowOver = now >= deadline;
+        if (!sent) {
+            // Первое окно после подключения Tailscale: даём ему восстановить
+            // сохранённый exit node, чтобы команда снятия шла уже после этого.
+            return windowOver ? ExitOffStep.SEND : ExitOffStep.WAIT;
+        }
+        if (!exitActive) {
+            return windowOver ? ExitOffStep.CONFIRMED : ExitOffStep.WAIT;
+        }
+        return windowOver ? ExitOffStep.FAILED : ExitOffStep.WAIT;
+    }
+
     /**
      * Маскирует хост для логов: IPv4 — первый октет, IPv6 — первая группа,
      * имя — первый символ. Используется только для диагностики, не для UI.

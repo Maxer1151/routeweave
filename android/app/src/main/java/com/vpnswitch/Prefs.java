@@ -36,6 +36,10 @@ public final class Prefs {
     private static final String KEY_EXIT_RETRY_COUNT = "exit_retry_count";
     private static final String KEY_EXIT_RETRY_BLOCKED = "exit_retry_blocked";
     private static final String KEY_EXIT_CONFIRM_AT = "exit_confirm_at";
+    private static final String KEY_EXIT_PENDING_OFF = "exit_node_pending_off";
+    private static final String KEY_EXIT_OFF_DEADLINE = "exit_off_deadline";
+    private static final String KEY_EXIT_OFF_SENT = "exit_off_sent";
+    private static final String KEY_EXIT_MANUAL_OFF_KEY = "exit_manual_off_key";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
     public static final String DEFAULT_EXIT_NODE_IP = "";
@@ -338,6 +342,56 @@ public final class Prefs {
 
     public void setExitConfirmAt(long timeMs) {
         prefs.edit().putLong(KEY_EXIT_CONFIRM_AT, Math.max(0L, timeMs)).apply();
+    }
+
+    /**
+     * true, если приложение отправило (или должно отправить) снятие exit node,
+     * но фактическое снятие ещё не подтверждено. Владение (applied/applied_name)
+     * в это время сохраняется: Tailscale мог восстановить ноду после
+     * переподключения.
+     */
+    public boolean isExitPendingOff() {
+        return prefs.getBoolean(KEY_EXIT_PENDING_OFF, false);
+    }
+
+    public void setExitPendingOff(boolean pending) {
+        prefs.edit().putBoolean(KEY_EXIT_PENDING_OFF, pending).apply();
+    }
+
+    /** Дедлайн окна проверки снятия; 0 — окно ещё не начато. */
+    public long getExitOffDeadline() {
+        return prefs.getLong(KEY_EXIT_OFF_DEADLINE, 0L);
+    }
+
+    public void setExitOffDeadline(long timeMs) {
+        prefs.edit().putLong(KEY_EXIT_OFF_DEADLINE, Math.max(0L, timeMs)).apply();
+    }
+
+    /** true, если команда снятия уже отправлена в текущем окне. */
+    public boolean isExitOffSent() {
+        return prefs.getBoolean(KEY_EXIT_OFF_SENT, false);
+    }
+
+    public void setExitOffSent(boolean sent) {
+        prefs.edit().putBoolean(KEY_EXIT_OFF_SENT, sent).apply();
+    }
+
+    /**
+     * Ключ сети, на которой пользователь вручную снял exit node. Пока сеть не
+     * сменилась, правило не включает ноду обратно.
+     */
+    public String getExitManualOffKey() {
+        String value = prefs.getString(KEY_EXIT_MANUAL_OFF_KEY, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitManualOffKey(String key) {
+        String value = key == null ? "" : key.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_MANUAL_OFF_KEY).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_MANUAL_OFF_KEY, value).apply();
+        }
     }
 
     /** Сохраняет последний статус, результат и время. error == null очищает прошлую ошибку. */

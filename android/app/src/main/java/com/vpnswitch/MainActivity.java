@@ -414,6 +414,9 @@ public class MainActivity extends Activity {
             public void onClick(View v) {
                 saveExitTexts();
                 ExitNodeController.applyNowAsync(MainActivity.this, false);
+                // Правило не вернёт ноду на этой сети до смены сети или
+                // выключения управления exit node.
+                toast(R.string.toast_exit_manual_off);
             }
         });
 
@@ -978,15 +981,20 @@ public class MainActivity extends Activity {
         setTextIfChanged(btnApply, snapshot.applying
                 ? R.string.btn_applying : R.string.btn_apply);
 
-        btnExitOff.setEnabled(snapshot.tsInstalled);
+        btnExitOff.setEnabled(snapshot.tsInstalled && prefs.isExitManageEnabled());
         updateExitOnEnabled();
+        boolean manualOff = Logic.manualOffApplies(prefs.getExitManualOffKey(),
+                snapshot.kind,
+                snapshot.access == null ? null : snapshot.access.ssid,
+                snapshot.access == null ? null : snapshot.access.bssid);
         setTextIfChanged(tvExitState, StatusText.exitStateLine(this, prefs,
                 snapshot.tsInstalled,
                 snapshot.vpn.active && snapshot.vpn.type == VpnType.TAILSCALE,
-                snapshot.exitActive));
+                snapshot.exitActive, manualOff));
         if (snapshot.exitActive) {
             setTextColorIfChanged(tvExitState, R.color.colorGreen);
-        } else if (prefs.getExitNodePendingOn() || prefs.getExitRetryAt() > 0L
+        } else if (manualOff || prefs.isExitPendingOff()
+                || prefs.getExitNodePendingOn() || prefs.getExitRetryAt() > 0L
                 || prefs.getExitConfirmAt() > 0L) {
             setTextColorIfChanged(tvExitState, R.color.colorAmber);
         } else {

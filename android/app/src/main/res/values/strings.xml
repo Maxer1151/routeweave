@@ -81,6 +81,9 @@
     <string name="exit_state_pending">ждёт подключения Tailscale</string>
     <string name="exit_state_confirm">команда отправлена, подтверждение…</string>
     <string name="exit_state_unconfirmed">команда отправлена, exit node ещё не активен</string>
+    <string name="exit_state_off_checking">снятие exit node проверяется…</string>
+    <string name="exit_state_off_deferred">снятие exit node отложено: Tailscale не подключён</string>
+    <string name="exit_state_manual_off">снят вручную на этой сети — правило не применяется до смены сети</string>
     <string name="exit_state_name_required">Укажите имя exit node: без него включение невозможно</string>
 
     <string name="btn_tailscale_on">Tailscale вкл</string>
