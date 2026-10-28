@@ -346,8 +346,10 @@ public class MainActivity extends Activity {
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 prefs.setExitManageEnabled(isChecked);
                 if (isChecked) {
+                    // Тик запускает MonitorService.onStartCommand() после
+                    // успешного startForeground(): UI не применяет exit node
+                    // в обход работающего FGS.
                     startMonitor();
-                    ExitNodeController.tickAsync(MainActivity.this);
                     maybeExplainNotificationsDisabled();
                 } else {
                     // Выключение управления: снять pending/retry и, если exit node
