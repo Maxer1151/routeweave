@@ -310,22 +310,21 @@ public final class Logic {
     // --- Ручное снятие exit node -------------------------------------------
 
     /**
-     * Ключ текущей сети для запоминания ручного снятия exit node. SSID и BSSID
-     * нормализуются, поэтому запись переживает перезапуск. Ключ сравнивается
-     * целиком, а «|» внутри SSID не ломает разбор типа сети и проверку пустого
-     * SSID.
+     * Ключ сети для запоминания ручного снятия exit node. SSID нормализуется,
+     * BSSID намеренно не входит: роуминг между точками одного SSID не должен
+     * снимать ручной запрет. Третий пустой сегмент сохраняет совместимость с
+     * прежним форматом {@code WIFI|SSID|BSSID}, где BSSID теперь всегда пуст.
      */
-    public static String networkKey(NetKind kind, String ssid, String bssid) {
+    public static String networkKey(NetKind kind, String ssid) {
         String kindName = (kind == null ? NetKind.NONE : kind).name();
-        String normalizedBssid = nullToEmpty(normalizeBssid(bssid));
-        return kindName + "|" + normalizeSsid(ssid) + "|" + normalizedBssid;
+        return kindName + "|" + normalizeSsid(ssid) + "|";
     }
 
     /**
      * true, если сохранённый ручной запрет всё ещё относится к текущей сети.
-     * Запрет снимается при смене типа сети или при переходе на другую Wi-Fi.
-     * Если Wi-Fi не опознана (SSID недоступен), смену сети доказать нельзя —
-     * запрет сохраняется, чтобы exit node не вернулся «сам».
+     * Сравниваются тип сети и SSID; старые ключи с BSSID читаются так же.
+     * Пустой сохранённый SSID считается «сеть не опознана» и сохраняет запрет,
+     * пока SSID не появится; пустой текущий SSID смену сети не доказывает.
      */
     public static boolean manualOffApplies(String savedKey, String currentKey) {
         if (savedKey == null || savedKey.length() == 0) {
@@ -334,30 +333,91 @@ public final class Logic {
         if (currentKey == null || currentKey.length() == 0) {
             return true;
         }
-        if (savedKey.equals(currentKey)) {
-            return true;
-        }
-        int savedBar = savedKey.indexOf('|');
-        int currentBar = currentKey.indexOf('|');
-        if (savedBar < 0 || currentBar < 0) {
-            return false;
-        }
-        if (!savedKey.substring(0, savedBar).equals(currentKey.substring(0, currentBar))) {
+        String savedKind = manualOffKind(savedKey);
+        String currentKind = manualOffKind(currentKey);
+        if (savedKind.length() == 0 || !savedKind.equals(currentKind)) {
             // Другой тип сети: Wi-Fi -> мобильная или наоборот.
             return false;
         }
-        // Тип тот же, но SSID не прочитан: считаем, что сеть могла не меняться.
-        String rest = currentKey.substring(currentBar + 1);
-        int ssidEnd = rest.indexOf('|');
-        String currentSsid = ssidEnd < 0 ? rest : rest.substring(0, ssidEnd);
-        return currentSsid.length() == 0;
+        String savedSsid = manualOffSsid(savedKey);
+        String currentSsid = manualOffSsid(currentKey);
+        if (savedSsid.length() == 0) {
+            // Запрет поставлен, когда SSID был недоступен: при появлении SSID
+            // считаем сеть той же и мигрируем ключ.
+            return true;
+        }
+        if (currentSsid.length() == 0) {
+            // Смену сети доказать нельзя — запрет сохраняется.
+            return true;
+        }
+        return savedSsid.equals(currentSsid);
+    }
+
+    /**
+     * Канонический ключ после проверки: мигрирует старые ключи с BSSID и
+     * {@code WIFI||} к виду {@code WIFI|SSID|}. Пустой результат — запрет
+     * больше не относится к текущей сети.
+     */
+    public static String manualOffKeyAfterCheck(String savedKey, String currentKey) {
+        if (!manualOffApplies(savedKey, currentKey)) {
+            return "";
+        }
+        String kind = manualOffKind(currentKey);
+        if (kind.length() == 0) {
+            kind = manualOffKind(savedKey);
+        }
+        String ssid = manualOffSsid(currentKey);
+        if (ssid.length() == 0) {
+            ssid = manualOffSsid(savedKey);
+        }
+        NetKind parsedKind;
+        try {
+            parsedKind = kind.length() == 0 ? NetKind.NONE : NetKind.valueOf(kind);
+        } catch (IllegalArgumentException e) {
+            parsedKind = NetKind.NONE;
+        }
+        return networkKey(parsedKind, ssid);
     }
 
     /** Удобная форма для UI: сравнить сохранённый ключ с текущей сетью. */
-    public static boolean manualOffApplies(String savedKey, NetKind kind,
-                                           String ssid, String bssid) {
-        return manualOffApplies(savedKey, networkKey(kind, ssid, bssid));
+    public static boolean manualOffApplies(String savedKey, NetKind kind, String ssid) {
+        return manualOffApplies(savedKey, networkKey(kind, ssid));
     }
+
+    private static String manualOffKind(String key) {
+        if (key == null) {
+            return "";
+        }
+        int bar = key.indexOf('|');
+        return bar < 0 ? "" : key.substring(0, bar);
+    }
+
+    /**
+     * SSID из ключа. Новый формат всегда заканчивается пустым сегментом BSSID;
+     * старый — может содержать MAC или пустой хвост. Один хвостовой сегмент
+     * снимается всегда, MAC — только если он действительно похож на BSSID.
+     */
+    private static String manualOffSsid(String key) {
+        if (key == null) {
+            return "";
+        }
+        int bar = key.indexOf('|');
+        if (bar < 0) {
+            return "";
+        }
+        String rest = key.substring(bar + 1);
+        if (rest.endsWith("|")) {
+            return rest.substring(0, rest.length() - 1);
+        }
+        int last = rest.lastIndexOf('|');
+        if (last >= 0 && normalizeBssid(rest.substring(last + 1)) != null) {
+            return rest.substring(0, last);
+        }
+        return rest;
+    }
+
+    /** Верхний предел попыток снятия: после него долг переходит в BLOCKED. */
+    public static final int MAX_EXIT_OFF_ATTEMPTS = 5;
 
     /**
      * Шаг снятия exit node. Вызывается только при активном «долге» снятия:
@@ -368,7 +428,8 @@ public final class Logic {
      * SEND — отправить команду снятия (в том числе повтор);
      * WAIT — идёт окно, подтверждение ещё не наступило;
      * CONFIRMED — exit node фактически не активен после окна;
-     * FAILED — окно истекло, exit node всё ещё активен.
+     * FAILED — окно истекло, exit node всё ещё активен, попытки остались;
+     * BLOCKED — попытки исчерпаны, автоматические повторы прекращены.
      *
      * Окно нужно, чтобы Tailscale успел восстановить exit node после
      * переподключения: «не активен» сразу после connect не считается снятием.
@@ -379,27 +440,51 @@ public final class Logic {
         SEND,
         WAIT,
         CONFIRMED,
-        FAILED
+        FAILED,
+        BLOCKED
     }
 
     public static ExitOffStep exitOffStep(boolean tailscaleActive, boolean exitActive,
                                           boolean sent, long deadline, long now) {
+        return exitOffStep(tailscaleActive, exitActive, sent, deadline, now, 0, false);
+    }
+
+    /**
+     * Расширенный шаг снятия с учётом исчерпания попыток. blocked сохраняется
+     * между запусками: после BLOCKED автоматические SEND/FAILED прекращаются,
+     * но фактическое исчезновение exit node всё ещё подтверждается.
+     */
+    public static ExitOffStep exitOffStep(boolean tailscaleActive, boolean exitActive,
+                                          boolean sent, long deadline, long now,
+                                          int failedAttempts, boolean blocked) {
         if (!tailscaleActive) {
             return ExitOffStep.DEFER;
+        }
+        boolean windowOver = deadline > 0L && now >= deadline;
+        if (blocked) {
+            // После BLOCKED команды не отправляются, но исчезновение ноды
+            // всё ещё подтверждается — в том числе если её сняли вручную.
+            return exitActive ? ExitOffStep.BLOCKED : ExitOffStep.CONFIRMED;
         }
         if (deadline <= 0L) {
             return ExitOffStep.START;
         }
-        boolean windowOver = now >= deadline;
         if (!sent) {
-            // Первое окно после подключения Tailscale: даём ему восстановить
-            // сохранённый exit node, чтобы команда снятия шла уже после этого.
-            return windowOver ? ExitOffStep.SEND : ExitOffStep.WAIT;
+            if (!windowOver) {
+                return ExitOffStep.WAIT;
+            }
+            // Повтор после неудачной отправки: попытки тоже ограничены.
+            return failedAttempts >= MAX_EXIT_OFF_ATTEMPTS
+                    ? ExitOffStep.BLOCKED : ExitOffStep.SEND;
         }
         if (!exitActive) {
             return windowOver ? ExitOffStep.CONFIRMED : ExitOffStep.WAIT;
         }
-        return windowOver ? ExitOffStep.FAILED : ExitOffStep.WAIT;
+        if (!windowOver) {
+            return ExitOffStep.WAIT;
+        }
+        return failedAttempts >= MAX_EXIT_OFF_ATTEMPTS
+                ? ExitOffStep.BLOCKED : ExitOffStep.FAILED;
     }
 
     /**

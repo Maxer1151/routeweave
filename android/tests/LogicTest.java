@@ -397,46 +397,74 @@ public final class LogicTest {
     // --- networkKey / manualOffApplies -------------------------------------
 
     private static void networkKeys() {
-        eq("networkKey: Wi-Fi с BSSID", "WIFI|Home|aa:bb:cc:dd:ee:ff",
-                Logic.networkKey(NetKind.WIFI, " Home ", "AA:BB:CC:DD:EE:FF"));
-        eq("networkKey: SSID и BSSID нормализуются в кавычках",
-                "WIFI|Home|aa:bb:cc:dd:ee:ff",
-                Logic.networkKey(NetKind.WIFI, "\"Home\"", "aa:bb:cc:dd:ee:ff"));
-        eq("networkKey: без BSSID", "WIFI|Home|",
-                Logic.networkKey(NetKind.WIFI, "Home", null));
+        eq("networkKey: Wi-Fi без BSSID", "WIFI|Home|",
+                Logic.networkKey(NetKind.WIFI, " Home "));
+        eq("networkKey: SSID нормализуется в кавычках", "WIFI|Home|",
+                Logic.networkKey(NetKind.WIFI, "\"Home\""));
         eq("networkKey: мобильная сеть", "MOBILE||",
-                Logic.networkKey(NetKind.MOBILE, null, null));
-        eq("networkKey: null kind", "NONE||", Logic.networkKey(null, null, null));
+                Logic.networkKey(NetKind.MOBILE, null));
+        eq("networkKey: null kind", "NONE||", Logic.networkKey(null, null));
         eq("networkKey: разделитель внутри SSID не ломает ключ",
-                "WIFI|A|B|", Logic.networkKey(NetKind.WIFI, "A|B", null));
+                "WIFI|A|B|", Logic.networkKey(NetKind.WIFI, "A|B"));
+        check("networkKey: BSSID больше не входит в ключ",
+                !Logic.networkKey(NetKind.WIFI, "Home").contains(":"));
 
-        String home = Logic.networkKey(NetKind.WIFI, "Home", "aa:bb:cc:dd:ee:ff");
+        String home = Logic.networkKey(NetKind.WIFI, "Home");
         check("manualOffApplies: та же сеть", Logic.manualOffApplies(home, home));
-        check("manualOffApplies: BSSID в верхнем регистре через удобную форму",
-                Logic.manualOffApplies(home, NetKind.WIFI, "Home", "AA:BB:CC:DD:EE:FF"));
+        check("manualOffApplies: удобная форма по SSID",
+                Logic.manualOffApplies(home, NetKind.WIFI, " Home "));
         check("manualOffApplies: другая Wi-Fi",
-                !Logic.manualOffApplies(home,
-                        Logic.networkKey(NetKind.WIFI, "Work", "aa:bb:cc:dd:ee:ff")));
-        check("manualOffApplies: другой BSSID той же Wi-Fi",
-                !Logic.manualOffApplies(home,
-                        Logic.networkKey(NetKind.WIFI, "Home", "aa:bb:cc:dd:ee:01")));
+                !Logic.manualOffApplies(home, Logic.networkKey(NetKind.WIFI, "Work")));
         check("manualOffApplies: переход на мобильную",
-                !Logic.manualOffApplies(home, Logic.networkKey(NetKind.MOBILE, null, null)));
+                !Logic.manualOffApplies(home, Logic.networkKey(NetKind.MOBILE, null)));
         check("manualOffApplies: мобильная остаётся мобильной",
                 Logic.manualOffApplies("MOBILE||", "MOBILE||"));
         check("manualOffApplies: SSID недоступен — запрет сохраняется",
                 Logic.manualOffApplies(home, "WIFI||"));
-        check("manualOffApplies: BSSID недоступен, SSID известен — смена доказана",
-                !Logic.manualOffApplies(home, "WIFI|Work|"));
+        check("manualOffApplies: SSID появился после WIFI|| — запрет сохраняется",
+                Logic.manualOffApplies("WIFI||", home));
+        check("manualOffApplies: сохранённый SSID неизвестен — запрет консервативен",
+                Logic.manualOffApplies("WIFI||", Logic.networkKey(NetKind.WIFI, "Work")));
         check("manualOffApplies: пустой сохранённый ключ",
                 !Logic.manualOffApplies("", home));
         check("manualOffApplies: null сохранённый ключ",
                 !Logic.manualOffApplies(null, home));
         check("manualOffApplies: текущий ключ null при сохранённом — сохраняем",
                 Logic.manualOffApplies(home, null));
-        check("manualOffApplies: удобная форма по текущей сети",
-                Logic.manualOffApplies(home, NetKind.WIFI, "Home",
-                        "aa:bb:cc:dd:ee:ff"));
+        check("manualOffApplies: ключ без типа сети не действует",
+                !Logic.manualOffApplies("Home", home));
+        check("manualOffApplies: SSID с разделителем",
+                Logic.manualOffApplies("WIFI|A|B|", "WIFI|A|B|"));
+        check("manualOffApplies: SSID с разделителем не путается с другим",
+                !Logic.manualOffApplies("WIFI|A|B|", "WIFI|A|C|"));
+
+        // Старый формат с BSSID: мигрирует к ключу уровня SSID.
+        String legacyBound = "WIFI|Home|aa:bb:cc:dd:ee:ff";
+        check("legacy-ключ с BSSID применяется к тому же SSID без BSSID",
+                Logic.manualOffApplies(legacyBound, home));
+        eq("manualOffKeyAfterCheck: миграция старого ключа с BSSID",
+                home, Logic.manualOffKeyAfterCheck(legacyBound, home));
+        check("legacy-ключ с BSSID применяется при роуминге на другую точку",
+                Logic.manualOffApplies(legacyBound, "WIFI|Home|bb:bb:bb:bb:bb:bb"));
+        eq("manualOffKeyAfterCheck: миграция при роуминге",
+                home, Logic.manualOffKeyAfterCheck(legacyBound, "WIFI|Home|bb:bb:bb:bb:bb:bb"));
+        eq("manualOffKeyAfterCheck: две legacy-точки одного SSID",
+                home, Logic.manualOffKeyAfterCheck("WIFI|Home|aa:bb:cc:dd:ee:ff",
+                        "WIFI|Home|bb:bb:bb:bb:bb:bb"));
+        eq("manualOffKeyAfterCheck: текущий ключ null",
+                home, Logic.manualOffKeyAfterCheck(home, null));
+        eq("manualOffKeyAfterCheck: WIFI|| мигрирует при появлении SSID",
+                home, Logic.manualOffKeyAfterCheck("WIFI||", home));
+        eq("manualOffKeyAfterCheck: недоступный SSID не теряет сохранённый",
+                home, Logic.manualOffKeyAfterCheck(home, "WIFI||"));
+        eq("manualOffKeyAfterCheck: другая сеть снимает запрет",
+                "", Logic.manualOffKeyAfterCheck(home, Logic.networkKey(NetKind.WIFI, "Work")));
+        eq("manualOffKeyAfterCheck: смена типа сети снимает запрет",
+                "", Logic.manualOffKeyAfterCheck(home, "MOBILE||"));
+        eq("manualOffKeyAfterCheck: мобильная сеть остаётся",
+                "MOBILE||", Logic.manualOffKeyAfterCheck("MOBILE||", "MOBILE||"));
+        eq("manualOffKeyAfterCheck: пустой сохранённый ключ",
+                "", Logic.manualOffKeyAfterCheck("", home));
     }
 
     // --- exitOffStep --------------------------------------------------------
@@ -444,6 +472,7 @@ public final class LogicTest {
     private static void exitOffSteps() {
         final long now = 1_000_000L;
         final long window = now + 12_000L;
+        final int max = Logic.MAX_EXIT_OFF_ATTEMPTS;
 
         eq("exitOffStep: Tailscale не активен",
                 Logic.ExitOffStep.DEFER,
@@ -484,6 +513,158 @@ public final class LogicTest {
         eq("exitOffStep: повтор после паузы (sent=false, окно истекло)",
                 Logic.ExitOffStep.SEND,
                 Logic.exitOffStep(true, true, false, now, now));
+
+        // Исчерпание попыток: после MAX автоматических SEND больше нет.
+        eq("exitOffStep: последняя разрешённая попытка ещё повторяется",
+                Logic.ExitOffStep.SEND,
+                Logic.exitOffStep(true, true, false, now - 1L, now, max - 1, false));
+        eq("exitOffStep: попытки исчерпаны перед отправкой",
+                Logic.ExitOffStep.BLOCKED,
+                Logic.exitOffStep(true, true, false, now - 1L, now, max, false));
+        eq("exitOffStep: попытки исчерпаны после неудачи",
+                Logic.ExitOffStep.BLOCKED,
+                Logic.exitOffStep(true, true, true, now - 1L, now, max, false));
+        eq("exitOffStep: блокировка не срабатывает раньше окна",
+                Logic.ExitOffStep.WAIT,
+                Logic.exitOffStep(true, true, true, window, now, max, false));
+        eq("exitOffStep: в blocked команды не отправляются",
+                Logic.ExitOffStep.BLOCKED,
+                Logic.exitOffStep(true, true, false, now - 1L, now, max, true));
+        eq("exitOffStep: blocked подтверждает исчезновение ноды",
+                Logic.ExitOffStep.CONFIRMED,
+                Logic.exitOffStep(true, false, false, 0L, now, max, true));
+        eq("exitOffStep: blocked и Tailscale не активен — DEFER, а не SEND",
+                Logic.ExitOffStep.DEFER,
+                Logic.exitOffStep(false, false, false, 0L, now, max, true));
+        eq("exitOffStep: успех важнее исчерпанных попыток",
+                Logic.ExitOffStep.CONFIRMED,
+                Logic.exitOffStep(true, false, true, now, now, max, false));
+        eqInt("MAX_EXIT_OFF_ATTEMPTS", 5, max);
+
+        exitOffLoop();
+    }
+
+    /**
+     * Модель цикла контроллера: SEND → FAILED → пауза → SEND, пока попытки не
+     * исчерпаны. Проверяет, что цикл конечен и после BLOCKED команд нет.
+     */
+    private static void exitOffLoop() {
+        final int max = Logic.MAX_EXIT_OFF_ATTEMPTS;
+        final long window = 12_000L;
+        final long pause = 5L * 60L * 1000L;
+
+        int attempts = 0;
+        boolean sent = false;
+        boolean blocked = false;
+        boolean exitActive = true;
+        long now = 0L;
+        long deadline = 0L;
+        int transitions = 0;
+        Logic.ExitOffStep terminal = null;
+
+        while (terminal == null && transitions++ < 100) {
+            Logic.ExitOffStep step = Logic.exitOffStep(true, exitActive, sent,
+                    deadline, now, attempts, blocked);
+            switch (step) {
+                case START:
+                    deadline = now + window;
+                    break;
+                case SEND:
+                    attempts++;
+                    sent = true;
+                    deadline = now + window;
+                    break;
+                case WAIT:
+                    now = deadline;
+                    break;
+                case FAILED:
+                    // Контроллер считает неудачу и сдаётся на MAX.
+                    if (attempts >= max) {
+                        blocked = true;
+                    } else {
+                        sent = false;
+                        deadline = now + pause;
+                        now = deadline;
+                    }
+                    break;
+                case BLOCKED:
+                    blocked = true;
+                    terminal = step;
+                    break;
+                case CONFIRMED:
+                    terminal = step;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        eq("цикл снятия: сдался после MAX попыток",
+                Logic.ExitOffStep.BLOCKED, terminal);
+        eqInt("цикл снятия: ровно MAX отправок", max, attempts);
+        check("цикл снятия: конечное число переходов", transitions < 100);
+        check("цикл снятия: долг не снят", blocked && exitActive);
+
+        int afterBlock = attempts;
+        boolean sendsAfterBlock = false;
+        for (int i = 0; i < 50; i++) {
+            Logic.ExitOffStep step = Logic.exitOffStep(true, true, false,
+                    now - 1L, now + i, afterBlock, true);
+            if (step == Logic.ExitOffStep.SEND) {
+                sendsAfterBlock = true;
+            }
+        }
+        check("после BLOCKED нет повторных SEND", !sendsAfterBlock);
+        eq("после BLOCKED шаг остаётся BLOCKED",
+                Logic.ExitOffStep.BLOCKED,
+                Logic.exitOffStep(true, true, false, 0L, now, afterBlock, true));
+        eq("BLOCKED снимается, когда нода исчезла",
+                Logic.ExitOffStep.CONFIRMED,
+                Logic.exitOffStep(true, false, false, 0L, now, afterBlock, true));
+
+        // Успех до исчерпания: нода исчезла после второй отправки.
+        int successAttempts = 0;
+        boolean successSent = false;
+        boolean successBlocked = false;
+        boolean active = true;
+        long successNow = 0L;
+        long successDeadline = 0L;
+        int guard = 0;
+        Logic.ExitOffStep successStep = null;
+        while (successStep == null && guard++ < 100) {
+            Logic.ExitOffStep step = Logic.exitOffStep(true, active, successSent,
+                    successDeadline, successNow, successAttempts, successBlocked);
+            switch (step) {
+                case START:
+                    successDeadline = successNow + window;
+                    break;
+                case SEND:
+                    successAttempts++;
+                    successSent = true;
+                    successDeadline = successNow + window;
+                    break;
+                case WAIT:
+                    successNow = successDeadline;
+                    if (successAttempts == 2) {
+                        active = false;
+                    }
+                    break;
+                case FAILED:
+                    successSent = false;
+                    successDeadline = successNow + pause;
+                    successNow = successDeadline;
+                    break;
+                case BLOCKED:
+                case CONFIRMED:
+                    successStep = step;
+                    break;
+                default:
+                    break;
+            }
+        }
+        eq("цикл снятия: успех до исчерпания попыток",
+                Logic.ExitOffStep.CONFIRMED, successStep);
+        eqInt("цикл снятия: успех после двух отправок", 2, successAttempts);
     }
 
     // --- maskHost -----------------------------------------------------------

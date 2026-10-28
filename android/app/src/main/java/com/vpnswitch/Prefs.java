@@ -40,6 +40,8 @@ public final class Prefs {
     private static final String KEY_EXIT_PENDING_OFF = "exit_node_pending_off";
     private static final String KEY_EXIT_OFF_DEADLINE = "exit_off_deadline";
     private static final String KEY_EXIT_OFF_SENT = "exit_off_sent";
+    private static final String KEY_EXIT_OFF_BLOCKED = "exit_off_blocked";
+    private static final String KEY_EXIT_OFF_NETWORK_KEY = "exit_off_network_key";
     private static final String KEY_EXIT_MANUAL_OFF_KEY = "exit_manual_off_key";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
@@ -388,6 +390,34 @@ public final class Prefs {
 
     public void setExitOffSent(boolean sent) {
         prefs.edit().putBoolean(KEY_EXIT_OFF_SENT, sent).apply();
+    }
+
+    /**
+     * true, если автоматические попытки снятия исчерпаны. Долг снятия при этом
+     * сохраняется, но tick больше не отправляет команды до смены сети, ручного
+     * повтора или выключения управления.
+     */
+    public boolean isExitOffBlocked() {
+        return prefs.getBoolean(KEY_EXIT_OFF_BLOCKED, false);
+    }
+
+    public void setExitOffBlocked(boolean blocked) {
+        prefs.edit().putBoolean(KEY_EXIT_OFF_BLOCKED, blocked).apply();
+    }
+
+    /** Сеть, на которой взведён долг снятия: смена сети перезапускает попытки. */
+    public String getExitOffNetworkKey() {
+        String value = prefs.getString(KEY_EXIT_OFF_NETWORK_KEY, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffNetworkKey(String key) {
+        String value = key == null ? "" : key.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_NETWORK_KEY).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_NETWORK_KEY, value).apply();
+        }
     }
 
     /**

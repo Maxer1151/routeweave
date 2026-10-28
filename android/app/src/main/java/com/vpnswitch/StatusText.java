@@ -73,9 +73,13 @@ public final class StatusText {
         if (prefs.isExitPendingOff()) {
             // Снятие начато, но фактическое состояние ещё не подтверждено:
             // «снят» показывать нельзя.
-            sb.append(context.getString(tailscaleActive
-                    ? R.string.exit_state_off_checking
-                    : R.string.exit_state_off_deferred));
+            if (prefs.isExitOffBlocked()) {
+                sb.append(context.getString(R.string.exit_state_off_blocked));
+            } else {
+                sb.append(context.getString(tailscaleActive
+                        ? R.string.exit_state_off_checking
+                        : R.string.exit_state_off_deferred));
+            }
         } else if (manualOff && !exitActive) {
             sb.append(context.getString(R.string.exit_state_manual_off));
         } else if (exitActive) {

@@ -985,8 +985,7 @@ public class MainActivity extends Activity {
         updateExitOnEnabled();
         boolean manualOff = Logic.manualOffApplies(prefs.getExitManualOffKey(),
                 snapshot.kind,
-                snapshot.access == null ? null : snapshot.access.ssid,
-                snapshot.access == null ? null : snapshot.access.bssid);
+                snapshot.access == null ? null : snapshot.access.ssid);
         setTextIfChanged(tvExitState, StatusText.exitStateLine(this, prefs,
                 snapshot.tsInstalled,
                 snapshot.vpn.active && snapshot.vpn.type == VpnType.TAILSCALE,
