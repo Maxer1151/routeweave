@@ -513,15 +513,53 @@ public final class Logic {
     public enum OffDebtAction {
         /** Сеть та же или смену доказать нельзя: состояние не меняется. */
         KEEP,
-        /** Новая сеть требует exit node: долг снятия отменяется. */
+        /** Сеть требует exit node: долг снятия отменяется. */
         CANCEL,
-        /** Новая сеть не требует exit node: попытки снятия перезапускаются. */
+        /** Сеть не требует exit node: попытки снятия перезапускаются. */
         RESTART
     }
 
-    /** Источник запуска exit node: штатный периодический tick или сеть. */
+    /**
+     * Причина, по которой взведён долг снятия. Нужна, чтобы отличить
+     * watchdog от правила и ручных действий: watchdog на той же сети
+     * отменять нельзя, иначе он включит ноду и снова снимет её из-за
+     * отсутствия интернета.
+     */
+    public enum OffDebtSource {
+        /** Снятие из-за отсутствия интернета через exit node. */
+        WATCHDOG,
+        /** Снятие по правилу: доверенная Wi-Fi или мобильная сеть. */
+        RULE,
+        /** Ручное «Снять сейчас». */
+        MANUAL,
+        /** Имя exit node очищено. */
+        NAME,
+        /** Управление exit node выключено (долг при этом очищается сразу). */
+        DISABLE,
+        /** Долг старой версии без сохранённого источника. */
+        UNKNOWN;
+
+        /** true, если долг нельзя отменять на той же сети. */
+        public boolean keepsDebtOnSameNetwork() {
+            return this == WATCHDOG;
+        }
+    }
+
+    /** Разбирает сохранённый источник долга; неизвестное значение — UNKNOWN. */
+    public static OffDebtSource parseOffDebtSource(String raw) {
+        if (raw == null || raw.trim().length() == 0) {
+            return OffDebtSource.UNKNOWN;
+        }
+        try {
+            return OffDebtSource.valueOf(raw.trim());
+        } catch (IllegalArgumentException e) {
+            return OffDebtSource.UNKNOWN;
+        }
+    }
+
+    /** Источник запуска exit node: полный tick или сетевое событие. */
     public enum TickSource {
-        /** Штатный tick сервиса: правило, подтверждение, watchdog и retry. */
+        /** Полный tick: сервис, onStartCommand, подтверждение, ручное подключение. */
         PERIODIC,
         /** Сетевое событие: только правило и пересчёт долга, без проб. */
         NETWORK
@@ -565,6 +603,22 @@ public final class Logic {
             return OffDebtAction.KEEP;
         }
         return exitNodeWanted ? OffDebtAction.CANCEL : OffDebtAction.RESTART;
+    }
+
+    /**
+     * Долг снятия на той же сети. Если правило снова требует exit node
+     * (например, сеть перестала быть доверенной или имя ноды вернули),
+     * долг отменяется и правило может включить ноду. Исключение — watchdog:
+     * его отмена на той же сети дала бы цикл «включить → снять из-за
+     * отсутствия интернета».
+     */
+    public static OffDebtAction offDebtActionOnSameNetwork(boolean exitNodeWanted,
+                                                           OffDebtSource source) {
+        OffDebtSource actual = source == null ? OffDebtSource.UNKNOWN : source;
+        if (exitNodeWanted && !actual.keepsDebtOnSameNetwork()) {
+            return OffDebtAction.CANCEL;
+        }
+        return OffDebtAction.KEEP;
     }
 
     /**

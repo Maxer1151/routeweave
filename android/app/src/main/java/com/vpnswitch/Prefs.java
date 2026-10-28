@@ -44,6 +44,7 @@ public final class Prefs {
     private static final String KEY_EXIT_OFF_BLOCKED = "exit_off_blocked";
     private static final String KEY_EXIT_OFF_NETWORK_KEY = "exit_off_network_key";
     private static final String KEY_EXIT_OFF_BSSID = "exit_off_bssid";
+    private static final String KEY_EXIT_OFF_SOURCE = "exit_off_source";
     private static final String KEY_EXIT_MANUAL_OFF_KEY = "exit_manual_off_key";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
@@ -447,6 +448,24 @@ public final class Prefs {
             prefs.edit().remove(KEY_EXIT_OFF_BSSID).apply();
         } else {
             prefs.edit().putString(KEY_EXIT_OFF_BSSID, value).apply();
+        }
+    }
+
+    /**
+     * Источник активного долга снятия (WATCHDOG/RULE/MANUAL/NAME/DISABLE).
+     * Пустое значение — долг старой версии, трактуется как UNKNOWN.
+     */
+    public String getExitOffSource() {
+        String value = prefs.getString(KEY_EXIT_OFF_SOURCE, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffSource(String source) {
+        String value = source == null ? "" : source.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_SOURCE).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_SOURCE, value).apply();
         }
     }
 

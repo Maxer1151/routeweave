@@ -170,7 +170,8 @@ public final class ExitNodeController {
                             prefs.setExitFailCount(0);
                             prefs.setExitOffNetworkKey(currentNetworkKey(app));
                             prefs.setExitOffBssid(currentBssid(app));
-                            applyOff(app, prefs, "ручное снятие", false);
+                            applyOff(app, prefs, "ручное снятие", false,
+                                    Logic.OffDebtSource.MANUAL);
                         }
                     } catch (Throwable t) {
                         Log.e(TAG, "exitnode: applyNow crashed", t);
@@ -319,8 +320,10 @@ public final class ExitNodeController {
     }
 
     /**
-     * @param source PERIODIC — штатный tick сервиса с watchdog/retry;
-     *               NETWORK — сетевое событие: только правило и долг снятия
+     * @param source PERIODIC — полный tick (сервис, onStartCommand,
+     *               подтверждение после команд, ручное подключение Tailscale)
+     *               с watchdog/retry; NETWORK — сетевое событие: только
+     *               правило и долг снятия
      */
     private static void tick(Context context, Logic.TickSource source) {
         Prefs prefs = new Prefs(context);
@@ -337,7 +340,7 @@ public final class ExitNodeController {
                 stepExitOff(context, prefs);
                 return;
             }
-            // Долг отменён: новая сеть требует exit node, применяем правило.
+            // Долг отменён: правило снова требует exit node, применяем его.
         }
         boolean manualOff = isManualOffActive(context, prefs);
         if (manualOff) {
@@ -377,7 +380,8 @@ public final class ExitNodeController {
             // команда могла не подтвердиться, но успеть примениться.
             boolean commandPending = hasExitOffCommand(prefs);
             if (commandPending) {
-                applyOff(context, prefs, "имя exit node очищено", false);
+                applyOff(context, prefs, "имя exit node очищено", false,
+                        Logic.OffDebtSource.NAME);
             } else {
                 prefs.setExitNodeApplied(false);
                 prefs.setExitNodeAppliedName("");
@@ -405,7 +409,8 @@ public final class ExitNodeController {
         cancelPendingAndRetry(prefs);
         prefs.setExitConfirmAt(0L);
         if (commandPending) {
-            applyOff(context, prefs, "правило не требует exit node", false);
+            applyOff(context, prefs, "правило не требует exit node", false,
+                    Logic.OffDebtSource.RULE);
         }
         Log.d(TAG, "exitnode: сеть " + kind + ", правило exit node не действует");
     }
@@ -422,7 +427,7 @@ public final class ExitNodeController {
         }
         // applyOff приостановит попытку при неактивном Tailscale, но сохранит
         // владение до фактического подтверждения снятия.
-        applyOff(context, prefs, "доверенная Wi-Fi", false);
+        applyOff(context, prefs, "доверенная Wi-Fi", false, Logic.OffDebtSource.RULE);
     }
 
     /** Незнакомая Wi-Fi: exit node должен быть включён. */
@@ -548,7 +553,7 @@ public final class ExitNodeController {
             return;
         }
 
-        applyOff(context, prefs, "нет интернета", true);
+        applyOff(context, prefs, "нет интернета", true, Logic.OffDebtSource.WATCHDOG);
         prefs.setExitFailCount(0);
         // Первая попытка вернуть exit node — через 5 минут, дальше backoff.
         prefs.setExitRetryCount(1);
@@ -601,7 +606,7 @@ public final class ExitNodeController {
             // всего не применилось снятие. Повторяем снятие с backoff.
             Log.i(TAG, "exitnode: интернета всё ещё нет, повторяю снятие");
             int attempt = prefs.getExitRetryCount() + 1;
-            applyOff(context, prefs, "нет интернета", true);
+            applyOff(context, prefs, "нет интернета", true, Logic.OffDebtSource.WATCHDOG);
             scheduleRetryOrGiveUp(context, prefs, "Exit node: нет интернета", attempt);
             return;
         }
@@ -762,6 +767,7 @@ public final class ExitNodeController {
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
         prefs.setExitOffBssid("");
+        prefs.setExitOffSource("");
         String name = trimmed(prefs.getExitNodeName());
         if (name.length() == 0) {
             prefs.setExitNodePendingOn(false);
@@ -838,7 +844,8 @@ public final class ExitNodeController {
      * сохраняются: после переподключения Tailscale снятие продолжится, чтобы
      * не потерять ноду, которую тот мог восстановить.
      */
-    private static void applyOff(Context context, Prefs prefs, String reason, boolean error) {
+    private static void applyOff(Context context, Prefs prefs, String reason, boolean error,
+                                 Logic.OffDebtSource source) {
         boolean tailscaleActive = isTailscaleActive(context);
         if (Logic.shouldDeferExitOff(tailscaleActive, exitNodeWanted(context, prefs))) {
             Log.i(TAG, "exitnode: снятие приостановлено — Tailscale не активен,"
@@ -857,6 +864,8 @@ public final class ExitNodeController {
         prefs.setExitFailCount(0);
         prefs.setExitOffNetworkKey(currentNetworkKey(context));
         prefs.setExitOffBssid(currentBssid(context));
+        prefs.setExitOffSource(source == null
+                ? Logic.OffDebtSource.UNKNOWN.name() : source.name());
         prefs.setExitNodePendingOn(false);
         prefs.setExitRetryAt(0L);
         prefs.setExitRetryCount(0);
@@ -1001,6 +1010,7 @@ public final class ExitNodeController {
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
         prefs.setExitOffBssid("");
+        prefs.setExitOffSource("");
         prefs.setExitNodePendingOn(false);
         prefs.setExitConfirmAt(0L);
         prefs.setExitFailCount(0);
@@ -1035,6 +1045,11 @@ public final class ExitNodeController {
      * долг снятия привязан к точке, а не только к имени сети. Недоступный
      * SSID/BSSID сменой не считается.
      *
+     * <p>На той же сети долг тоже отменяется, если правило снова требует
+     * exit node: например, сеть перестала быть доверенной. Исключение —
+     * долг watchdog: его отмена включила бы ноду, а watchdog снова снял бы
+     * её из-за отсутствия интернета.
+     *
      * @return true, если долг снятия отменён и tick должен применить правило ON
      */
     private static boolean resetOffBackoffOnNetworkChange(Context context, Prefs prefs) {
@@ -1047,7 +1062,12 @@ public final class ExitNodeController {
                 ? Logic.manualOffKeyAfterCheck(stored, current) : "";
         boolean networkChanged = Logic.offNetworkChanged(
                 stored.length() == 0 || canonical.length() == 0, bssidChanged);
-        if (!networkChanged) {
+        boolean wanted = exitNodeWanted(context, prefs);
+        Logic.OffDebtSource source = Logic.parseOffDebtSource(prefs.getExitOffSource());
+        Logic.OffDebtAction action = networkChanged
+                ? Logic.offDebtActionOnNetworkChange(true, wanted)
+                : Logic.offDebtActionOnSameNetwork(wanted, source);
+        if (action == Logic.OffDebtAction.KEEP) {
             if (!canonical.equals(stored)) {
                 // SSID появился после WIFI||: сохраняем более точный ключ.
                 prefs.setExitOffNetworkKey(canonical);
@@ -1058,11 +1078,9 @@ public final class ExitNodeController {
             }
             return false;
         }
-        Logic.OffDebtAction action = Logic.offDebtActionOnNetworkChange(true,
-                exitNodeWanted(context, prefs));
         if (action == Logic.OffDebtAction.CANCEL) {
-            Log.i(TAG, "exitnode: сеть сменилась на незнакомую Wi-Fi —"
-                    + " снятие отменено, правило включит exit node");
+            Log.i(TAG, "exitnode: правило снова требует exit node —"
+                    + " снятие отменено (" + source + ")");
             prefs.setExitPendingOff(false);
             prefs.setExitOffDeadline(0L);
             prefs.setExitOffSent(false);
@@ -1070,6 +1088,7 @@ public final class ExitNodeController {
             prefs.setExitFailCount(0);
             prefs.setExitOffNetworkKey("");
             prefs.setExitOffBssid("");
+            prefs.setExitOffSource("");
             // Долг снятия отменён вместе с retry: правило ON важнее.
             prefs.setExitRetryAt(0L);
             prefs.setExitRetryCount(0);
@@ -1077,11 +1096,13 @@ public final class ExitNodeController {
             prefs.setExitConfirmAt(0L);
             // Красная ошибка «снятие не удалось» больше не актуальна.
             recordExitNodeOutcome(context, prefs,
-                    "Снятие exit node отменено: сеть требует exit node");
+                    "Снятие exit node отменено: правило требует exit node");
             return true;
         }
+        // RESTART: сеть сменилась на такую, где правило не требует ноду.
         prefs.setExitOffNetworkKey(current);
         prefs.setExitOffBssid(currentBssid);
+        prefs.setExitOffSource(Logic.OffDebtSource.RULE.name());
         prefs.setExitFailCount(0);
         prefs.setExitOffSent(false);
         prefs.setExitOffDeadline(0L);
@@ -1146,6 +1167,7 @@ public final class ExitNodeController {
         prefs.setExitFailCount(0);
         prefs.setExitOffNetworkKey("");
         prefs.setExitOffBssid("");
+        prefs.setExitOffSource("");
         if (!wasPending && !wasBlocked) {
             return;
         }
@@ -1179,7 +1201,8 @@ public final class ExitNodeController {
                 exitNodeWanted(context, prefs), hasExitOffCommand(prefs))) {
             return;
         }
-        applyOff(context, prefs, "отложенное ручное снятие", false);
+        applyOff(context, prefs, "отложенное ручное снятие", false,
+                Logic.OffDebtSource.MANUAL);
     }
 
     /**
@@ -1229,6 +1252,7 @@ public final class ExitNodeController {
         prefs.setExitOffBlocked(false);
         prefs.setExitOffNetworkKey("");
         prefs.setExitOffBssid("");
+        prefs.setExitOffSource("");
         prefs.setExitManualOffKey("");
 
         boolean delivered = true;

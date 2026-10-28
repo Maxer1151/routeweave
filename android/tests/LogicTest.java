@@ -820,6 +820,37 @@ public final class LogicTest {
                 Logic.offNetworkChanged(false, true));
         check("offNetworkChanged: сменились SSID и BSSID",
                 Logic.offNetworkChanged(true, true));
+
+        // Medium: на той же сети правило может снова потребовать exit node.
+        // Долг, взведённый правилом/именем/вручную, должен отмениться,
+        // а watchdog — сохраниться, иначе получится цикл включения/снятия.
+        eq("источник долга: WATCHDOG", Logic.OffDebtSource.WATCHDOG,
+                Logic.parseOffDebtSource("WATCHDOG"));
+        eq("источник долга: обрезается", Logic.OffDebtSource.RULE,
+                Logic.parseOffDebtSource(" RULE "));
+        eq("источник долга: пусто — UNKNOWN", Logic.OffDebtSource.UNKNOWN,
+                Logic.parseOffDebtSource(""));
+        eq("источник долга: неизвестное значение — UNKNOWN", Logic.OffDebtSource.UNKNOWN,
+                Logic.parseOffDebtSource("watcher"));
+
+        boolean ruleWants = Logic.ruleRequiresExitNode(true, true, NetKind.WIFI, false);
+        boolean wanted = Logic.exitNodeWanted(ruleWants, false);
+        check("rule-долг: снятие доверия снова требует ON", wanted);
+        eq("rule-долг: та же сеть, ON нужен — CANCEL", Logic.OffDebtAction.CANCEL,
+                Logic.offDebtActionOnSameNetwork(wanted, Logic.OffDebtSource.RULE));
+        eq("name-долг: имя вернули — CANCEL", Logic.OffDebtAction.CANCEL,
+                Logic.offDebtActionOnSameNetwork(wanted, Logic.OffDebtSource.NAME));
+        eq("watchdog-долг: та же сеть — KEEP", Logic.OffDebtAction.KEEP,
+                Logic.offDebtActionOnSameNetwork(wanted, Logic.OffDebtSource.WATCHDOG));
+        eq("rule-долг: сеть всё ещё не требует ON — KEEP", Logic.OffDebtAction.KEEP,
+                Logic.offDebtActionOnSameNetwork(false, Logic.OffDebtSource.RULE));
+        eq("источник долга неизвестен: ON нужен — CANCEL", Logic.OffDebtAction.CANCEL,
+                Logic.offDebtActionOnSameNetwork(wanted, Logic.OffDebtSource.UNKNOWN));
+
+        boolean manualWanted = Logic.exitNodeWanted(ruleWants, true);
+        check("manual-запрет: ON не включается", !manualWanted);
+        eq("manual-долг: запрет действует — KEEP", Logic.OffDebtAction.KEEP,
+                Logic.offDebtActionOnSameNetwork(manualWanted, Logic.OffDebtSource.MANUAL));
     }
 
     // --- Адресная очистка ошибок -------------------------------------------
@@ -837,6 +868,12 @@ public final class LogicTest {
                 Logic.errorSourceMatches(null, "vpn"));
         check("errorSourceMatches: пустой запрос не совпадает с непустым",
                 !Logic.errorSourceMatches("vpn", ""));
+        // Источник теперь пишется до показа уведомления, поэтому при
+        // выключенных уведомлениях очистка обязана срабатывать по источнику.
+        check("errorSourceMatches: monitor очищается монитором",
+                Logic.errorSourceMatches("monitor", "monitor"));
+        check("errorSourceMatches: exit node не очищается монитором",
+                !Logic.errorSourceMatches("exit_node", "monitor"));
     }
 
     // --- maskHost -----------------------------------------------------------

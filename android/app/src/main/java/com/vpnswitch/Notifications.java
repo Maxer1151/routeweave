@@ -201,6 +201,9 @@ public final class Notifications {
     public static void showError(Context context, String text, String targetPackage,
                                  String source) {
         try {
+            // Источник фиксируем до показа: уведомления могут быть выключены,
+            // но last_error уже записан, и адресная очистка должна работать.
+            new Prefs(context).setErrorSource(source);
             Notifications.ensureChannels(context);
             if (!alertsEnabled(context)) {
                 // Сам текст не логируем: в нём может быть имя exit node или
@@ -247,7 +250,6 @@ public final class Notifications {
                     .build();
 
             nm.notify(NOTIF_ERROR, notification);
-            new Prefs(context).setErrorSource(source);
         } catch (Throwable t) {
             Log.e(TAG, "showError failed", t);
         }
