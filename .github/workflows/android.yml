@@ -32,19 +32,27 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
       # Версии те же, что PLATFORM_VERSION и BUILD_TOOLS_VERSION в
-      # android/build.sh. build.sh ищет SDK в SDK, ANDROID_HOME, ANDROID_SDK_ROOT;
-      # setup-android задаёт ANDROID_HOME, а SDK ниже прокидывается явно.
-      - name: Установить platform android-35 и build-tools 35.0.0
+      # android/build.sh. build.sh ищет SDK в SDK, ANDROID_HOME, ANDROID_SDK_ROOT
+      # (SDK проверяется первым), поэтому ниже он прокидывается явно.
+      #
+      # Предустановленный на runner'е SDK используем напрямую, без
+      # android-actions/setup-android@v3: тот шаг падал на интерактивном запросе
+      # принятия лицензий (y/N) и для этой сборки не нужен. Лицензии принимаем
+      # через yes, ошибки лицензий не валят сборку — нужные пакеты всё равно
+      # ставятся явно.
+      - name: Android SDK
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
-          echo "SDK=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "Android SDK: $ANDROID_HOME"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+          echo "Android SDK: $SDK"
 
       - name: Python для shellcheck
         uses: actions/setup-python@v5
@@ -83,13 +91,13 @@ jobs:
         working-directory: android
         run: |
           set -euo pipefail
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$SDK/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
 
       - name: zipalign -c 4
         working-directory: android
         run: |
           set -euo pipefail
-          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c 4 "$APK"
+          "$SDK/build-tools/35.0.0/zipalign" -c 4 "$APK"
 
       - name: Сверить versionName и versionCode с version.properties
         working-directory: android
@@ -101,7 +109,7 @@ jobs:
           [[ "$version_code" =~ ^[0-9]+$ ]] \
             || { echo "::error::VERSION_CODE должен быть числом в version.properties"; exit 1; }
 
-          badging="$("$ANDROID_HOME/build-tools/35.0.0/aapt2" dump badging "$APK")"
+          badging="$("$SDK/build-tools/35.0.0/aapt2" dump badging "$APK")"
           first_line="${badging%%$'\n'*}"
           echo "$first_line"
 
