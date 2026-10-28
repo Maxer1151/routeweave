@@ -118,6 +118,13 @@ jobs:
           grep -Fq "versionName='$version_name'" <<<"$first_line" \
             || { echo "::error::в badging нет versionName='$version_name'"; exit 1; }
 
+      # D4/D7: успешная сборка, затем две неудачные (неверный и отсутствующий
+      # пароль); прошлый APK не должен измениться. Скрипт работает в своей
+      # песочнице через rsync и не трогает dist/ этого job'а. Секретов не нужно:
+      # keystore создаётся внутри песочницы. SDK берётся из $GITHUB_ENV.
+      - name: release-safety (сборка в песочнице, без секретов)
+        run: bash android/tests/release-safety.sh
+
       - name: Загрузить APK
         uses: actions/upload-artifact@v4
         with:
