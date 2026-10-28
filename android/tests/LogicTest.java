@@ -39,6 +39,9 @@ public final class LogicTest {
         trustedParsing();
         trustedEquality();
         trustLevels();
+        trustedLists();
+        networkKeys();
+        exitOffSteps();
         hostMasking();
         prefixes();
         routes();
@@ -224,60 +227,203 @@ public final class LogicTest {
     private static void trustLevels() {
         final String ap = "aa:bb:cc:dd:ee:ff";
         final String otherAp = "aa:bb:cc:dd:ee:01";
+        final Logic.WifiSecurity secured = Logic.WifiSecurity.SECURED;
 
         List<TrustedEntry> bound = entries(new TrustedEntry("Home", ap));
         eq("trustLevel: точное совпадение",
-                Logic.Trust.TRUSTED, Logic.trustLevel(bound, "Home", ap, false));
+                Logic.Trust.TRUSTED, Logic.trustLevel(bound, "Home", ap, secured));
         eq("trustLevel: SSID и BSSID в разном регистре/пробелах",
                 Logic.Trust.TRUSTED,
                 Logic.trustLevel(entries(new TrustedEntry("\" Home \"", "AA:BB:CC:DD:EE:FF")),
-                        " Home ", "AA:BB:CC:DD:EE:FF", false));
+                        " Home ", "AA:BB:CC:DD:EE:FF", secured));
         eq("trustLevel: SSID совпал, BSSID другой",
-                Logic.Trust.MISMATCH, Logic.trustLevel(bound, "Home", otherAp, false));
+                Logic.Trust.MISMATCH, Logic.trustLevel(bound, "Home", otherAp, secured));
         eq("trustLevel: текущий BSSID служебный",
                 Logic.Trust.MISMATCH,
-                Logic.trustLevel(bound, "Home", "00:00:00:00:00:00", false));
+                Logic.trustLevel(bound, "Home", "00:00:00:00:00:00", secured));
         eq("trustLevel: текущий BSSID недоступен",
-                Logic.Trust.MISMATCH, Logic.trustLevel(bound, "Home", null, false));
+                Logic.Trust.MISMATCH, Logic.trustLevel(bound, "Home", null, secured));
 
         List<TrustedEntry> legacy = entries(new TrustedEntry("Home", null));
         eq("trustLevel: legacy без BSSID",
-                Logic.Trust.UNBOUND, Logic.trustLevel(legacy, "Home", ap, false));
+                Logic.Trust.UNBOUND, Logic.trustLevel(legacy, "Home", ap, secured));
         eq("trustLevel: legacy без BSSID и текущий BSSID недоступен",
-                Logic.Trust.UNBOUND, Logic.trustLevel(legacy, "Home", null, false));
+                Logic.Trust.UNBOUND, Logic.trustLevel(legacy, "Home", null, secured));
 
         eq("trustLevel: пустой список",
-                Logic.Trust.NONE, Logic.trustLevel(entries(), "Home", ap, false));
+                Logic.Trust.NONE, Logic.trustLevel(entries(), "Home", ap, secured));
         eq("trustLevel: null вместо списка",
-                Logic.Trust.NONE, Logic.trustLevel(null, "Home", ap, false));
+                Logic.Trust.NONE, Logic.trustLevel(null, "Home", ap, secured));
         eq("trustLevel: другой SSID",
-                Logic.Trust.NONE, Logic.trustLevel(bound, "Other", ap, false));
-        eq("trustLevel: открытая сеть",
-                Logic.Trust.NONE, Logic.trustLevel(bound, "Home", ap, true));
+                Logic.Trust.NONE, Logic.trustLevel(bound, "Other", ap, secured));
         eq("trustLevel: пустой SSID",
-                Logic.Trust.NONE, Logic.trustLevel(bound, "", ap, false));
+                Logic.Trust.NONE, Logic.trustLevel(bound, "", ap, secured));
         eq("trustLevel: null SSID",
-                Logic.Trust.NONE, Logic.trustLevel(bound, null, ap, false));
+                Logic.Trust.NONE, Logic.trustLevel(bound, null, ap, secured));
+
+        // Fail-closed: только подтверждённо защищённая сеть даёт TRUSTED.
+        eq("trustLevel: открытая сеть",
+                Logic.Trust.NONE, Logic.trustLevel(bound, "Home", ap, Logic.WifiSecurity.OPEN));
+        eq("trustLevel: неизвестный тип защиты",
+                Logic.Trust.NONE, Logic.trustLevel(bound, "Home", ap, Logic.WifiSecurity.UNKNOWN));
+        eq("trustLevel: null тип защиты",
+                Logic.Trust.NONE, Logic.trustLevel(bound, "Home", ap, null));
+        eq("trustLevel: UNKNOWN при совпадении SSID даёт NONE, а не MISMATCH",
+                Logic.Trust.NONE, Logic.trustLevel(bound, "Home", otherAp,
+                        Logic.WifiSecurity.UNKNOWN));
+        eq("trustLevel: OPEN при legacy-записи даёт NONE, а не UNBOUND",
+                Logic.Trust.NONE, Logic.trustLevel(legacy, "Home", ap,
+                        Logic.WifiSecurity.OPEN));
 
         eq("trustLevel: несколько точек, совпала вторая",
                 Logic.Trust.TRUSTED,
                 Logic.trustLevel(entries(new TrustedEntry("Home", otherAp),
-                        new TrustedEntry("Home", ap)), "Home", ap, false));
+                        new TrustedEntry("Home", ap)), "Home", ap, secured));
         eq("trustLevel: совпавшая точка важнее legacy",
                 Logic.Trust.TRUSTED,
                 Logic.trustLevel(entries(new TrustedEntry("Home", null),
-                        new TrustedEntry("Home", ap)), "Home", ap, false));
+                        new TrustedEntry("Home", ap)), "Home", ap, secured));
         eq("trustLevel: чужая точка и legacy дают UNBOUND",
                 Logic.Trust.UNBOUND,
                 Logic.trustLevel(entries(new TrustedEntry("Home", otherAp),
-                        new TrustedEntry("Home", null)), "Home", ap, false));
+                        new TrustedEntry("Home", null)), "Home", ap, secured));
         eq("trustLevel: null в списке пропускается",
                 Logic.Trust.TRUSTED,
                 Logic.trustLevel(entries((TrustedEntry) null, new TrustedEntry("Home", ap)),
-                        "Home", ap, false));
+                        "Home", ap, secured));
         eq("trustLevel: запись с пустым SSID пропускается",
                 Logic.Trust.NONE,
-                Logic.trustLevel(entries(new TrustedEntry("", ap)), "Home", ap, false));
+                Logic.trustLevel(entries(new TrustedEntry("", ap)), "Home", ap, secured));
+    }
+
+    // --- parseTrustedEntries ------------------------------------------------
+
+    private static void trustedLists() {
+        List<TrustedEntry> single = Logic.parseTrustedEntries("Home\taa:bb:cc:dd:ee:ff");
+        eqInt("parseTrustedEntries: одна запись", 1, single.size());
+        eq("parseTrustedEntries: одна запись ssid", "Home", single.get(0).ssid);
+
+        List<TrustedEntry> crlf = Logic.parseTrustedEntries(
+                " Home\taa:bb:cc:dd:ee:ff \r\nWork\t11:22:33:44:55:66\r\n");
+        eqInt("parseTrustedEntries: CRLF", 2, crlf.size());
+        eq("parseTrustedEntries: CRLF вторая", "Work", crlf.get(1).ssid);
+
+        List<TrustedEntry> cr = Logic.parseTrustedEntries("A\rB\rC");
+        eqInt("parseTrustedEntries: одиночный CR", 3, cr.size());
+        eq("parseTrustedEntries: CR последняя", "C", cr.get(2).ssid);
+
+        List<TrustedEntry> blank = Logic.parseTrustedEntries(
+                "\n\n Home \n\n\t\n Work\n\n");
+        eqInt("parseTrustedEntries: пустые строки пропускаются", 2, blank.size());
+
+        List<TrustedEntry> chars = Logic.parseTrustedEntries("Cafe, home;2\nOffice");
+        eqInt("parseTrustedEntries: запятая и точка с запятой не разделяют", 2,
+                chars.size());
+        eq("parseTrustedEntries: SSID с запятой сохранён",
+                "Cafe, home;2", chars.get(0).ssid);
+
+        List<TrustedEntry> both = Logic.parseTrustedEntries(
+                "Home | aa:bb:cc:dd:ee:ff\nLegacy");
+        eqInt("parseTrustedEntries: UI-формат и legacy", 2, both.size());
+        check("parseTrustedEntries: UI-запись привязана", both.get(0).isBound());
+        check("parseTrustedEntries: legacy не привязана", !both.get(1).isBound());
+
+        eqInt("parseTrustedEntries: null", 0, Logic.parseTrustedEntries(null).size());
+        eqInt("parseTrustedEntries: пустая строка", 0, Logic.parseTrustedEntries("").size());
+        eqInt("parseTrustedEntries: только переводы строк", 0,
+                Logic.parseTrustedEntries("\r\n\r\r\n").size());
+    }
+
+    // --- networkKey / manualOffApplies -------------------------------------
+
+    private static void networkKeys() {
+        eq("networkKey: Wi-Fi с BSSID", "WIFI|Home|aa:bb:cc:dd:ee:ff",
+                Logic.networkKey(NetKind.WIFI, " Home ", "AA:BB:CC:DD:EE:FF"));
+        eq("networkKey: SSID и BSSID нормализуются в кавычках",
+                "WIFI|Home|aa:bb:cc:dd:ee:ff",
+                Logic.networkKey(NetKind.WIFI, "\"Home\"", "aa:bb:cc:dd:ee:ff"));
+        eq("networkKey: без BSSID", "WIFI|Home|",
+                Logic.networkKey(NetKind.WIFI, "Home", null));
+        eq("networkKey: мобильная сеть", "MOBILE||",
+                Logic.networkKey(NetKind.MOBILE, null, null));
+        eq("networkKey: null kind", "NONE||", Logic.networkKey(null, null, null));
+        eq("networkKey: разделитель внутри SSID не ломает ключ",
+                "WIFI|A|B|", Logic.networkKey(NetKind.WIFI, "A|B", null));
+
+        String home = Logic.networkKey(NetKind.WIFI, "Home", "aa:bb:cc:dd:ee:ff");
+        check("manualOffApplies: та же сеть", Logic.manualOffApplies(home, home));
+        check("manualOffApplies: BSSID в верхнем регистре через удобную форму",
+                Logic.manualOffApplies(home, NetKind.WIFI, "Home", "AA:BB:CC:DD:EE:FF"));
+        check("manualOffApplies: другая Wi-Fi",
+                !Logic.manualOffApplies(home,
+                        Logic.networkKey(NetKind.WIFI, "Work", "aa:bb:cc:dd:ee:ff")));
+        check("manualOffApplies: другой BSSID той же Wi-Fi",
+                !Logic.manualOffApplies(home,
+                        Logic.networkKey(NetKind.WIFI, "Home", "aa:bb:cc:dd:ee:01")));
+        check("manualOffApplies: переход на мобильную",
+                !Logic.manualOffApplies(home, Logic.networkKey(NetKind.MOBILE, null, null)));
+        check("manualOffApplies: мобильная остаётся мобильной",
+                Logic.manualOffApplies("MOBILE||", "MOBILE||"));
+        check("manualOffApplies: SSID недоступен — запрет сохраняется",
+                Logic.manualOffApplies(home, "WIFI||"));
+        check("manualOffApplies: BSSID недоступен, SSID известен — смена доказана",
+                !Logic.manualOffApplies(home, "WIFI|Work|"));
+        check("manualOffApplies: пустой сохранённый ключ",
+                !Logic.manualOffApplies("", home));
+        check("manualOffApplies: null сохранённый ключ",
+                !Logic.manualOffApplies(null, home));
+        check("manualOffApplies: текущий ключ null при сохранённом — сохраняем",
+                Logic.manualOffApplies(home, null));
+        check("manualOffApplies: удобная форма по текущей сети",
+                Logic.manualOffApplies(home, NetKind.WIFI, "Home",
+                        "aa:bb:cc:dd:ee:ff"));
+    }
+
+    // --- exitOffStep --------------------------------------------------------
+
+    private static void exitOffSteps() {
+        final long now = 1_000_000L;
+        final long window = now + 12_000L;
+
+        eq("exitOffStep: Tailscale не активен",
+                Logic.ExitOffStep.DEFER,
+                Logic.exitOffStep(false, true, false, 0L, now));
+        eq("exitOffStep: Tailscale не активен, окно уже идёт",
+                Logic.ExitOffStep.DEFER,
+                Logic.exitOffStep(false, false, true, window, now));
+        eq("exitOffStep: старт окна",
+                Logic.ExitOffStep.START,
+                Logic.exitOffStep(true, true, false, 0L, now));
+        eq("exitOffStep: ждём восстановления exit node перед командой",
+                Logic.ExitOffStep.WAIT,
+                Logic.exitOffStep(true, true, false, window, now));
+        eq("exitOffStep: окно истекло — пора отправлять",
+                Logic.ExitOffStep.SEND,
+                Logic.exitOffStep(true, true, false, now - 1L, now));
+        eq("exitOffStep: окно истекло, exit node не активен — отправляем",
+                Logic.ExitOffStep.SEND,
+                Logic.exitOffStep(true, false, false, now - 1L, now));
+        eq("exitOffStep: команда отправлена, ждём подтверждения",
+                Logic.ExitOffStep.WAIT,
+                Logic.exitOffStep(true, true, true, window, now));
+        eq("exitOffStep: exit node исчез, но окно ещё идёт",
+                Logic.ExitOffStep.WAIT,
+                Logic.exitOffStep(true, false, true, window, now));
+        eq("exitOffStep: exit node исчез и окно истекло",
+                Logic.ExitOffStep.CONFIRMED,
+                Logic.exitOffStep(true, false, true, now, now));
+        eq("exitOffStep: exit node остался после окна",
+                Logic.ExitOffStep.FAILED,
+                Logic.exitOffStep(true, true, true, now - 1L, now));
+        eq("exitOffStep: на границе окна оно уже истекло",
+                Logic.ExitOffStep.FAILED,
+                Logic.exitOffStep(true, true, true, window, window));
+        eq("exitOffStep: повтор после паузы (sent=false, окно идёт)",
+                Logic.ExitOffStep.WAIT,
+                Logic.exitOffStep(true, true, false, window, now));
+        eq("exitOffStep: повтор после паузы (sent=false, окно истекло)",
+                Logic.ExitOffStep.SEND,
+                Logic.exitOffStep(true, true, false, now, now));
     }
 
     // --- maskHost -----------------------------------------------------------
