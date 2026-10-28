@@ -1,6 +1,7 @@
 package com.vpnswitch;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
@@ -205,6 +206,63 @@ public final class Logic {
             }
         }
         return result;
+    }
+
+    // Значения android.net.wifi.WifiInfo SECURITY_TYPE_* и
+    // android.net.wifi.WifiConfiguration.KeyMgmt.* продублированы, чтобы
+    // классификация проверялась обычными unit-тестами без Android SDK.
+    public static final int WIFI_SECURITY_TYPE_OPEN = 0;
+    public static final int WIFI_SECURITY_TYPE_OWE = 6;
+    public static final int WIFI_SECURITY_TYPE_OSEN = 10;
+    private static final int KEY_MGMT_NONE = 0;
+    private static final int KEY_MGMT_OSEN = 5;
+    private static final int KEY_MGMT_OWE = 9;
+
+    /**
+     * Тип защиты из WifiInfo.getCurrentSecurityType() (API 30+). OWE и OSEN —
+     * сети без учётных данных, поэтому для доверия они не отличаются от
+     * неизвестного типа. Неизвестные будущие значения тоже UNKNOWN: список
+     * защищённых типов перечислен явно, чтобы не доверять сети по ошибке.
+     */
+    public static WifiSecurity wifiSecurityFromType(int type) {
+        if (type == WIFI_SECURITY_TYPE_OPEN) {
+            return WifiSecurity.OPEN;
+        }
+        switch (type) {
+            // WEP, PSK, EAP, SAE, 192-bit, WAPI, WPA3-Enterprise, Passpoint, DPP.
+            case 1:
+            case 2:
+            case 3:
+            case 4:
+            case 5:
+            case 7:
+            case 8:
+            case 9:
+            case 11:
+            case 12:
+            case 13:
+                return WifiSecurity.SECURED;
+            default:
+                // OWE (6), OSEN (10), UNKNOWN (-1) и всё незнакомое.
+                return WifiSecurity.UNKNOWN;
+        }
+    }
+
+    /**
+     * Тип защиты из WifiConfiguration.allowedKeyManagement (API 29). Пустой или
+     * null-набор означает «тип не определён», а не «открытая сеть». OWE/OSEN
+     * также не подтверждают доверие.
+     */
+    public static WifiSecurity wifiSecurityFromKeyManagement(BitSet allowed) {
+        if (allowed == null || allowed.isEmpty()) {
+            return WifiSecurity.UNKNOWN;
+        }
+        if (allowed.length() > 18 || allowed.get(KEY_MGMT_OWE) || allowed.get(KEY_MGMT_OSEN)) {
+            // Незнакомый бит или сеть без учётных данных: не угадываем.
+            return WifiSecurity.UNKNOWN;
+        }
+        boolean onlyNone = allowed.cardinality() == 1 && allowed.get(KEY_MGMT_NONE);
+        return onlyNone ? WifiSecurity.OPEN : WifiSecurity.SECURED;
     }
 
     /**

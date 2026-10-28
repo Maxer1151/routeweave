@@ -23,7 +23,6 @@ import android.util.Log;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -332,12 +331,9 @@ public final class NetworkUtils {
         }
         if (Build.VERSION.SDK_INT >= 30) {
             try {
-                int type = info.getCurrentSecurityType();
-                if (type == WifiInfo.SECURITY_TYPE_OPEN) {
-                    return Logic.WifiSecurity.OPEN;
-                }
-                // Отрицательное значение — «тип неизвестен»: не угадываем.
-                return type < 0 ? Logic.WifiSecurity.UNKNOWN : Logic.WifiSecurity.SECURED;
+                // OWE/OSEN — сети без учётных данных; классификация в Logic
+                // возвращает для них UNKNOWN, а не SECURED.
+                return Logic.wifiSecurityFromType(info.getCurrentSecurityType());
             } catch (Throwable t) {
                 Log.d(TAG, "wifiSecurity: security type недоступен: " + t);
                 return Logic.WifiSecurity.UNKNOWN;
@@ -360,13 +356,9 @@ public final class NetworkUtils {
                 if (config == null || config.networkId != networkId) {
                     continue;
                 }
-                BitSet allowed = config.allowedKeyManagement;
-                if (allowed == null || allowed.isEmpty()) {
-                    return Logic.WifiSecurity.OPEN;
-                }
-                return allowed.cardinality() == 1
-                        && allowed.get(WifiConfiguration.KeyMgmt.NONE)
-                        ? Logic.WifiSecurity.OPEN : Logic.WifiSecurity.SECURED;
+                // null/пустой набор — «тип не определён», а не открытая сеть.
+                // OWE/OSEN тоже не подтверждают доверие.
+                return Logic.wifiSecurityFromKeyManagement(config.allowedKeyManagement);
             }
         } catch (Throwable t) {
             Log.d(TAG, "wifiSecurity: конфигурация недоступна: " + t);

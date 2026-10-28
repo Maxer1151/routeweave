@@ -7,6 +7,7 @@ import java.io.FileOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.List;
 
@@ -39,6 +40,7 @@ public final class LogicTest {
         trustedParsing();
         trustedEquality();
         trustLevels();
+        securityTypes();
         trustedLists();
         networkKeys();
         exitOffSteps();
@@ -294,6 +296,64 @@ public final class LogicTest {
         eq("trustLevel: запись с пустым SSID пропускается",
                 Logic.Trust.NONE,
                 Logic.trustLevel(entries(new TrustedEntry("", ap)), "Home", ap, secured));
+    }
+
+    // --- security type ------------------------------------------------------
+
+    private static void securityTypes() {
+        // Значения android.net.wifi.WifiInfo.SECURITY_TYPE_* (API 30+).
+        eq("securityType: OPEN", Logic.WifiSecurity.OPEN,
+                Logic.wifiSecurityFromType(0));
+        eq("securityType: WEP", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromType(1));
+        eq("securityType: PSK", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromType(2));
+        eq("securityType: EAP", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromType(3));
+        eq("securityType: SAE", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromType(4));
+        eq("securityType: OWE — без учётных данных", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromType(6));
+        eq("securityType: OSEN — без учётных данных", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromType(10));
+        eq("securityType: UNKNOWN (-1)", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromType(-1));
+        eq("securityType: отрицательное значение", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromType(-42));
+        eq("securityType: неизвестный будущий тип", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromType(99));
+        eq("securityType: DPP", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromType(13));
+
+        // Значения android.net.wifi.WifiConfiguration.KeyMgmt.* (API 29).
+        eq("keyMgmt: null", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(null));
+        eq("keyMgmt: пустой набор", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(new BitSet()));
+        eq("keyMgmt: только NONE — открытая сеть", Logic.WifiSecurity.OPEN,
+                Logic.wifiSecurityFromKeyManagement(bits(0)));
+        eq("keyMgmt: WPA2_PSK", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromKeyManagement(bits(4)));
+        eq("keyMgmt: SAE", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromKeyManagement(bits(8)));
+        eq("keyMgmt: OWE", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(bits(9)));
+        eq("keyMgmt: OSEN", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(bits(5)));
+        eq("keyMgmt: OWE в переходном режиме", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(bits(0, 9)));
+        eq("keyMgmt: несколько защищённых методов", Logic.WifiSecurity.SECURED,
+                Logic.wifiSecurityFromKeyManagement(bits(1, 8)));
+        eq("keyMgmt: незнакомый бит", Logic.WifiSecurity.UNKNOWN,
+                Logic.wifiSecurityFromKeyManagement(bits(30)));
+    }
+
+    private static BitSet bits(int... indexes) {
+        BitSet set = new BitSet();
+        for (int index : indexes) {
+            set.set(index);
+        }
+        return set;
     }
 
     // --- parseTrustedEntries ------------------------------------------------
