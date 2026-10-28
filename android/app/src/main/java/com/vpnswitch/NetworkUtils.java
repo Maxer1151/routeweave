@@ -227,18 +227,18 @@ public final class NetworkUtils {
     }
 
     /**
-     * true, если текущая Wi-Fi открыта (без шифрования). На API 30+ используется
+     * Тип защиты текущей Wi-Fi. На API 30+ используется
      * {@link WifiInfo#getCurrentSecurityType()}, на API 29 — сохранённая
-     * конфигурация по networkId. При неизвестности — false: WPA-сеть не должна
-     * ошибочно считаться открытой.
+     * конфигурация по networkId. Любая неопределённость даёт UNKNOWN:
+     * неизвестную сеть нельзя считать ни открытой, ни защищённой, поэтому
+     * доверие по ней не подтверждается (fail-closed).
      */
     @SuppressWarnings("deprecation")
-    public static boolean isCurrentWifiOpen(Context context) {
+    public static Logic.WifiSecurity currentWifiSecurity(Context context) {
         if (context == null || currentKind(context) != NetKind.WIFI) {
-            return false;
+            return Logic.WifiSecurity.UNKNOWN;
         }
-        WifiInfo info = wifiInfo(context);
-        return info != null && isWifiOpen(context, info);
+        return wifiSecurity(context, wifiInfo(context));
     }
 
     /**
@@ -248,18 +248,23 @@ public final class NetworkUtils {
     public static final class WifiAccess {
         public final String ssid;
         public final String bssid;
-        public final boolean open;
+        public final Logic.WifiSecurity security;
         public final Logic.Trust trust;
 
-        public WifiAccess(String ssid, String bssid, boolean open, Logic.Trust trust) {
+        public WifiAccess(String ssid, String bssid, Logic.WifiSecurity security,
+                          Logic.Trust trust) {
             this.ssid = ssid;
             this.bssid = bssid;
-            this.open = open;
+            this.security = security == null ? Logic.WifiSecurity.UNKNOWN : security;
             this.trust = trust == null ? Logic.Trust.NONE : trust;
         }
 
+        public boolean isOpen() {
+            return security == Logic.WifiSecurity.OPEN;
+        }
+
         public static WifiAccess none() {
-            return new WifiAccess(null, null, false, Logic.Trust.NONE);
+            return new WifiAccess(null, null, Logic.WifiSecurity.UNKNOWN, Logic.Trust.NONE);
         }
     }
 
@@ -283,12 +288,12 @@ public final class NetworkUtils {
             ssid = visibleSsid(info.getSSID());
             bssid = Logic.normalizeBssid(info.getBSSID());
         }
-        boolean open = info != null && isWifiOpen(context, info);
-        Logic.Trust trust = new Prefs(context).trustLevel(ssid, bssid, open);
+        Logic.WifiSecurity security = wifiSecurity(context, info);
+        Logic.Trust trust = new Prefs(context).trustLevel(ssid, bssid, security);
         Log.d(TAG, "currentWifiAccess: ssid=" + (ssid == null ? "нет" : "есть")
                 + ", bssid=" + (bssid == null ? "нет" : "есть")
-                + ", open=" + open + ", trust=" + trust);
-        return new WifiAccess(ssid, bssid, open, trust);
+                + ", security=" + security + ", trust=" + trust);
+        return new WifiAccess(ssid, bssid, security, trust);
     }
 
     /** true, если сейчас Wi-Fi и её пара SSID+BSSID доверенная. */
@@ -321,28 +326,34 @@ public final class NetworkUtils {
     }
 
     @SuppressWarnings("deprecation")
-    private static boolean isWifiOpen(Context context, WifiInfo info) {
+    private static Logic.WifiSecurity wifiSecurity(Context context, WifiInfo info) {
         if (info == null) {
-            return false;
+            return Logic.WifiSecurity.UNKNOWN;
         }
         if (Build.VERSION.SDK_INT >= 30) {
             try {
-                return info.getCurrentSecurityType() == WifiInfo.SECURITY_TYPE_OPEN;
+                int type = info.getCurrentSecurityType();
+                if (type == WifiInfo.SECURITY_TYPE_OPEN) {
+                    return Logic.WifiSecurity.OPEN;
+                }
+                // Отрицательное значение — «тип неизвестен»: не угадываем.
+                return type < 0 ? Logic.WifiSecurity.UNKNOWN : Logic.WifiSecurity.SECURED;
             } catch (Throwable t) {
-                Log.d(TAG, "isWifiOpen: security type недоступен: " + t);
-                return false;
+                Log.d(TAG, "wifiSecurity: security type недоступен: " + t);
+                return Logic.WifiSecurity.UNKNOWN;
             }
         }
         // API 29: отдельного security type у WifiInfo нет, смотрим конфигурацию.
+        // Пустой или недоступный список означает «не знаем», а не «закрыта».
         try {
             WifiManager wm = (WifiManager) context.getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
             if (wm == null) {
-                return false;
+                return Logic.WifiSecurity.UNKNOWN;
             }
             List<WifiConfiguration> configured = wm.getConfiguredNetworks();
-            if (configured == null) {
-                return false;
+            if (configured == null || configured.isEmpty()) {
+                return Logic.WifiSecurity.UNKNOWN;
             }
             int networkId = info.getNetworkId();
             for (WifiConfiguration config : configured) {
@@ -351,15 +362,16 @@ public final class NetworkUtils {
                 }
                 BitSet allowed = config.allowedKeyManagement;
                 if (allowed == null || allowed.isEmpty()) {
-                    return true;
+                    return Logic.WifiSecurity.OPEN;
                 }
                 return allowed.cardinality() == 1
-                        && allowed.get(WifiConfiguration.KeyMgmt.NONE);
+                        && allowed.get(WifiConfiguration.KeyMgmt.NONE)
+                        ? Logic.WifiSecurity.OPEN : Logic.WifiSecurity.SECURED;
             }
         } catch (Throwable t) {
-            Log.d(TAG, "isWifiOpen: конфигурация недоступна: " + t);
+            Log.d(TAG, "wifiSecurity: конфигурация недоступна: " + t);
         }
-        return false;
+        return Logic.WifiSecurity.UNKNOWN;
     }
 
     /**

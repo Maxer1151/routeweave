@@ -138,8 +138,8 @@ public final class Prefs {
     }
 
     /** Уровень доверия по паре SSID+BSSID текущей сети. */
-    public Logic.Trust trustLevel(String ssid, String bssid, boolean openNetwork) {
-        return Logic.trustLevel(getTrustedNetworks(), ssid, bssid, openNetwork);
+    public Logic.Trust trustLevel(String ssid, String bssid, Logic.WifiSecurity security) {
+        return Logic.trustLevel(getTrustedNetworks(), ssid, bssid, security);
     }
 
     /** Уникальные SSID из списка доверенных сетей. Для счётчика записей есть getTrustedNetworks(). */

@@ -1,6 +1,8 @@
 package com.vpnswitch;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -35,6 +37,16 @@ public final class Logic {
         UNBOUND,
         MISMATCH,
         TRUSTED
+    }
+
+    /**
+     * Тип защиты текущей Wi-Fi. UNKNOWN — определить не удалось (нет данных,
+     * исключение, API 29 без конфигурации): доверие не подтверждается.
+     */
+    public enum WifiSecurity {
+        OPEN,
+        SECURED,
+        UNKNOWN
     }
 
     /**
@@ -177,14 +189,33 @@ public final class Logic {
     }
 
     /**
-     * Уровень доверия текущей сети. Fail-closed: открытая сеть, пустой SSID и
-     * недоступный BSSID не дают TRUSTED. Несколько точек одного SSID
-     * поддерживаются как несколько записей (mesh/роуминг).
+     * Разбирает список доверенных сетей: ровно одна запись в строке. Запятая и
+     * точка с запятой — допустимые символы SSID, поэтому разделителями не
+     * считаются. Пустые строки пропускаются.
+     */
+    public static List<TrustedEntry> parseTrustedEntries(String raw) {
+        List<TrustedEntry> result = new ArrayList<>();
+        if (raw == null) {
+            return result;
+        }
+        for (String line : raw.split("\\r?\\n|\\r")) {
+            TrustedEntry entry = parseTrustedEntry(line);
+            if (entry != null) {
+                result.add(entry);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Уровень доверия текущей сети. Fail-closed: открытая сеть, неизвестный тип
+     * защиты, пустой SSID и недоступный BSSID не дают TRUSTED. Несколько точек
+     * одного SSID поддерживаются как несколько записей (mesh/роуминг).
      */
     public static Trust trustLevel(Collection<TrustedEntry> entries, String ssid,
-                                   String bssid, boolean openNetwork) {
+                                   String bssid, WifiSecurity security) {
         String normalizedSsid = normalizeSsid(ssid);
-        if (normalizedSsid.length() == 0 || openNetwork) {
+        if (normalizedSsid.length() == 0 || security != WifiSecurity.SECURED) {
             return Trust.NONE;
         }
         if (entries == null || entries.isEmpty()) {

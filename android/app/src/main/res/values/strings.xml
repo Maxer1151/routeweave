@@ -42,11 +42,12 @@
     <string name="ssid_trust_mismatch">Другая точка с этим SSID — VPN не отключается</string>
     <string name="ssid_bssid_unavailable">BSSID недоступен: сеть не считается доверенной, VPN не отключается</string>
     <string name="ssid_open_network">Открытая сеть не считается доверенной — VPN не отключается</string>
+    <string name="ssid_security_unknown">Тип защиты сети не определён — сеть не считается доверенной, VPN не отключается</string>
     <string name="ssid_no_access">Нет доступа</string>
     <string name="ssid_no_wifi">Wi-Fi не подключён</string>
     <string name="ssid_location_off">Геолокация выключена</string>
     <string name="ssid_unavailable">SSID недоступен</string>
-    <string name="trusted_list_hint">По одной сети в строке или через запятую</string>
+    <string name="trusted_list_hint">По одной сети в строке; запятая и точка с запятой — часть SSID</string>
     <string name="btn_add_current">Добавить текущую</string>
     <string name="btn_save_ssids">Сохранить</string>
     <string name="trusted_count">Сохранено сетей: %1$d</string>
@@ -152,6 +153,8 @@
     <string name="toast_ssid_saved">Список доверенных сетей сохранён</string>
     <string name="toast_bssid_unavailable">BSSID недоступен: подойдите ближе к точке и включите геолокацию</string>
     <string name="toast_open_network_not_trusted">Открытую сеть нельзя сделать доверенной: VPN не будет отключаться</string>
+    <string name="toast_security_unknown_not_trusted">Тип защиты сети не определён: добавить её как доверенную нельзя</string>
+    <string name="toast_exit_manual_off">Ручное снятие exit node: на этой сети правило не включит его обратно</string>
     <string name="toast_exit_name_required">Укажите имя exit node — без него включение невозможно</string>
     <string name="error_foreground_failed">Не удалось запустить фоновый мониторинг: система отклонила foreground-сервис. Проверьте разрешения и уведомления.</string>
 </resources>

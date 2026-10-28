@@ -542,9 +542,14 @@ public class MainActivity extends Activity {
             toast(R.string.toast_ssid_unavailable);
             return;
         }
-        if (access.open) {
+        if (access.security == Logic.WifiSecurity.OPEN) {
             // Открытая сеть не может быть доверенной: trustLevel всегда NONE.
             toast(R.string.toast_open_network_not_trusted);
+            return;
+        }
+        if (access.security == Logic.WifiSecurity.UNKNOWN) {
+            // Fail-closed: неизвестный тип защиты не даёт подтвердить доверие.
+            toast(R.string.toast_security_unknown_not_trusted);
             return;
         }
         if (access.bssid == null) {
@@ -553,7 +558,8 @@ public class MainActivity extends Activity {
             return;
         }
         ssid = ssid.trim();
-        boolean already = prefs.trustLevel(ssid, access.bssid, false) == Logic.Trust.TRUSTED;
+        boolean already = prefs.trustLevel(ssid, access.bssid, access.security)
+                == Logic.Trust.TRUSTED;
         prefs.addTrustedNetwork(ssid, access.bssid);
         addEntryToEditor(ssid, access.bssid);
         updateTrustedCount();
@@ -608,23 +614,11 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Записи доверенных сетей: по одной в строке либо через запятую/точку с
-     * запятой. Формат записи — {@code SSID | BSSID} или {@code SSID<TAB>BSSID};
-     * запятых внутри BSSID нет, поэтому разделители не конфликтуют.
+     * Записи доверенных сетей: строго по одной в строке. Запятая и точка с
+     * запятой — допустимые символы SSID, поэтому разделителями не считаются.
      */
     private static Set<Logic.TrustedEntry> parseTrustedEntries(String raw) {
-        Set<Logic.TrustedEntry> result = new LinkedHashSet<>();
-        if (raw == null) {
-            return result;
-        }
-        String[] lines = raw.split("[\\r\\n,;]+");
-        for (String line : lines) {
-            Logic.TrustedEntry entry = Logic.parseTrustedEntry(line);
-            if (entry != null) {
-                result.add(entry);
-            }
-        }
-        return result;
+        return new LinkedHashSet<>(Logic.parseTrustedEntries(raw));
     }
 
     private static String joinTrustedEntries(Collection<Logic.TrustedEntry> entries) {
@@ -1154,8 +1148,13 @@ public class MainActivity extends Activity {
             statusText = R.string.ssid_bssid_unavailable;
             statusColor = R.color.colorAmber;
             statusBackground = R.drawable.bg_pill_amber;
-        } else if (access.open) {
+        } else if (access.security == Logic.WifiSecurity.OPEN) {
             statusText = R.string.ssid_open_network;
+            statusColor = R.color.colorAmber;
+            statusBackground = R.drawable.bg_pill_amber;
+        } else if (access.security == Logic.WifiSecurity.UNKNOWN) {
+            // Неизвестный тип защиты: сеть не доверяем, VPN не отключаем.
+            statusText = R.string.ssid_security_unknown;
             statusColor = R.color.colorAmber;
             statusBackground = R.drawable.bg_pill_amber;
         } else if (access.trust == Logic.Trust.TRUSTED) {
