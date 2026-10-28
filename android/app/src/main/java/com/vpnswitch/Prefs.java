@@ -16,6 +16,7 @@ public final class Prefs {
     private static final String KEY_TRUSTED_SSIDS = "trusted_ssids";
     private static final String KEY_WDTT_TRUSTED = "wdtt_trusted";
     private static final String KEY_WDTT_PAUSED_ON_WIFI = "wdtt_paused_on_wifi";
+    private static final String KEY_WDTT_ACTIVE_ON_WIFI = "wdtt_active_on_wifi";
     private static final String KEY_LAST_STATUS = "last_status";
     private static final String KEY_LAST_OK = "last_ok";
     private static final String KEY_LAST_TIME = "last_time";
@@ -167,6 +168,19 @@ public final class Prefs {
 
     public void setWdttPausedOnWifi(boolean paused) {
         prefs.edit().putBoolean(KEY_WDTT_PAUSED_ON_WIFI, paused).apply();
+    }
+
+    /**
+     * true, если WDTT был активен, пока приложение находилось на Wi-Fi. Флаг
+     * ставится при наблюдении активного WDTT и переживает его авто-паузу: по
+     * нему уход с Wi-Fi помечает паузу, не полагаясь на момент callback'а.
+     */
+    public boolean isWdttActiveOnWifi() {
+        return prefs.getBoolean(KEY_WDTT_ACTIVE_ON_WIFI, false);
+    }
+
+    public void setWdttActiveOnWifi(boolean active) {
+        prefs.edit().putBoolean(KEY_WDTT_ACTIVE_ON_WIFI, active).apply();
     }
 
     public String getLastStatus() {

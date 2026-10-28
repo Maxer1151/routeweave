@@ -117,18 +117,20 @@ public class MonitorService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
-        ExitNodeController.tickAsync(this);
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             Log.i(TAG, "MonitorService: STOP");
             stopSelf();
             return START_NOT_STICKY;
         }
 
+        // Сначала FGS: если он не поднялся, сервис будет остановлен, и тик не
+        // должен успеть применить или снять exit node без присмотра.
         if (!startForegroundNow()) {
             reportForegroundFailure();
             return START_NOT_STICKY;
         }
         running = true;
+        ExitNodeController.tickAsync(this);
 
         boolean manual = intent != null && ACTION_APPLY.equals(intent.getAction());
         scheduleApply(START_DEBOUNCE_MS, manual);
@@ -312,15 +314,7 @@ public class MonitorService extends Service {
         NetKind kind = NetworkUtils.currentKind(this);
         NetKind previous = prefs.getLastNetKind();
         if (previous == NetKind.WIFI && kind != NetKind.WIFI) {
-            prefs.setLeftWifiAt(System.currentTimeMillis());
-            VpnState vpn = NetworkUtils.detectVpn(this);
-            if (vpn.active && vpn.type == VpnType.WDTT && prefs.isWdttTrusted()) {
-                prefs.setWdttPausedOnWifi(true);
-                Log.i(TAG, "MonitorService: WDTT Plus мог уйти в паузу после Wi-Fi");
-            }
-            VpnController.disconnectTailscale(this);
-            Log.i(TAG, "MonitorService: уход с Wi-Fi (" + source
-                    + "), Tailscale отключён досрочно");
+            handleLeftWifi(source);
         }
         prefs.setLastNetKind(kind);
         if (prefs.isExitManageEnabled()) {
@@ -328,6 +322,27 @@ public class MonitorService extends Service {
             ExitNodeController.onNetworkChangedAsync(this);
         }
         scheduleApply(NETWORK_DEBOUNCE_MS, false);
+    }
+
+    /**
+     * Побочные эффекты ухода с Wi-Fi. Общий путь для callback'а и периодической
+     * сверки: если callback потерян, сверка обязана сделать то же самое.
+     */
+    private void handleLeftWifi(String source) {
+        prefs.setLeftWifiAt(System.currentTimeMillis());
+        VpnState vpn = NetworkUtils.detectVpn(this);
+        boolean stillActive = vpn.active && vpn.type == VpnType.WDTT;
+        if (prefs.isWdttTrusted()
+                && (prefs.isWdttActiveOnWifi() || stillActive)) {
+            // WDTT был активен на Wi-Fi и мог уйти в авто-паузу — не шлём toggle
+            // вслепую, даже если пауза наступила до/после этого события.
+            prefs.setWdttPausedOnWifi(true);
+            Log.i(TAG, "MonitorService: WDTT Plus мог уйти в паузу после Wi-Fi");
+        }
+        prefs.setWdttActiveOnWifi(false);
+        VpnController.disconnectTailscale(this);
+        Log.i(TAG, "MonitorService: уход с Wi-Fi (" + source
+                + "), запрошено досрочное отключение Tailscale");
     }
 
     /**
@@ -345,6 +360,10 @@ public class MonitorService extends Service {
         if (changed) {
             Log.i(TAG, "MonitorService: сеть изменилась без callback: "
                     + previous + " -> " + kind);
+            if (previous == NetKind.WIFI && kind != NetKind.WIFI) {
+                // Callback потерян: повторяем те же побочные эффекты ухода.
+                handleLeftWifi("reconcile");
+            }
             prefs.setLastNetKind(kind);
             if (prefs.isExitManageEnabled()) {
                 ExitNodeController.onNetworkChangedAsync(this);
@@ -362,6 +381,18 @@ public class MonitorService extends Service {
                 ? NetworkUtils.currentWifiAccess(this, kind) : NetworkUtils.WifiAccess.none();
         boolean trusted = access.trust == Logic.Trust.TRUSTED;
         VpnState vpn = NetworkUtils.detectVpn(this);
+        if (kind == NetKind.WIFI) {
+            if (!prefs.isWdttTrusted()) {
+                prefs.setWdttActiveOnWifi(false);
+            } else if (vpn.type == VpnType.WDTT) {
+                // Флаг «липкий»: после авто-паузы WDTT на Wi-Fi он должен
+                // сохраниться до ухода, иначе пауза снова потеряется.
+                prefs.setWdttActiveOnWifi(true);
+            }
+        } else {
+            // Вне Wi-Fi флаг не нужен: он относится только к уходу с Wi-Fi.
+            prefs.setWdttActiveOnWifi(false);
+        }
         boolean satisfied = Logic.ruleSatisfied(kind, vpn.active, vpn.type, trusted,
                 false, false);
         if (changed || !satisfied) {

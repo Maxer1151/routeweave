@@ -72,14 +72,41 @@ public final class VpnController {
     }
 
     /**
-     * Досрочно отключает Tailscale, если он активен. Команда только отправляется,
-     * результат не ожидается и поток не блокируется.
+     * Досрочно отключает Tailscale, если он активен. Выполняется в общей
+     * очереди с apply: если применение уже идёт, не вмешиваемся — следующий
+     * apply сам решит судьбу Tailscale по текущей сети. Иначе broadcast
+     * отключения мог бы отменить параллельное подключение.
      */
     public static void disconnectTailscale(Context context) {
         if (context == null) {
             return;
         }
-        Context app = context.getApplicationContext();
+        final Context app = context.getApplicationContext();
+        if (!APPLYING.compareAndSet(false, true)) {
+            Log.i(TAG, "disconnectTailscale: apply уже выполняется, пропуск");
+            return;
+        }
+        try {
+            EXECUTOR.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        disconnectTailscaleNow(app);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "disconnectTailscale crashed", t);
+                    } finally {
+                        APPLYING.set(false);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            APPLYING.set(false);
+            Log.e(TAG, "disconnectTailscale: не удалось поставить задачу", t);
+        }
+    }
+
+    /** Само отключение: только в фоновом потоке, под флагом APPLYING. */
+    private static void disconnectTailscaleNow(Context app) {
         VpnState state = NetworkUtils.detectVpn(app);
         if (!state.active || state.type != VpnType.TAILSCALE) {
             Log.i(TAG, "disconnectTailscale: Tailscale не активен, команда не отправлена");
@@ -246,6 +273,11 @@ public final class VpnController {
         // WDTT работает, значит он не в паузе на доверенной Wi-Fi.
         if (state.active && state.type == VpnType.WDTT) {
             prefs.setWdttPausedOnWifi(false);
+            if (kind == NetKind.WIFI && prefs.isWdttTrusted()) {
+                // Запоминаем, что WDTT был активен на Wi-Fi: если он уйдёт в
+                // авто-паузу раньше callback'а, уход всё равно будет распознан.
+                prefs.setWdttActiveOnWifi(true);
+            }
         }
 
         if (target != VpnType.NONE) {
@@ -519,8 +551,8 @@ public final class VpnController {
                 Log.i(TAG, "stop WDTT: WDTT не активен, toggle не отправлен");
                 return false;
             }
-            // WDTT остановлен вручную — значит, он не в паузе на доверенной Wi-Fi.
-            new Prefs(context).setWdttPausedOnWifi(false);
+            // Признак паузы здесь не сбрасываем: ручная остановка не доказывает,
+            // что WDTT не был в паузе до неё (см. отслеживание в apply).
             send(context, ACTION_WDTT_TOGGLE, NetworkUtils.PKG_WDTT);
             return true;
         }
@@ -548,6 +580,7 @@ public final class VpnController {
             state = NetworkUtils.detectVpn(context);
             if (state.type != VpnType.WDTT) {
                 prefs.setWdttPausedOnWifi(true);
+                prefs.setWdttActiveOnWifi(true);
                 Log.i(TAG, "stopWdttForSwitch: WDTT ушёл в паузу");
                 return true;
             }
@@ -567,7 +600,9 @@ public final class VpnController {
             Log.i(TAG, "stopWdttForSwitch: WDTT не отключился");
             return false;
         }
-        prefs.setWdttPausedOnWifi(false);
+        // Паузу не сбрасываем: подтверждённого активного WDTT не было, а
+        // остановка вручную не доказывает, что паузы не было до неё.
+        prefs.setWdttActiveOnWifi(false);
         return true;
     }
 
