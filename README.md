@@ -875,7 +875,11 @@ pyyaml`. Привилегированные netns-тесты помечены `p
 
 ## Лицензия
 
-MIT, см. `LICENSE`.
+Код Routeweave распространяется по MIT — полный текст в [`LICENSE`](LICENSE).
+Сгенерированные списки `lists/geo.txt` и `lists/ru-direct.txt` — производные
+сторонних источников и MIT не покрываются; сторонние компоненты, которые
+устанавливаются при развёртывании, остаются под своими лицензиями.
+Подробности — в [`NOTICE`](NOTICE) и [`lists/README.md`](lists/README.md).
 
 ## Credits
 
@@ -886,3 +890,4 @@ MIT, см. `LICENSE`.
 - WDTT-Plus — Ivan4537
 - списки Amnezia — lib4u/amnezia-tunneling-ru
 - geoblock — Internet-Helper/Unblock-for-Russia
+- [`NOTICE`](NOTICE) — лицензии сторонних компонентов и провенанс списков
