@@ -16,6 +16,11 @@ public final class StatusText {
     public static String currentLine(Context context) {
         NetKind kind = NetworkUtils.currentKind(context);
         VpnState vpn = NetworkUtils.detectVpn(context);
+        return currentLine(kind, vpn);
+    }
+
+    /** Та же строка по уже посчитанным kind и состоянию VPN. */
+    public static String currentLine(NetKind kind, VpnState vpn) {
         String network = NetworkUtils.kindLabel(kind);
         if (vpn.active && (vpn.type == VpnType.TAILSCALE || vpn.type == VpnType.WDTT)) {
             return network + " • " + NetworkUtils.vpnLabel(vpn) + " подключён";
@@ -29,8 +34,17 @@ public final class StatusText {
     /** Текущее правило по типу сети. */
     public static String desiredRule(Context context) {
         NetKind kind = NetworkUtils.currentKind(context);
+        NetworkUtils.WifiAccess access = kind == NetKind.WIFI
+                ? NetworkUtils.currentWifiAccess(context, kind) : NetworkUtils.WifiAccess.none();
+        return desiredRule(context, kind, access);
+    }
+
+    /** Текущее правило по готовому снимку сети и Wi-Fi. */
+    public static String desiredRule(Context context, NetKind kind,
+                                     NetworkUtils.WifiAccess access) {
         if (kind == NetKind.WIFI) {
-            return context.getString(NetworkUtils.isTrustedWifi(context)
+            boolean trusted = access != null && access.trust == Logic.Trust.TRUSTED;
+            return context.getString(trusted
                     ? R.string.rule_wifi_trusted
                     : R.string.rule_wifi_untrusted);
         }
@@ -38,6 +52,85 @@ public final class StatusText {
             return context.getString(R.string.rule_mobile_wdtt);
         }
         return context.getString(R.string.rule_wait_network);
+    }
+
+    /**
+     * Строка состояния exit node по готовому снимку. Зеркалит
+     * {@link ExitNodeController#stateLine(Context)}, но не пересканирует сети:
+     * tsInstalled/tailscaleActive/exitActive уже посчитаны вызывающим.
+     */
+    public static String exitStateLine(Context context, Prefs prefs, boolean tsInstalled,
+                                       boolean tailscaleActive, boolean exitActive,
+                                       boolean manualOff, boolean ruleRequires) {
+        if (!prefs.isExitManageEnabled()) {
+            return context.getString(R.string.exit_state_disabled);
+        }
+        if (!tsInstalled) {
+            return context.getString(R.string.exit_state_no_tailscale);
+        }
+
+        boolean wanted = ruleRequires && !manualOff;
+        boolean ownership = Logic.hasExitOffOwnership(prefs.isExitNodeApplied(),
+                prefs.getExitNodeAppliedName().length() > 0)
+                || prefs.getExitConfirmAt() > 0L;
+        StringBuilder sb = new StringBuilder();
+        if (prefs.isExitPendingOff()) {
+            // Снятие начато, но фактическое состояние ещё не подтверждено:
+            // «снят» показывать нельзя.
+            if (prefs.isExitOffBlocked()) {
+                sb.append(context.getString(R.string.exit_state_off_blocked));
+            } else {
+                sb.append(context.getString(tailscaleActive
+                        ? R.string.exit_state_off_checking
+                        : R.string.exit_state_off_deferred));
+            }
+        } else if (!tailscaleActive && !wanted && ownership) {
+            // Владение сохранено, но попытки приостановлены до подключения
+            // Tailscale: фактическое снятие ещё не подтверждено.
+            sb.append(context.getString(R.string.exit_state_off_deferred));
+        } else if (manualOff && !exitActive) {
+            sb.append(context.getString(R.string.exit_state_manual_off));
+        } else if (exitActive) {
+            // Имя, для которого отправляли команду: текущее могло быть изменено
+            // и ещё не применено.
+            String appliedName = prefs.getExitNodeAppliedName();
+            sb.append(context.getString(R.string.exit_state_on,
+                    appliedName.length() > 0 ? appliedName : prefs.getExitNodeName()));
+        } else if (tailscaleActive) {
+            sb.append(context.getString(R.string.exit_state_off));
+        } else {
+            sb.append(context.getString(R.string.exit_state_no_vpn));
+        }
+
+        if (prefs.isExitPendingOff()
+                || (!tailscaleActive && !wanted && ownership)
+                || manualOff) {
+            // Пока идёт снятие или действует ручной запрет, подтверждение
+            // включения и retry не показываем: они относятся к другому режиму.
+            return sb.toString();
+        }
+
+        long retryAt = prefs.getExitRetryAt();
+        if (retryAt > 0L) {
+            long left = retryAt - System.currentTimeMillis();
+            if (left > 0L) {
+                long minutes = (left + 59999L) / 60000L;
+                sb.append(" • ");
+                sb.append(context.getString(R.string.exit_state_retry, minutes));
+            }
+        }
+
+        if (!exitActive && prefs.getExitConfirmAt() > 0L) {
+            sb.append(" • ");
+            sb.append(context.getString(R.string.exit_state_confirm));
+        } else if (!exitActive && !tailscaleActive && prefs.getExitNodePendingOn()) {
+            sb.append(" • ");
+            sb.append(context.getString(R.string.exit_state_pending));
+        } else if (!exitActive && tailscaleActive && prefs.isExitNodeApplied()) {
+            sb.append(" • ");
+            sb.append(context.getString(R.string.exit_state_unconfirmed));
+        }
+        return sb.toString();
     }
 
     /** Последнее действие и время или «—». */

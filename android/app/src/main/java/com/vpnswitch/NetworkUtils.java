@@ -11,17 +11,21 @@ import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.RouteInfo;
+import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.app.NotificationManager;
 import android.util.Log;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Определение типа сети и активного VPN исключительно средствами framework API.
@@ -194,41 +198,172 @@ public final class NetworkUtils {
             Log.d(TAG, "currentSsid: геолокация выключена");
             return null;
         }
+        WifiInfo info = wifiInfo(context);
+        if (info == null) {
+            return null;
+        }
+        String ssid = visibleSsid(info.getSSID());
+        if (ssid == null) {
+            Log.d(TAG, "currentSsid: SSID недоступен — " + ssidUnavailableReason(context));
+        }
+        return ssid;
+    }
+
+    /**
+     * Текущий BSSID в нижнем регистре. Те же ограничения, что у SSID: нужно
+     * разрешение на местоположение и включённая геолокация. null — сеть не
+     * Wi-Fi, BSSID недоступен или пришло служебное значение.
+     */
+    public static String currentBssid(Context context) {
+        if (context == null || !hasSsidPermission(context) || !isLocationEnabled(context)) {
+            return null;
+        }
+        if (currentKind(context) != NetKind.WIFI) {
+            return null;
+        }
+        WifiInfo info = wifiInfo(context);
+        return info == null ? null : Logic.normalizeBssid(info.getBSSID());
+    }
+
+    /**
+     * Тип защиты текущей Wi-Fi. На API 30+ используется
+     * {@link WifiInfo#getCurrentSecurityType()}, на API 29 — сохранённая
+     * конфигурация по networkId. Любая неопределённость даёт UNKNOWN:
+     * неизвестную сеть нельзя считать ни открытой, ни защищённой, поэтому
+     * доверие по ней не подтверждается (fail-closed).
+     */
+    @SuppressWarnings("deprecation")
+    public static Logic.WifiSecurity currentWifiSecurity(Context context) {
+        if (context == null || currentKind(context) != NetKind.WIFI) {
+            return Logic.WifiSecurity.UNKNOWN;
+        }
+        return wifiSecurity(context, wifiInfo(context));
+    }
+
+    /**
+     * Один снимок Wi-Fi для решения о доверии: SSID, BSSID, открытость и уровень
+     * доверия. Позволяет не сканировать сеть несколько раз в одном решении.
+     */
+    public static final class WifiAccess {
+        public final String ssid;
+        public final String bssid;
+        public final Logic.WifiSecurity security;
+        public final Logic.Trust trust;
+
+        public WifiAccess(String ssid, String bssid, Logic.WifiSecurity security,
+                          Logic.Trust trust) {
+            this.ssid = ssid;
+            this.bssid = bssid;
+            this.security = security == null ? Logic.WifiSecurity.UNKNOWN : security;
+            this.trust = trust == null ? Logic.Trust.NONE : trust;
+        }
+
+        public boolean isOpen() {
+            return security == Logic.WifiSecurity.OPEN;
+        }
+
+        public static WifiAccess none() {
+            return new WifiAccess(null, null, Logic.WifiSecurity.UNKNOWN, Logic.Trust.NONE);
+        }
+    }
+
+    /** Компактный снимок текущей Wi-Fi; вне Wi-Fi — пустой снимок. */
+    public static WifiAccess currentWifiAccess(Context context) {
+        return currentWifiAccess(context, currentKind(context));
+    }
+
+    /**
+     * Снимок текущей Wi-Fi с уже известным типом сети: избавляет от повторного
+     * getAllNetworks, когда kind посчитан вызывающим.
+     */
+    public static WifiAccess currentWifiAccess(Context context, NetKind knownKind) {
+        if (context == null || knownKind != NetKind.WIFI) {
+            return WifiAccess.none();
+        }
+        WifiInfo info = wifiInfo(context);
+        String ssid = null;
+        String bssid = null;
+        if (info != null && hasSsidPermission(context) && isLocationEnabled(context)) {
+            ssid = visibleSsid(info.getSSID());
+            bssid = Logic.normalizeBssid(info.getBSSID());
+        }
+        Logic.WifiSecurity security = wifiSecurity(context, info);
+        Logic.Trust trust = new Prefs(context).trustLevel(ssid, bssid, security);
+        Log.d(TAG, "currentWifiAccess: ssid=" + (ssid == null ? "нет" : "есть")
+                + ", bssid=" + (bssid == null ? "нет" : "есть")
+                + ", security=" + security + ", trust=" + trust);
+        return new WifiAccess(ssid, bssid, security, trust);
+    }
+
+    /** true, если сейчас Wi-Fi и её пара SSID+BSSID доверенная. */
+    public static boolean isTrustedWifi(Context context) {
+        return currentWifiAccess(context).trust == Logic.Trust.TRUSTED;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static WifiInfo wifiInfo(Context context) {
         try {
             WifiManager wm = (WifiManager) context.getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
-            if (wm == null) {
-                return null;
-            }
-            WifiInfo info = wm.getConnectionInfo();
-            if (info == null) {
-                return null;
-            }
-            String ssid = Prefs.normalizeSsid(info.getSSID());
-            if (ssid.length() == 0
-                    || "<unknown ssid>".equalsIgnoreCase(ssid)
-                    || ssid.startsWith("0x")
-                    || ssid.startsWith("0X")) {
-                Log.d(TAG, "currentSsid: SSID недоступен — " + ssidUnavailableReason(context));
-                return null;
-            }
-            return ssid;
+            return wm == null ? null : wm.getConnectionInfo();
         } catch (Throwable t) {
-            Log.d(TAG, "currentSsid: " + t);
+            Log.d(TAG, "wifiInfo: " + t);
             return null;
         }
     }
 
-    /** true, если сейчас Wi-Fi и его SSID есть в списке доверенных приложения. */
-    public static boolean isTrustedWifi(Context context) {
-        if (context == null || currentKind(context) != NetKind.WIFI) {
-            return false;
+    /** SSID без кавычек или null для скрытого/служебного значения. */
+    private static String visibleSsid(String raw) {
+        String ssid = Prefs.normalizeSsid(raw);
+        if (ssid.length() == 0
+                || "<unknown ssid>".equalsIgnoreCase(ssid)
+                || ssid.startsWith("0x")
+                || ssid.startsWith("0X")) {
+            return null;
         }
-        String ssid = currentSsid(context);
-        if (ssid == null) {
-            return false;
+        return ssid;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static Logic.WifiSecurity wifiSecurity(Context context, WifiInfo info) {
+        if (info == null) {
+            return Logic.WifiSecurity.UNKNOWN;
         }
-        return new Prefs(context).isTrustedSsid(ssid);
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                // OWE/OSEN — сети без учётных данных; классификация в Logic
+                // возвращает для них UNKNOWN, а не SECURED.
+                return Logic.wifiSecurityFromType(info.getCurrentSecurityType());
+            } catch (Throwable t) {
+                Log.d(TAG, "wifiSecurity: security type недоступен: " + t);
+                return Logic.WifiSecurity.UNKNOWN;
+            }
+        }
+        // API 29: отдельного security type у WifiInfo нет, смотрим конфигурацию.
+        // Пустой или недоступный список означает «не знаем», а не «закрыта».
+        try {
+            WifiManager wm = (WifiManager) context.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (wm == null) {
+                return Logic.WifiSecurity.UNKNOWN;
+            }
+            List<WifiConfiguration> configured = wm.getConfiguredNetworks();
+            if (configured == null || configured.isEmpty()) {
+                return Logic.WifiSecurity.UNKNOWN;
+            }
+            int networkId = info.getNetworkId();
+            for (WifiConfiguration config : configured) {
+                if (config == null || config.networkId != networkId) {
+                    continue;
+                }
+                // null/пустой набор — «тип не определён», а не открытая сеть.
+                // OWE/OSEN тоже не подтверждают доверие.
+                return Logic.wifiSecurityFromKeyManagement(config.allowedKeyManagement);
+            }
+        } catch (Throwable t) {
+            Log.d(TAG, "wifiSecurity: конфигурация недоступна: " + t);
+        }
+        return Logic.WifiSecurity.UNKNOWN;
     }
 
     /**
@@ -279,12 +414,24 @@ public final class NetworkUtils {
             return VpnState.none();
         }
 
+        return classifyVpn(context, cm, vpnNetwork);
+    }
+
+    /**
+     * Классифицирует конкретную VPN-сеть. Если ownerUid (API 30+) дал известный
+     * пакет, тип определяется только по нему: Tailscale, WDTT или OTHER.
+     * Адресные и маршрутные эвристики применяются лишь при неизвестном owner —
+     * иначе чужой VPN с похожими адресами был бы принят за Tailscale/WDTT.
+     */
+    private static VpnState classifyVpn(Context context, ConnectivityManager cm,
+                                        Network vpnNetwork) {
         String ownerPackage = null;
         VpnType type = VpnType.NONE;
         String method = "none";
 
         // Способ 1: UID владельца VPN-сети (API 30+). Может быть недоступен на части прошивок.
         if (Build.VERSION.SDK_INT >= 30) {
+            boolean ownerKnown = false;
             try {
                 NetworkCapabilities caps = cm.getNetworkCapabilities(vpnNetwork);
                 if (caps != null) {
@@ -292,7 +439,8 @@ public final class NetworkUtils {
                     if (uid >= 0) {
                         PackageManager pm = context.getPackageManager();
                         String[] packages = pm.getPackagesForUid(uid);
-                        if (packages != null) {
+                        if (packages != null && packages.length > 0) {
+                            ownerKnown = true;
                             for (String pkg : packages) {
                                 if (PKG_TAILSCALE.equals(pkg)) {
                                     type = VpnType.TAILSCALE;
@@ -305,21 +453,22 @@ public final class NetworkUtils {
                                     break;
                                 }
                             }
-                            if (ownerPackage == null && packages.length > 0) {
+                            if (type == VpnType.NONE) {
+                                // Известный чужой пакет: сразу OTHER, эвристики ниже
+                                // не должны переопределять тип.
+                                type = VpnType.OTHER;
                                 ownerPackage = packages[0];
                             }
+                            method = "owner";
                         }
-                        Log.d(TAG, "detectVpn: ownerUid=" + uid + ", packages="
-                                + (packages == null ? "null" : join(packages)));
                     }
                 }
             } catch (Throwable t) {
                 // getOwnerUid() на некоторых устройствах кидает UnsupportedOperationException.
                 Log.d(TAG, "detectVpn: getOwnerUid недоступен: " + t);
             }
-            if (type != VpnType.NONE) {
-                method = "owner";
-            }
+            Log.d(TAG, "detectVpn: owner " + (ownerKnown ? "известен" : "неизвестен")
+                    + ", type=" + type);
         } else {
             Log.d(TAG, "detectVpn: ownerUid недоступен (API " + Build.VERSION.SDK_INT
                     + " < 30), используем адреса и маршруты");
@@ -384,10 +533,8 @@ public final class NetworkUtils {
             type = VpnType.OTHER;
         }
 
-        VpnState state = new VpnState(true, type, ownerPackage);
-        Log.d(TAG, "detectVpn: active=true, type=" + type + ", method=" + method
-                + ", owner=" + ownerPackage);
-        return state;
+        Log.d(TAG, "detectVpn: active=true, type=" + type + ", method=" + method);
+        return new VpnState(true, type, ownerPackage);
     }
 
     /** Проверяет, что один из адресов интерфейса попадает в заданный префикс. */
@@ -420,26 +567,7 @@ public final class NetworkUtils {
 
     /** Проверяет, что первые prefix бит адреса совпадают с целевыми. */
     private static boolean prefixMatches(byte[] address, byte[] target, int prefix) {
-        if (address == null || target == null || address.length != target.length) {
-            return false;
-        }
-        if (prefix < 0 || prefix > address.length * 8) {
-            return false;
-        }
-        int fullBytes = prefix / 8;
-        for (int i = 0; i < fullBytes; i++) {
-            if (address[i] != target[i]) {
-                return false;
-            }
-        }
-        int remainder = prefix % 8;
-        if (remainder != 0) {
-            int mask = (0xFF << (8 - remainder)) & 0xFF;
-            if ((address[fullBytes] & mask) != (target[fullBytes] & mask)) {
-                return false;
-            }
-        }
-        return true;
+        return Logic.prefixMatches(target, prefix, address);
     }
 
     /** Проверяет, что маршрут целиком лежит внутри заданного префикса. */
@@ -452,26 +580,65 @@ public final class NetworkUtils {
             if (destination == null) {
                 return false;
             }
-            byte[] address = destination.getAddress().getAddress();
-            int routePrefix = destination.getPrefixLength();
-            if (routePrefix < targetPrefix) {
-                return false;
-            }
-            return prefixMatches(address, target, targetPrefix);
+            return Logic.routeWithin(destination.getAddress().getAddress(),
+                    destination.getPrefixLength(), target, targetPrefix);
         } catch (Throwable t) {
             return false;
         }
     }
 
+    private static final long INSTALLED_CACHE_TTL_MS = 45000L;
+
+    private static final Object INSTALLED_LOCK = new Object();
+    private static final Map<String, InstalledEntry> INSTALLED_CACHE = new HashMap<>();
+
+    private static final class InstalledEntry {
+        final boolean installed;
+        final long at;
+
+        InstalledEntry(boolean installed, long at) {
+            this.installed = installed;
+            this.at = at;
+        }
+    }
+
+    /**
+     * Установлен ли пакет. Результат кэшируется на 45 с: UI и сервис проверяют
+     * Tailscale и WDTT несколько раз за тик, а getPackageInfo дорог. Сброс кэша —
+     * {@link #invalidateInstalledCache()} (вызывается в onResume экрана).
+     */
     public static boolean isInstalled(Context context, String pkg) {
         if (context == null || pkg == null) {
             return false;
         }
+        long now = SystemClock.elapsedRealtime();
+        synchronized (INSTALLED_LOCK) {
+            InstalledEntry cached = INSTALLED_CACHE.get(pkg);
+            if (cached != null && now - cached.at < INSTALLED_CACHE_TTL_MS) {
+                return cached.installed;
+            }
+        }
+        return isInstalled(context, pkg, now);
+    }
+
+    private static boolean isInstalled(Context context, String pkg, long now) {
+        boolean installed;
         try {
             context.getPackageManager().getPackageInfo(pkg, 0);
-            return true;
+            installed = true;
         } catch (Throwable t) {
-            return false;
+            installed = false;
+        }
+        synchronized (INSTALLED_LOCK) {
+            INSTALLED_CACHE.put(pkg, new InstalledEntry(installed, now));
+        }
+        return installed;
+    }
+
+    /** Сбрасывает кэш установки пакетов: после возврата в приложение или установки. */
+    public static void invalidateInstalledCache() {
+        synchronized (INSTALLED_LOCK) {
+            INSTALLED_CACHE.clear();
         }
     }
 
@@ -535,21 +702,25 @@ public final class NetworkUtils {
         }
     }
 
-    /** true, если у VPN-сети есть маршрут по умолчанию (IPv4 или IPv6). */
-    @SuppressWarnings("deprecation")
-    public static boolean hasDefaultRoute(Context context) {
-        if (context == null) {
-            return false;
+    /**
+     * VPN-сеть заданного типа. Классификация — та же, что в {@link #detectVpn}:
+     * ownerUid, адреса интерфейса, известные маршруты. Активная сеть в приоритете.
+     */
+    public static Network findVpnNetwork(Context context, VpnType type) {
+        if (context == null || type == null || type == VpnType.NONE) {
+            return null;
         }
         try {
             ConnectivityManager cm =
                     (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm == null) {
-                return false;
+                return null;
             }
+            Network active = cm.getActiveNetwork();
+            Network first = null;
             Network[] networks = cm.getAllNetworks();
             if (networks == null) {
-                return false;
+                return null;
             }
             for (Network network : networks) {
                 try {
@@ -558,26 +729,66 @@ public final class NetworkUtils {
                             || !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
                         continue;
                     }
-                    LinkProperties lp = cm.getLinkProperties(network);
-                    if (lp == null) {
+                    VpnState state = classifyVpn(context, cm, network);
+                    if (state.type != type) {
                         continue;
                     }
-                    List<RouteInfo> routes = lp.getRoutes();
-                    if (routes == null) {
-                        continue;
+                    if (active != null && active.equals(network)) {
+                        return network;
                     }
-                    for (RouteInfo route : routes) {
-                        if (route != null && route.isDefaultRoute()) {
-                            Log.d(TAG, "hasDefaultRoute: default route в VPN-сети " + network);
-                            return true;
-                        }
+                    if (first == null) {
+                        first = network;
                     }
                 } catch (Throwable t) {
-                    Log.d(TAG, "hasDefaultRoute: " + t);
+                    Log.d(TAG, "findVpnNetwork(type): capabilities: " + t);
+                }
+            }
+            return first;
+        } catch (Throwable t) {
+            Log.d(TAG, "findVpnNetwork(type): " + t);
+            return null;
+        }
+    }
+
+    /**
+     * true, если у VPN-сети есть маршрут по умолчанию (IPv4 или IPv6).
+     * Exit node Tailscale объявляет 0.0.0.0/0 и ::/0; без него — только
+     * служебные маршруты, поэтому проверять нужно именно сеть Tailscale.
+     */
+    @SuppressWarnings("deprecation")
+    public static boolean hasDefaultRoute(Context context) {
+        Network tailscale = findVpnNetwork(context, VpnType.TAILSCALE);
+        return hasDefaultRoute(context, tailscale);
+    }
+
+    /** true, если в указанной сети есть маршрут по умолчанию (IPv4 или IPv6). */
+    @SuppressWarnings("deprecation")
+    public static boolean hasDefaultRoute(Context context, Network network) {
+        if (context == null || network == null) {
+            return false;
+        }
+        try {
+            ConnectivityManager cm =
+                    (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return false;
+            }
+            LinkProperties lp = cm.getLinkProperties(network);
+            if (lp == null) {
+                return false;
+            }
+            List<RouteInfo> routes = lp.getRoutes();
+            if (routes == null) {
+                return false;
+            }
+            for (RouteInfo route : routes) {
+                if (route != null && route.isDefaultRoute()) {
+                    Log.d(TAG, "hasDefaultRoute: default route в сети " + network);
+                    return true;
                 }
             }
         } catch (Throwable t) {
-            Log.d(TAG, "hasDefaultRoute: " + t);
+            Log.d(TAG, "hasDefaultRoute(network): " + t);
         }
         return false;
     }
@@ -597,10 +808,11 @@ public final class NetworkUtils {
                 network.bindSocket(socket);
             }
             socket.connect(new InetSocketAddress(host, port), Math.max(1, timeoutMs));
-            Log.d(TAG, "probeTcp: " + host + ":" + port + " доступен");
+            Log.d(TAG, "probeTcp: " + Logic.maskHost(host) + ":" + port + " доступен");
             return true;
         } catch (Throwable t) {
-            Log.d(TAG, "probeTcp: " + host + ":" + port + " недоступен: " + t);
+            Log.d(TAG, "probeTcp: " + Logic.maskHost(host) + ":" + port
+                    + " недоступен: " + t);
             return false;
         } finally {
             if (socket != null) {
@@ -653,12 +865,74 @@ public final class NetworkUtils {
         }
         for (ProbeTarget target : INTERNET_PROBE_TARGETS) {
             if (probeTcp(network, target.host, target.port, INTERNET_PROBE_TIMEOUT_MS)) {
-                Log.d(TAG, "probeInternet: интернет есть (" + target.host + ":"
-                        + target.port + ")");
+                Log.d(TAG, "probeInternet: интернет есть (" + Logic.maskHost(target.host)
+                        + ":" + target.port + ")");
                 return true;
             }
         }
         Log.d(TAG, "probeInternet: интернета нет");
+        return false;
+    }
+
+    /**
+     * Можно ли сейчас выполнять сетевые TCP-пробы: экран включён и устройство
+     * не в Doze. В фоне пробы будят радио и легко дают ложные сбои.
+     */
+    public static boolean backgroundProbesAllowed(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            if (pm == null) {
+                return false;
+            }
+            if (!pm.isInteractive()) {
+                return false;
+            }
+            return !pm.isDeviceIdleMode();
+        } catch (Throwable t) {
+            Log.d(TAG, "backgroundProbesAllowed: " + t);
+            return false;
+        }
+    }
+
+    /**
+     * true, если хотя бы одна физическая (не VPN) сеть помечена системой как
+     * NET_CAPABILITY_VALIDATED. Если сведения недоступны — false: лучше не
+     * засчитывать неудачу watchdog, чем снять exit node из-за сломанной сети.
+     */
+    public static boolean hasValidatedUnderlyingNetwork(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            ConnectivityManager cm =
+                    (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return false;
+            }
+            Network[] networks = cm.getAllNetworks();
+            if (networks == null) {
+                return false;
+            }
+            for (Network network : networks) {
+                try {
+                    NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+                    if (caps == null
+                            || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                        continue;
+                    }
+                    if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                        return true;
+                    }
+                } catch (Throwable t) {
+                    Log.d(TAG, "hasValidatedUnderlyingNetwork: capabilities: " + t);
+                }
+            }
+        } catch (Throwable t) {
+            Log.d(TAG, "hasValidatedUnderlyingNetwork: " + t);
+        }
         return false;
     }
 
@@ -735,16 +1009,5 @@ public final class NetworkUtils {
             return "Другой VPN (" + state.ownerPackage + ")";
         }
         return vpnLabel(state.type);
-    }
-
-    private static String join(String[] values) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < values.length; i++) {
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append(values[i]);
-        }
-        return sb.toString();
     }
 }

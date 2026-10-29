@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/colorBackground"
     android:fillViewport="true"
-    android:scrollbars="none">
+    android:scrollbars="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -33,7 +34,6 @@
                 style="@style/Pill"
                 android:layout_marginStart="10dp"
                 android:background="@drawable/bg_pill_blue"
-                android:text="@string/app_version"
                 android:textColor="@color/colorAccent" />
         </LinearLayout>
 
@@ -46,6 +46,28 @@
             android:text="@string/subtitle"
             android:textColor="@color/colorTextSecondary"
             android:textSize="13sp" />
+
+        <!-- Уведомления выключены -->
+        <LinearLayout
+            android:id="@+id/banner_notifications"
+            style="@style/CardSoft"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone">
+
+            <TextView
+                style="@style/HintText"
+                android:text="@string/notif_banner_text" />
+
+            <Button
+                android:id="@+id/btn_notif_settings"
+                style="@style/ButtonSmall"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/notif_banner_settings" />
+        </LinearLayout>
 
         <!-- Hero-статус -->
         <LinearLayout
@@ -263,11 +285,13 @@
                 android:layout_marginTop="10dp"
                 android:gravity="top|start"
                 android:hint="@string/trusted_list_hint"
+                android:imeOptions="actionDone"
                 android:importantForAutofill="no"
                 android:inputType="textMultiLine"
+                android:isScrollContainer="false"
                 android:maxLines="8"
                 android:minLines="3"
-                android:scrollbars="vertical" />
+                android:scrollbars="none" />
 
             <TextView
                 android:id="@+id/tv_ssid_count"
@@ -366,6 +390,7 @@
                 android:hint="@string/exit_name_hint"
                 android:imeOptions="actionNext"
                 android:inputType="text"
+                android:nextFocusForward="@+id/et_exit_ip"
                 android:singleLine="true" />
 
             <TextView
@@ -738,10 +763,10 @@
         </LinearLayout>
 
         <TextView
+            android:id="@+id/tv_footer_version"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center"
-            android:text="@string/footer_version"
             android:textColor="@color/colorTextSecondary"
             android:textSize="12sp" />
     </LinearLayout>

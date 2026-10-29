@@ -3,6 +3,7 @@ package com.vpnswitch;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -15,15 +16,18 @@ public final class Prefs {
     private static final String KEY_TRUSTED_SSIDS = "trusted_ssids";
     private static final String KEY_WDTT_TRUSTED = "wdtt_trusted";
     private static final String KEY_WDTT_PAUSED_ON_WIFI = "wdtt_paused_on_wifi";
+    private static final String KEY_WDTT_ACTIVE_ON_WIFI = "wdtt_active_on_wifi";
     private static final String KEY_LAST_STATUS = "last_status";
     private static final String KEY_LAST_OK = "last_ok";
     private static final String KEY_LAST_TIME = "last_time";
     private static final String KEY_LAST_ERROR = "last_error";
+    private static final String KEY_ERROR_SOURCE = "error_source";
     private static final String KEY_LAST_NET_KIND = "last_net_kind";
     private static final String KEY_LEFT_WIFI_AT = "left_wifi_at";
 
     private static final String KEY_EXIT_MANAGE_ENABLED = "exit_manage_enabled";
     private static final String KEY_EXIT_NODE_NAME = "exit_node_name";
+    private static final String KEY_EXIT_NODE_APPLIED_NAME = "exit_node_applied_name";
     private static final String KEY_EXIT_NODE_IP = "exit_node_ip";
     private static final String KEY_EXIT_NODE_ALLOW_LAN = "exit_node_allow_lan";
     private static final String KEY_EXIT_WATCHDOG_ENABLED = "exit_watchdog_enabled";
@@ -31,6 +35,17 @@ public final class Prefs {
     private static final String KEY_EXIT_NODE_PENDING_ON = "exit_node_pending_on";
     private static final String KEY_EXIT_RETRY_AT = "exit_retry_at";
     private static final String KEY_EXIT_FAIL_COUNT = "exit_fail_count";
+    private static final String KEY_EXIT_RETRY_COUNT = "exit_retry_count";
+    private static final String KEY_EXIT_RETRY_BLOCKED = "exit_retry_blocked";
+    private static final String KEY_EXIT_CONFIRM_AT = "exit_confirm_at";
+    private static final String KEY_EXIT_PENDING_OFF = "exit_node_pending_off";
+    private static final String KEY_EXIT_OFF_DEADLINE = "exit_off_deadline";
+    private static final String KEY_EXIT_OFF_SENT = "exit_off_sent";
+    private static final String KEY_EXIT_OFF_BLOCKED = "exit_off_blocked";
+    private static final String KEY_EXIT_OFF_NETWORK_KEY = "exit_off_network_key";
+    private static final String KEY_EXIT_OFF_BSSID = "exit_off_bssid";
+    private static final String KEY_EXIT_OFF_SOURCE = "exit_off_source";
+    private static final String KEY_EXIT_MANUAL_OFF_KEY = "exit_manual_off_key";
 
     public static final String DEFAULT_EXIT_NODE_NAME = "";
     public static final String DEFAULT_EXIT_NODE_IP = "";
@@ -65,21 +80,17 @@ public final class Prefs {
      * двойных кавычек. Пустой или null превращается в "".
      */
     public static String normalizeSsid(String ssid) {
-        if (ssid == null) {
-            return "";
-        }
-        String value = ssid.trim();
-        if (value.length() >= 2
-                && value.charAt(0) == '"'
-                && value.charAt(value.length() - 1) == '"') {
-            value = value.substring(1, value.length() - 1).trim();
-        }
-        return value;
+        return Logic.normalizeSsid(ssid);
     }
 
-    /** Новая копия списка доверенных SSID без кавычек и пустых значений. */
-    public Set<String> getTrustedSsids() {
-        Set<String> result = new LinkedHashSet<>();
+    /**
+     * Доверенные сети как пары SSID+BSSID. Старые записи без BSSID читаются
+     * как {@link Logic.Trust#UNBOUND} и не считаются доверенными (fail-closed).
+     * Несколько точек одного SSID — несколько записей: так поддерживаются mesh
+     * и роуминг между точками.
+     */
+    public Set<Logic.TrustedEntry> getTrustedNetworks() {
+        Set<Logic.TrustedEntry> result = new LinkedHashSet<>();
         Set<String> stored;
         try {
             stored = prefs.getStringSet(KEY_TRUSTED_SSIDS, null);
@@ -90,53 +101,66 @@ public final class Prefs {
             return result;
         }
         for (String raw : stored) {
-            String ssid = normalizeSsid(raw);
-            if (ssid.length() > 0) {
-                result.add(ssid);
+            Logic.TrustedEntry entry = Logic.parseTrustedEntry(raw);
+            if (entry != null) {
+                result.add(entry);
             }
         }
         return result;
     }
 
-    /** Сохраняет нормализованный список; null означает пустой список. */
-    public void setTrustedSsids(Set<String> ssids) {
-        Set<String> normalized = new LinkedHashSet<>();
-        if (ssids != null) {
-            for (String raw : ssids) {
-                String ssid = normalizeSsid(raw);
-                if (ssid.length() > 0) {
-                    normalized.add(ssid);
+    /** Сохраняет записи в формате {@code ssid + "\t" + bssid}; null — пустой список. */
+    public void setTrustedNetworks(Collection<Logic.TrustedEntry> entries) {
+        Set<String> formatted = new LinkedHashSet<>();
+        if (entries != null) {
+            for (Logic.TrustedEntry entry : entries) {
+                if (entry == null) {
+                    continue;
+                }
+                String raw = Logic.formatTrustedEntry(entry.ssid, entry.bssid);
+                if (raw.length() > 0) {
+                    formatted.add(raw);
                 }
             }
         }
-        prefs.edit().putStringSet(KEY_TRUSTED_SSIDS, normalized).apply();
+        prefs.edit().putStringSet(KEY_TRUSTED_SSIDS, formatted).apply();
     }
 
-    /** true, если SSID после нормализации точно совпадает с элементом списка. */
-    public boolean isTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        return normalized.length() > 0 && getTrustedSsids().contains(normalized);
+    /**
+     * Добавляет пару SSID+BSSID. Если для этого SSID была старая запись без
+     * привязки к точке, она заменяется привязанной. true — список изменился.
+     */
+    public boolean addTrustedNetwork(String ssid, String bssid) {
+        String normalizedSsid = Logic.normalizeSsid(ssid);
+        if (normalizedSsid.length() == 0) {
+            return false;
+        }
+        String normalizedBssid = Logic.normalizeBssid(bssid);
+        Set<Logic.TrustedEntry> entries = getTrustedNetworks();
+        if (normalizedBssid != null) {
+            entries.remove(new Logic.TrustedEntry(normalizedSsid, ""));
+        }
+        boolean changed = entries.add(new Logic.TrustedEntry(normalizedSsid, normalizedBssid));
+        if (changed) {
+            setTrustedNetworks(entries);
+        }
+        return changed;
     }
 
-    public void addTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        if (normalized.length() == 0) {
-            return;
-        }
-        Set<String> ssids = getTrustedSsids();
-        ssids.add(normalized);
-        setTrustedSsids(ssids);
+    /** Уровень доверия по паре SSID+BSSID текущей сети. */
+    public Logic.Trust trustLevel(String ssid, String bssid, Logic.WifiSecurity security) {
+        return Logic.trustLevel(getTrustedNetworks(), ssid, bssid, security);
     }
 
-    public void removeTrustedSsid(String ssid) {
-        String normalized = normalizeSsid(ssid);
-        if (normalized.length() == 0) {
-            return;
+    /** Уникальные SSID из списка доверенных сетей. Для счётчика записей есть getTrustedNetworks(). */
+    public Set<String> getTrustedSsids() {
+        Set<String> result = new LinkedHashSet<>();
+        for (Logic.TrustedEntry entry : getTrustedNetworks()) {
+            if (entry.ssid.length() > 0) {
+                result.add(entry.ssid);
+            }
         }
-        Set<String> ssids = getTrustedSsids();
-        if (ssids.remove(normalized)) {
-            setTrustedSsids(ssids);
-        }
+        return result;
     }
 
     /**
@@ -149,6 +173,19 @@ public final class Prefs {
 
     public void setWdttPausedOnWifi(boolean paused) {
         prefs.edit().putBoolean(KEY_WDTT_PAUSED_ON_WIFI, paused).apply();
+    }
+
+    /**
+     * true, если WDTT был активен, пока приложение находилось на Wi-Fi. Флаг
+     * ставится при наблюдении активного WDTT и переживает его авто-паузу: по
+     * нему уход с Wi-Fi помечает паузу, не полагаясь на момент callback'а.
+     */
+    public boolean isWdttActiveOnWifi() {
+        return prefs.getBoolean(KEY_WDTT_ACTIVE_ON_WIFI, false);
+    }
+
+    public void setWdttActiveOnWifi(boolean active) {
+        prefs.edit().putBoolean(KEY_WDTT_ACTIVE_ON_WIFI, active).apply();
     }
 
     public String getLastStatus() {
@@ -165,6 +202,15 @@ public final class Prefs {
 
     public String getLastError() {
         return prefs.getString(KEY_LAST_ERROR, "");
+    }
+
+    /** Источник показанной ошибки: по нему уведомление очищается адресно. */
+    public String getErrorSource() {
+        return prefs.getString(KEY_ERROR_SOURCE, "");
+    }
+
+    public void setErrorSource(String source) {
+        prefs.edit().putString(KEY_ERROR_SOURCE, source == null ? "" : source.trim()).apply();
     }
 
     /** Последний известный тип сети; при отсутствии или ошибке разбора — NONE. */
@@ -195,12 +241,7 @@ public final class Prefs {
     }
 
     public boolean hasLeftWifiRecently(long windowMs) {
-        long at = getLeftWifiAt();
-        if (at <= 0L) {
-            return false;
-        }
-        long diff = System.currentTimeMillis() - at;
-        return diff >= 0L && diff <= windowMs;
+        return Logic.withinWindow(System.currentTimeMillis(), getLeftWifiAt(), windowMs);
     }
 
     // --- Exit node Tailscale -------------------------------------------------
@@ -221,6 +262,21 @@ public final class Prefs {
 
     public void setExitNodeName(String name) {
         prefs.edit().putString(KEY_EXIT_NODE_NAME, name == null ? "" : name.trim()).apply();
+    }
+
+    /**
+     * Имя ноды, для которой приложение отправило команду включения. Хранится
+     * отдельно от текущего имени: пользователь может переименовать ноду, пока
+     * идёт подтверждение, а снять или заменить нужно именно применённую.
+     */
+    public String getExitNodeAppliedName() {
+        String value = prefs.getString(KEY_EXIT_NODE_APPLIED_NAME, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitNodeAppliedName(String name) {
+        prefs.edit().putString(KEY_EXIT_NODE_APPLIED_NAME,
+                name == null ? "" : name.trim()).apply();
     }
 
     /** Tailnet-IP сервера для TCP-проверки перед возвратом exit node. */
@@ -285,6 +341,152 @@ public final class Prefs {
         prefs.edit().putInt(KEY_EXIT_FAIL_COUNT, Math.max(0, count)).apply();
     }
 
+    /** Номер попытки автовосстановления exit node (для backoff 5/10/20/30 мин). */
+    public int getExitRetryCount() {
+        return Math.max(0, prefs.getInt(KEY_EXIT_RETRY_COUNT, 0));
+    }
+
+    public void setExitRetryCount(int count) {
+        prefs.edit().putInt(KEY_EXIT_RETRY_COUNT, Math.max(0, count)).apply();
+    }
+
+    /**
+     * true, если автовосстановление exit node остановлено: исчерпаны попытки,
+     * нет IP сервера для проверки или Tailscale не принимает команду. Правило
+     * Wi-Fi в этом состоянии не перезапускает команду — нужен ручной запуск.
+     */
+    public boolean isExitRetryBlocked() {
+        return prefs.getBoolean(KEY_EXIT_RETRY_BLOCKED, false);
+    }
+
+    public void setExitRetryBlocked(boolean blocked) {
+        prefs.edit().putBoolean(KEY_EXIT_RETRY_BLOCKED, blocked).apply();
+    }
+
+    /** Время (System.currentTimeMillis) подтверждения включения exit node; 0 — не ждём. */
+    public long getExitConfirmAt() {
+        return prefs.getLong(KEY_EXIT_CONFIRM_AT, 0L);
+    }
+
+    public void setExitConfirmAt(long timeMs) {
+        prefs.edit().putLong(KEY_EXIT_CONFIRM_AT, Math.max(0L, timeMs)).apply();
+    }
+
+    /**
+     * true, если приложение отправило (или должно отправить) снятие exit node,
+     * но фактическое снятие ещё не подтверждено. Владение (applied/applied_name)
+     * в это время сохраняется: Tailscale мог восстановить ноду после
+     * переподключения.
+     */
+    public boolean isExitPendingOff() {
+        return prefs.getBoolean(KEY_EXIT_PENDING_OFF, false);
+    }
+
+    public void setExitPendingOff(boolean pending) {
+        prefs.edit().putBoolean(KEY_EXIT_PENDING_OFF, pending).apply();
+    }
+
+    /** Дедлайн окна проверки снятия; 0 — окно ещё не начато. */
+    public long getExitOffDeadline() {
+        return prefs.getLong(KEY_EXIT_OFF_DEADLINE, 0L);
+    }
+
+    public void setExitOffDeadline(long timeMs) {
+        prefs.edit().putLong(KEY_EXIT_OFF_DEADLINE, Math.max(0L, timeMs)).apply();
+    }
+
+    /** true, если команда снятия уже отправлена в текущем окне. */
+    public boolean isExitOffSent() {
+        return prefs.getBoolean(KEY_EXIT_OFF_SENT, false);
+    }
+
+    public void setExitOffSent(boolean sent) {
+        prefs.edit().putBoolean(KEY_EXIT_OFF_SENT, sent).apply();
+    }
+
+    /**
+     * true, если автоматические попытки снятия исчерпаны. Долг снятия при этом
+     * сохраняется, но tick больше не отправляет команды до смены сети, ручного
+     * повтора или выключения управления.
+     */
+    public boolean isExitOffBlocked() {
+        return prefs.getBoolean(KEY_EXIT_OFF_BLOCKED, false);
+    }
+
+    public void setExitOffBlocked(boolean blocked) {
+        prefs.edit().putBoolean(KEY_EXIT_OFF_BLOCKED, blocked).apply();
+    }
+
+    /** Сеть, на которой взведён долг снятия: смена сети перезапускает попытки. */
+    public String getExitOffNetworkKey() {
+        String value = prefs.getString(KEY_EXIT_OFF_NETWORK_KEY, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffNetworkKey(String key) {
+        String value = key == null ? "" : key.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_NETWORK_KEY).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_NETWORK_KEY, value).apply();
+        }
+    }
+
+    /**
+     * BSSID точки, на которой взведён долг снятия. SSID-ключ намеренно не
+     * включает BSSID: роуминг не должен его сбрасывать, но смена точки с тем
+     * же SSID — уже другая сеть для долга снятия.
+     */
+    public String getExitOffBssid() {
+        String value = prefs.getString(KEY_EXIT_OFF_BSSID, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffBssid(String bssid) {
+        String value = bssid == null ? "" : bssid.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_BSSID).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_BSSID, value).apply();
+        }
+    }
+
+    /**
+     * Источник активного долга снятия (WATCHDOG/RULE/MANUAL/NAME/DISABLE).
+     * Пустое значение — долг старой версии, трактуется как UNKNOWN.
+     */
+    public String getExitOffSource() {
+        String value = prefs.getString(KEY_EXIT_OFF_SOURCE, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitOffSource(String source) {
+        String value = source == null ? "" : source.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_OFF_SOURCE).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_OFF_SOURCE, value).apply();
+        }
+    }
+
+    /**
+     * Ключ сети, на которой пользователь вручную снял exit node. Пока сеть не
+     * сменилась, правило не включает ноду обратно.
+     */
+    public String getExitManualOffKey() {
+        String value = prefs.getString(KEY_EXIT_MANUAL_OFF_KEY, null);
+        return value == null ? "" : value;
+    }
+
+    public void setExitManualOffKey(String key) {
+        String value = key == null ? "" : key.trim();
+        if (value.length() == 0) {
+            prefs.edit().remove(KEY_EXIT_MANUAL_OFF_KEY).apply();
+        } else {
+            prefs.edit().putString(KEY_EXIT_MANUAL_OFF_KEY, value).apply();
+        }
+    }
+
     /** Сохраняет последний статус, результат и время. error == null очищает прошлую ошибку. */
     public void record(String status, boolean ok, String error) {
         SharedPreferences.Editor editor = prefs.edit()
@@ -297,5 +499,16 @@ public final class Prefs {
             editor.putString(KEY_LAST_ERROR, error);
         }
         editor.apply();
+    }
+
+    /**
+     * Нейтральный статус: меняет только текст и время, не трогая прошлый
+     * результат (last_ok) и прошлую ошибку (last_error).
+     */
+    public void recordNeutral(String status) {
+        prefs.edit()
+                .putString(KEY_LAST_STATUS, status == null ? "" : status)
+                .putLong(KEY_LAST_TIME, System.currentTimeMillis())
+                .apply();
     }
 }
