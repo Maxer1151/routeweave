@@ -611,6 +611,9 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-guard.sh
     templates/routeweave-guard.service
     templates/routeweave-guard.timer
+    templates/routeweave-wdtt-health.sh
+    templates/routeweave-wdtt-health.service
+    templates/routeweave-wdtt-health.timer
     templates/routeweave-diag-dump.sh
     panel/app.py
     panel/requirements.txt
@@ -728,6 +731,10 @@ ask_valid() { # ask_valid <переменная> <вопрос> <дефолт> <
 # ---------- WDTT-Plus (сервер для Android) ----------
 WDTT_REPO="Ivan4537/WDTT-Plus"
 WDTT_DIR=/opt/wdtt-installer
+# Интерфейс WDTT-туннеля: имя фиксирует сам WDTT-Plus, переменная нужна для
+# тестов и нестандартных сборок. По адресу этого интерфейса публикуется 1443
+# (override compose) и по нему же ходит лёгкий монитор.
+WDTT_IFACE="${WDTT_IFACE:-wdtt0}"
 WDTT_DTLS_PORT="${WDTT_DTLS_PORT:-56000}"
 WDTT_WG_PORT="${WDTT_WG_PORT:-56001}"
 WDTT_CLIENT_PORT="${WDTT_CLIENT_PORT:-9000}"
@@ -737,6 +744,30 @@ WDTT_INITIAL_CONFIG=""
 WDTT_STATUS="не устанавливался"
 
 wdtt_fail() { warn "WDTT-Plus: $*"; WDTT_STATUS="ошибка"; return 1; }
+
+# Лёгкий монитор WDTT пишет одну строку в минуту в /var/log/routeweave.
+# Таймер включаем только там, где WDTT реально есть: без wdtt0 и без
+# wdtt.service мониторить нечего, а жёсткий цикл проверки юнитов в секции 13
+# делал бы установку без WDTT ошибочной.
+wdtt_health_timer_enable() {
+  local st=""
+  if ! ip -4 addr show dev "$WDTT_IFACE" >/dev/null 2>&1 \
+     && [ ! -e /etc/systemd/system/wdtt.service ]; then
+    info "монитор WDTT: пропущен (нет $WDTT_IFACE и wdtt.service)"
+    return 0
+  fi
+  if ! systemctl enable --now routeweave-wdtt-health.timer >/dev/null 2>&1; then
+    warn "не удалось включить routeweave-wdtt-health.timer — проверьте: systemctl status routeweave-wdtt-health.timer"
+    return 0
+  fi
+  st=$(systemctl is-active routeweave-wdtt-health.timer 2>/dev/null || true)
+  if [ "$st" = "active" ]; then
+    ok "routeweave-wdtt-health.timer: active"
+  else
+    warn "routeweave-wdtt-health.timer: ${st:-unknown} — проверьте: systemctl status routeweave-wdtt-health.timer"
+  fi
+  return 0
+}
 
 # mihomo (TUN Meta) держит policy-routing: 9000 -> table 2022 -> TUN Meta.
 # Правило 8990 на подсеть WDTT проверяется раньше и уводит трафик в main (wdtt0).
@@ -1716,14 +1747,17 @@ install -m 0644 "$APP_DIR/templates/routeweave-lists-update.service" /etc/system
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/systemd/system/routeweave-lists-update.timer
 install -m 0644 "$APP_DIR/templates/routeweave-guard.service"        /etc/systemd/system/routeweave-guard.service
 install -m 0644 "$APP_DIR/templates/routeweave-guard.timer"          /etc/systemd/system/routeweave-guard.timer
+install -m 0644 "$APP_DIR/templates/routeweave-wdtt-health.service"  /etc/systemd/system/routeweave-wdtt-health.service
+install -m 0644 "$APP_DIR/templates/routeweave-wdtt-health.timer"    /etc/systemd/system/routeweave-wdtt-health.timer
 
 install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-restart.sh"      "$TGWS_RESTART"
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-state.sh"        "$TGWS_STATE"
 install -m 0755 "$APP_DIR/templates/routeweave-tailscale-state.sh"   "$TAILSCALE_STATE"
 install -m 0755 "$APP_DIR/templates/routeweave-guard.sh"             /usr/local/sbin/routeweave-guard.sh
+install -m 0755 "$APP_DIR/templates/routeweave-wdtt-health.sh"       /usr/local/sbin/routeweave-wdtt-health.sh
 install -m 0755 "$APP_DIR/templates/routeweave-diag-dump.sh"         /usr/local/sbin/routeweave-diag-dump.sh
-ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh, guard.sh, diag-dump.sh"
+ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh, guard.sh, wdtt-health.sh, diag-dump.sh"
 
 # Снимки диагностики: helper пишет их от root через sudo из панели, панель
 # читает как группа routeweave. Каталог создаётся здесь, потому что юнит
@@ -2037,6 +2071,10 @@ systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
 systemctl enable --now routeweave-guard.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-guard.timer — проверьте: systemctl status routeweave-guard.timer"
+# Монитор WDTT — только при реально существующем WDTT (интерфейс или юнит).
+# В жёсткий цикл ниже он не входит: на машинах без WDTT установка не должна
+# становиться ошибочной.
+wdtt_health_timer_enable
 sleep 3
 
 for u in routeweave-firewall mihomo zapret-nfqws routeweave-panel routeweave-lists-update.timer routeweave-guard.timer; do
@@ -2091,6 +2129,12 @@ if [ "$INSTALL_WDTT" = "yes" ]; then
 else
   info "WDTT-Plus: пропущен (INSTALL_WDTT=no)"
   WDTT_STATUS="пропущен"
+fi
+
+# Свежая установка WDTT: в секции 13 интерфейса ещё не было, поэтому таймер
+# включаем повторно — теперь wdtt0 существует (idempotent).
+if ip -4 addr show dev "$WDTT_IFACE" >/dev/null 2>&1; then
+  wdtt_health_timer_enable
 fi
 
 # ---------- Итог ----------

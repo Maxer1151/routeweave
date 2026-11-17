@@ -389,6 +389,22 @@ sudo /usr/local/sbin/routeweave-diag-dump.sh
 systemd. Снимок, наоборот, вызывается панелью через `sudo -n` по allowlist
 без wildcard.
 
+Монитор WDTT — `routeweave-wdtt-health.timer`. Там, где есть `wdtt0` (или
+`wdtt.service`), раз в минуту в `/var/log/routeweave/wdtt-health.log`
+дописывается одна строка:
+
+```text
+2026-01-01T00:00:00Z iface=wdtt0 state=up rx_b=1000 tx_b=2000 rx_p=10 tx_p=20 rx_d=600 tx_d=600 reset=0 wdtt=active tgws=up sess_2m=2 peers_2m=2 err_2m=0
+```
+
+`rx_d`/`tx_d` — дельты счётчиков за минуту (`reset=1` — счётчик сбросился),
+`sess_2m`/`peers_2m`/`err_2m` — события клиентов и ошибки tg-ws-proxy за
+2 минуты. Монитор ничего не чинит: только читает `/proc/net/dev`,
+`/sys/class/net`, `docker logs --since 2m --tail 5000` и `systemctl
+is-active`. Журнал systemd не читается, файл укорачивается по размеру
+(4 MiB, ~8 суток по минуте) — одна строка в минуту, HDD-friendly. Таймер
+включает только установщик и только когда WDTT реально есть.
+
 ## DPI и fwmark
 
 Критично: в `EXTRA` в `/etc/routeweave/zapret.conf` обязателен

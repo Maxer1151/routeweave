@@ -1,0 +1,23 @@
+[Unit]
+Description=Routeweave: монитор WDTT (счётчики wdtt0 и сессии tgws)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/routeweave-wdtt-health.sh
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/log/routeweave
+# docker CLI при ProtectHome=yes пытается прочитать /root/.docker/config.json
+# и пишет WARNING о permission denied. Конфиг для inspect/logs не нужен;
+# PrivateTmp=yes даёт записываемый /tmp, туда и смотрит docker CLI.
+Environment=DOCKER_CONFIG=/tmp
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes

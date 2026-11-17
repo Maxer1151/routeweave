@@ -8,7 +8,7 @@
 |---|---|
 | `install.sh` | Установка и идемпотентный апдейт: пакеты, юниты, `.env`, firewall, опциональные компоненты. Запиненные версии mihomo/zashboard/WDTT и их sha256, коммит zapret. |
 | `uninstall.sh` | Удаление с `--purge`/`--dry-run`; удаляет только свои файлы (маркер владения `owned` и бэкапы). |
-| `templates/` | `mihomo.service`, `routeweave-panel.service`, `routeweave-firewall.service`, `zapret-nfqws.service`, `routeweave-lists-update.{service,timer}`, `routeweave-guard.{sh,service,timer}`, `routeweave-diag-dump.sh`; `fw-base.sh`, `fw-wan.sh`, `fw-nfq.sh`, `fw-tailscale.sh`, `nfqws-launch.sh`, `render_mihomo.py`, `routeweave-update-lists.sh`, `routeweave-tailscale-state.sh`, `routeweave-tgws-state.sh`, `routeweave-tgws-restart.sh`, `zapret.conf.tpl`. |
+| `templates/` | `mihomo.service`, `routeweave-panel.service`, `routeweave-firewall.service`, `zapret-nfqws.service`, `routeweave-lists-update.{service,timer}`, `routeweave-guard.{sh,service,timer}`, `routeweave-wdtt-health.{sh,service,timer}`, `routeweave-diag-dump.sh`; `fw-base.sh`, `fw-wan.sh`, `fw-nfq.sh`, `fw-tailscale.sh`, `nfqws-launch.sh`, `render_mihomo.py`, `routeweave-update-lists.sh`, `routeweave-tailscale-state.sh`, `routeweave-tgws-state.sh`, `routeweave-tgws-restart.sh`, `zapret.conf.tpl`. |
 | `panel/` | FastAPI-панель: `app.py`, `static/` (HTML/CSS/JS без inline), `requirements.txt` с точными пинами. Один воркер, состояние в памяти. |
 | `lists/` | Исходные custom-списки; `geo.txt`/`ru-direct.txt` — генерируемые, руками не правятся. |
 | `tests/` | pytest: статические проверки, юнит-тесты и netns-тесты firewall под root. |
@@ -107,6 +107,16 @@ Policy-routing (`ip rule`, приоритеты по возрастанию):
    Снимок диагностики (`routeweave-diag-dump.sh`, `sudo -n` из панели) пишет
    только в `/var/log/routeweave` и не содержит `.env`/`config.yaml`.
    Проверки: `tests/test_guard.py`, `tests/test_diag_dump.py`.
+10. **Монитор WDTT только наблюдает.** `routeweave-wdtt-health.sh` читает
+   `/proc/net/dev`, `/sys/class/net`, `docker inspect`/`docker logs` и
+   `systemctl is-active`; сервисы не запускает и не перезапускает, ничего не
+   чинит. Пишет одну строку в минуту в `/var/log/routeweave/wdtt-health.log`,
+   не читает journal и укорачивает файл по размеру (4 MiB, ~12000 строк).
+   Юнит работает от root, но с `NoNewPrivileges=yes`, `ProtectSystem=strict`,
+   пустым `CapabilityBoundingSet` и записью только в `/var/log/routeweave`.
+   Таймер включается лишь при наличии `wdtt0` или `wdtt.service`; в жёсткий
+   цикл обязательных юнитов установщика он не входит. Проверка:
+   `tests/test_wdtt_health.py`.
 
 ## Тесты
 

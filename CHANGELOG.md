@@ -23,6 +23,13 @@
   (`GUARD_STUCK_TTL`, маркеры `probe-*.stuck`), чтобы не рвать очередь
   клиентам каждые 10 минут; успешная проба паузу снимает.
   Пробы выключаются через `/etc/routeweave/guard.env` (`GUARD_PROBE=no`).
+- Лёгкий монитор WDTT: `routeweave-wdtt-health.sh` и
+  `routeweave-wdtt-health.timer` — раз в минуту пишут одну строку в
+  `/var/log/routeweave/wdtt-health.log`: счётчики `wdtt0` и дельты за минуту,
+  число сессий/пиров и ошибок tg-ws-proxy за 2 минуты, состояние `wdtt` и
+  контейнера. Журнал systemd не читается, файл укорачивается по размеру
+  (4 MiB, ~8 суток по минуте), сервисы монитор не трогает. Таймер включается
+  установщиком только при наличии `wdtt0` или `wdtt.service`.
 - Панель: снимок состояния — кнопки «Снять дамп состояния» и «Показать
   последний», helper `routeweave-diag-dump.sh` в sudo-allowlist без wildcard,
   файлы в `/var/log/routeweave` (`0640 root:routeweave`); `.env` и

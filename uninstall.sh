@@ -35,6 +35,8 @@ IP_FORWARD_ORIG="$ETC/ip_forward.orig"
 UNITS=(
   routeweave-guard.timer
   routeweave-guard.service
+  routeweave-wdtt-health.timer
+  routeweave-wdtt-health.service
   routeweave-lists-update.timer
   routeweave-lists-update.service
   routeweave-firewall.service
@@ -48,6 +50,7 @@ HELPERS=(
   /usr/local/sbin/routeweave-tailscale-state.sh
   /usr/local/sbin/routeweave-update-lists.sh
   /usr/local/sbin/routeweave-guard.sh
+  /usr/local/sbin/routeweave-wdtt-health.sh
   /usr/local/sbin/routeweave-diag-dump.sh
 )
 
@@ -83,7 +86,8 @@ Routeweave — удаление шлюза.
   ROUTEWEAVE_BACKUP_DIR  каталог бэкапов (по умолчанию $ROUTEWEAVE_ETC/backup).
 
 Что делает:
-  - останавливает и отключает systemd-юниты Routeweave;
+  - останавливает и отключает systemd-юниты Routeweave (включая монитор
+    WDTT routeweave-wdtt-health.timer);
   - снимает правила firewall (fw-nfq.sh stop, fw-wan.sh stop, fw-base.sh stop);
   - возвращает net.ipv4.ip_forward из /etc/routeweave/ip_forward.orig;
   - удаляет юниты, helper-скрипты, sudoers панели, лаунчер nfqws, панель;
@@ -940,12 +944,14 @@ fi
 echo
 echo "Удалено:"
 echo "  - systemd-юниты: routeweave-firewall, routeweave-panel,"
-echo "    routeweave-lists-update.service/.timer, routeweave-guard.service/.timer;"
+echo "    routeweave-lists-update.service/.timer, routeweave-guard.service/.timer,"
+echo "    routeweave-wdtt-health.service/.timer (монитор WDTT);"
 echo "    mihomo/zapret-nfqws — только если не были чужими; scoped-правила"
 echo "    firewall сняты, включая WAN-маркировку и ip rule 8993;"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"
 echo "  - /etc/sudoers.d/routeweave-panel и helper-скрипты в /usr/local/sbin,"
 echo "    включая routeweave-tailscale-state.sh;"
+echo "    монитор WDTT: routeweave-wdtt-health.sh и его таймер;"
 echo "  - /etc/routeweave/nfqws-launch.sh, /etc/routeweave/.env.tgws,"
 echo "    /etc/routeweave/fw-tailscale.sh, .staging, zapret.commit, zashboard;"
 echo "  - /opt/routeweave-panel, /run/routeweave, /var/log/routeweave;"
