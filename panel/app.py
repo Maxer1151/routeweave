@@ -565,10 +565,14 @@ def probe_socks_chatgpt() -> dict:
 
 
 def probe_socks_exit_ip() -> dict:
-    if not env_value("SOCKS_URL"):
+    socks_url = env_value("SOCKS_URL")
+    if not socks_url:
         return {"ok": True, "detail": "нет socks — пропущено", "skipped": True}
     try:
-        with httpx.Client(proxy=f"socks5://127.0.0.1:{MIXED_PORT}", timeout=8) as client:
+        parts = urlsplit(socks_url)
+        scheme = "socks5h" if parts.scheme in ("socks", "socks5", "socks5h") else parts.scheme
+        proxy = parts._replace(scheme=scheme).geturl()
+        with httpx.Client(proxy=proxy, timeout=8) as client:
             response = client.get("https://api.ipify.org")
         return {"ok": response.status_code == 200, "detail": "exit IP: " + response.text[:64]}
     except (httpx.HTTPError, OSError) as exc:
