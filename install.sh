@@ -27,6 +27,12 @@ SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
 TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
 TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
 TAILSCALE_STATE=/usr/local/sbin/routeweave-tailscale-state.sh
+# Drop-in docker: стартовать после wdtt.service, иначе bind порта tgws на
+# адрес wdtt0 падает при загрузке (интерфейса ещё нет).
+DOCKER_DROPIN=/etc/systemd/system/docker.service.d/10-wdtt.conf
+# Override compose с публикацией 1443 на адресе WDTT. Подключается только
+# когда wdtt0 существует: base-файл должен работать и без WDTT.
+COMPOSE_OVERRIDE="$APP_DIR/docker-compose.wdtt.yml"
 # ---------- Закреплённые версии и контрольные суммы (supply-chain) ----------
 # Версии и sha256 зафиксированы в git-истории Routeweave и сверяются с
 # загруженными артефактами. Обновление — осознанная правка этих констант с
@@ -94,6 +100,11 @@ Routeweave — установщик шлюза (mihomo + zapret + веб-пан�
                           порядок апстримов tg-ws-proxy через запятую
                           (ws, cfworker, cfproxy, mtproto, tcp); по умолчанию
                           cfworker,ws,tcp, если задан домен CF Worker
+
+  Ключи tg-ws-proxy живут в /etc/routeweave/.env.tgws (0640 root:root). При
+  повторной установке обновляются только управляемые ключи (TG_SECRET,
+  BASE_DOMAIN, TG_CF_WORKER_DOMAIN, TG_PINNED_UPSTREAM), а ручной тюнинг
+  файла — например, необязательные настройки прокси — сохраняется.
 
 Что делает установщик:
   1. ставит пакеты, создаёт системного пользователя routeweave и минимальный
@@ -256,6 +267,68 @@ env_get() { # env_get <KEY> [default] — значение из .env без ис
     esac
   fi
   printf '%s' "$val"
+}
+
+env_set_line() { # env_set_line <file> <KEY> <value> — заменить/добавить строку
+  # Остальные строки и комментарии сохраняются как есть: файл .env.tgws
+  # может содержать ручной тюнинг прокси, который установщик не понимает.
+  # Дубликаты ключа схлопываются в одну строку. Замена атомарная: mktemp в
+  # каталоге файла + mv; права/владелец — по образцу исходного (fallback 0640).
+  local file=${1-} key=${2-} line tmp dir found=0 l
+  [ -n "$file" ] || { die "env_set_line: не задан файл"; }
+  line=$(env_line "$key" "${3-}")
+  dir=$(dirname -- "$file")
+  tmp=$(mktemp "$dir/.env-set.XXXXXX") \
+    || die "env_set_line: не удалось создать временный файл в $dir"
+  if [ -f "$file" ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      case "$l" in
+        "${key}="*)
+          if [ "$found" = 0 ]; then
+            printf '%s\n' "$line"
+            found=1
+          fi
+          ;;
+        *) printf '%s\n' "$l" ;;
+      esac
+    done < "$file" > "$tmp"
+  fi
+  if [ "$found" = 0 ]; then
+    printf '%s\n' "$line" >> "$tmp"
+  fi
+  if [ -f "$file" ]; then
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
+    chown --reference="$file" "$tmp" 2>/dev/null || true
+  else
+    chmod 0640 "$tmp"
+  fi
+  mv -f -- "$tmp" "$file" \
+    || { rm -f -- "$tmp" 2>/dev/null; die "env_set_line: не удалось заменить $file"; }
+}
+
+env_del_line() { # env_del_line <file> <KEY> — удалить строки ^KEY=, остальное цело
+  local file=${1-} key=${2-} tmp dir found=0 l
+  [ -n "$file" ] || { die "env_del_line: не задан файл"; }
+  [[ $key =~ ^[A-Z_][A-Z0-9_]*$ ]] \
+    || die "env_del_line: недопустимое имя переменной: «$key»"
+  [ -f "$file" ] || return 0
+  dir=$(dirname -- "$file")
+  tmp=$(mktemp "$dir/.env-del.XXXXXX") \
+    || die "env_del_line: не удалось создать временный файл в $dir"
+  while IFS= read -r l || [ -n "$l" ]; do
+    case "$l" in
+      "${key}="*) found=1 ;;
+      *) printf '%s\n' "$l" ;;
+    esac
+  done < "$file" > "$tmp"
+  if [ "$found" = 0 ]; then
+    rm -f -- "$tmp" 2>/dev/null
+    return 0
+  fi
+  chmod --reference="$file" "$tmp" 2>/dev/null || chmod 0640 "$tmp"
+  chown --reference="$file" "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$file" \
+    || { rm -f -- "$tmp" 2>/dev/null; die "env_del_line: не удалось заменить $file"; }
 }
 
 # Валидаторы вызываются по имени из ask_valid ("$__validator"), поэтому для
@@ -614,6 +687,7 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/routeweave-wdtt-health.sh
     templates/routeweave-wdtt-health.service
     templates/routeweave-wdtt-health.timer
+    templates/docker-10-wdtt.conf
     templates/routeweave-diag-dump.sh
     panel/app.py
     panel/requirements.txt
@@ -624,7 +698,7 @@ preflight() { # preflight <каталог репозитория> — всё, ч
   # INSTALL_TGWS разбирается ниже (интерактивно), но значение из окружения
   # уже доступно; без него preflight вызывается на ядре.
   if [ "$(normalize_yn "${INSTALL_TGWS:-no}" 2>/dev/null || printf 'no')" = yes ]; then
-    files+=(docker-compose.yml)
+    files+=(docker-compose.yml docker-compose.wdtt.yml)
   fi
   for f in "${files[@]}"; do
     if [ -L "$root/$f" ]; then
@@ -775,6 +849,39 @@ wdtt_ensure_ip_rule() {
   if ! ip rule show 2>/dev/null | grep -q '8990:.*10\.66\.66\.0/24.*lookup main'; then
     ip rule add to "$WDTT_SUBNET" lookup main priority 8990 2>/dev/null || true
   fi
+}
+
+# Первый IPv4-адрес WDTT-интерфейса; пусто, если интерфейса нет. awk, а не
+# `| head -n1`: head закрывает пайп, и под pipefail это дало бы SIGPIPE.
+wdtt_ipv4() {
+  ip -4 -o addr show dev "$WDTT_IFACE" 2>/dev/null \
+    | awk '$3 == "inet" { sub(/\/.*/, "", $4); print $4; exit }'
+}
+
+# `up -d` tg-ws-proxy. При известном адресе WDTT подключается override с
+# публикацией 1443 на wdtt0; без WDTT — только base-файл.
+tgws_compose_up() { # tgws_compose_up <wdtt_ip>
+  local wdtt_ip=${1-}
+  if [ -n "$wdtt_ip" ]; then
+    ( cd "$APP_DIR" \
+        && SERVER_IP="$SERVER_IP" WDTT_SERVER_IP="$wdtt_ip" \
+           docker compose -f docker-compose.yml -f "$COMPOSE_OVERRIDE" up -d )
+  else
+    ( cd "$APP_DIR" && SERVER_IP="$SERVER_IP" docker compose up -d )
+  fi
+}
+
+# Drop-in docker.service: после wdtt0. Идемпотентно перезаписывается при
+# каждом обновлении, daemon-reload нужен, чтобы порядок применился к
+# следующему старту docker (перезапускать docker сейчас не требуется).
+write_docker_wdtt_dropin() {
+  install -d -m 0755 /etc/systemd/system/docker.service.d \
+    || { warn "не удалось создать /etc/systemd/system/docker.service.d"; return 1; }
+  install -m 0644 "$APP_DIR/templates/docker-10-wdtt.conf" "$DOCKER_DROPIN" \
+    || { warn "не удалось записать $DOCKER_DROPIN"; return 1; }
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  ok "docker: drop-in $DOCKER_DROPIN (docker стартует после wdtt.service)"
+  return 0
 }
 
 install_wdtt() {
@@ -1591,16 +1698,33 @@ find "$ETC/lists" -maxdepth 1 -type f -exec chmod 0644 {} +
 
 # .env.tgws — отдельный файл для docker compose (без секретов панели/mihomo).
 if [ "$INSTALL_TGWS" = "yes" ]; then
-  {
-    env_line TG_SECRET "$TG_SECRET"
-    env_line BASE_DOMAIN "$BASE_DOMAIN"
-    env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+  if [ -f "$ETC/.env.tgws" ]; then
+    # Файл уже есть: обновляем ТОЛЬКО управляемые ключи, остальные строки и
+    # комментарии сохраняем. Так ручной тюнинг прокси (необязательные ключи
+    # upstream) переживает повторный install.sh.
+    env_set_line "$ETC/.env.tgws" TG_SECRET "$TG_SECRET"
+    env_set_line "$ETC/.env.tgws" BASE_DOMAIN "$BASE_DOMAIN"
+    env_set_line "$ETC/.env.tgws" TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
     if [ -n "$TG_PINNED_UPSTREAM" ]; then
-      env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM"
+      env_set_line "$ETC/.env.tgws" TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM"
+    else
+      env_del_line "$ETC/.env.tgws" TG_PINNED_UPSTREAM
     fi
-  } > "$WORK_DIR/env.tgws"
-  install -m 0640 -o root -g root "$WORK_DIR/env.tgws" "$ETC/.env.tgws"
-  ok "$ETC/.env.tgws создан (0640 root:root)"
+    chown root:root "$ETC/.env.tgws"
+    chmod 0640 "$ETC/.env.tgws"
+    ok "$ETC/.env.tgws обновлён (0640 root:root; ручные ключи сохранены)"
+  else
+    {
+      env_line TG_SECRET "$TG_SECRET"
+      env_line BASE_DOMAIN "$BASE_DOMAIN"
+      env_line TG_CF_WORKER_DOMAIN "$TG_CF_WORKER_DOMAIN"
+      if [ -n "$TG_PINNED_UPSTREAM" ]; then
+        env_line TG_PINNED_UPSTREAM "$TG_PINNED_UPSTREAM"
+      fi
+    } > "$WORK_DIR/env.tgws"
+    install -m 0640 -o root -g root "$WORK_DIR/env.tgws" "$ETC/.env.tgws"
+    ok "$ETC/.env.tgws создан (0640 root:root)"
+  fi
 fi
 
 # fw-скрипты и конфиг zapret
@@ -1842,7 +1966,15 @@ if [ "$INSTALL_TGWS" = "yes" ]; then
   # compose нужна одна переменная подстановки, а разбирать файл с секретами и
   # shell-специфичным экранированием '\'' ему незачем. env_file сервиса —
   # отдельный /etc/routeweave/.env.tgws (см. docker-compose.yml).
-  ( cd "$APP_DIR" && SERVER_IP="$SERVER_IP" docker compose up -d ) \
+  # Если wdtt0 уже есть, дополнительно публикуем 1443 на его адресе через
+  # override и просим docker стартовать после wdtt.service. Без WDTT ничего
+  # не добавляется: bind несуществующего адреса уронил бы `up -d`.
+  WDTT_TGWS_IP=$(wdtt_ipv4 || true)
+  if [ -n "$WDTT_TGWS_IP" ]; then
+    write_docker_wdtt_dropin \
+      || warn "drop-in docker для WDTT не записан — bind на $WDTT_TGWS_IP после перезагрузки может не работать"
+  fi
+  tgws_compose_up "$WDTT_TGWS_IP" \
     || die "docker compose не смог поднять tg-ws-proxy"
   # `up -d` возвращает 0 и тогда, когда контейнер сразу упал, а healthcheck в
   # distroless-образе нет (см. комментарий в docker-compose.yml), поэтому до
@@ -1859,7 +1991,22 @@ if [ "$INSTALL_TGWS" = "yes" ]; then
     docker logs --tail=30 routeweave-tgwsproxy >&2 2>&1 || true
     die "контейнер routeweave-tgwsproxy не запустился — см. docker logs выше"
   fi
-  ok "tg-ws-proxy-rs запущен"
+  # Фактические публикации: compose мог молча не применить override (опечатка
+  # в имени файла), и тогда WDTT-клиенты не подключатся. Проверяем оба адреса.
+  bindings=$(docker inspect -f '{{json .HostConfig.PortBindings}}' routeweave-tgwsproxy 2>/dev/null || true)
+  case "$bindings" in
+    *"\"$SERVER_IP\""*) ;;
+    *) die "tg-ws-proxy не опубликован на $SERVER_IP:1443 (PortBindings: ${bindings:-нет данных})" ;;
+  esac
+  if [ -n "$WDTT_TGWS_IP" ]; then
+    case "$bindings" in
+      *"\"$WDTT_TGWS_IP\""*) ;;
+      *) die "tg-ws-proxy не опубликован на $WDTT_TGWS_IP:1443 (PortBindings: ${bindings:-нет данных})" ;;
+    esac
+    ok "tg-ws-proxy-rs запущен (1443: $SERVER_IP, $WDTT_TGWS_IP)"
+  else
+    ok "tg-ws-proxy-rs запущен (1443: $SERVER_IP)"
+  fi
 else
   info "tg-ws-proxy: пропущен (INSTALL_TGWS=no)"
 fi
@@ -2133,8 +2280,33 @@ fi
 
 # Свежая установка WDTT: в секции 13 интерфейса ещё не было, поэтому таймер
 # включаем повторно — теперь wdtt0 существует (idempotent).
-if ip -4 addr show dev "$WDTT_IFACE" >/dev/null 2>&1; then
+# Здесь же применяется override compose: он нужен и при обновлении с
+# INSTALL_WDTT=no, если WDTT уже стоит. Drop-in пишется идемпотентно, а
+# `up -d` вызывается только когда контейнер tgws действительно есть.
+WDTT_TGWS_IP=$(wdtt_ipv4 || true)
+if [ -n "$WDTT_TGWS_IP" ]; then
   wdtt_health_timer_enable
+  tgws_present=0
+  if command -v docker >/dev/null 2>&1 \
+     && [ -n "$(docker ps -aq -f name=^/routeweave-tgwsproxy$ 2>/dev/null || true)" ]; then
+    tgws_present=1
+  fi
+  if [ "$INSTALL_TGWS" = "yes" ] || [ "$tgws_present" = 1 ]; then
+    if ! write_docker_wdtt_dropin; then
+      warn "docker: drop-in для WDTT не записан — bind на $WDTT_TGWS_IP после перезагрузки может не работать"
+      FAIL=1
+    fi
+    if [ "$tgws_present" = 1 ]; then
+      if tgws_compose_up "$WDTT_TGWS_IP"; then
+        ok "tg-ws-proxy: применён override WDTT ($WDTT_TGWS_IP:1443)"
+      else
+        warn "tg-ws-proxy: не удалось применить override WDTT ($WDTT_TGWS_IP:1443) — проверьте docker compose logs"
+        FAIL=1
+      fi
+    fi
+  fi
+else
+  info "WDTT: wdtt0 не найден — override compose и монитор не применяются"
 fi
 
 # ---------- Итог ----------

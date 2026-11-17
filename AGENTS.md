@@ -14,7 +14,8 @@
 | `tests/` | pytest: статические проверки, юнит-тесты и netns-тесты firewall под root. |
 | `tools/check_no_skips.py` | Превращает любой `SKIPPED` в отчёте pytest в падение job'а. |
 | `docs/` | `tailscale-exit-node.md`, `cf-worker-tg.md` — подробные пользовательские руководства. |
-| `docker-compose.yml` | tg-ws-proxy: образ по digest, `read_only`, `cap_drop: ALL`, лимиты. |
+| `docker-compose.yml` | tg-ws-proxy: образ по digest, `read_only`, `cap_drop: ALL`, лимиты; порт только на `SERVER_IP`. |
+| `docker-compose.wdtt.yml` | override для хостов с `wdtt0`: второй bind `1443` на адрес WDTT; `install.sh` подключает его только при существующем интерфейсе и пишет drop-in `docker.service.d/10-wdtt.conf` (`After=wdtt.service`). |
 | `Makefile`, `pytest.ini` | Цели `lint`/`test`/`all`; объявление маркера `privileged`. |
 | `.github/workflows/ci.yml` | Job'ы `lint`, `test`, `netns`, `compose`. |
 
@@ -58,6 +59,10 @@ Policy-routing (`ip rule`, приоритеты по возрастанию):
    `source`/`eval` в `install.sh`, апдейтере и панели. Права
    `0640 root:routeweave`, бэкап `.env.bak.*` — `0600 root:root`. Проверки:
    `tests/test_env_safety.py`, `tests/test_install_*.py`.
+   Отдельный `.env.tgws` обновляется построчно только по управляемым ключам
+   (`TG_SECRET`, `BASE_DOMAIN`, `TG_CF_WORKER_DOMAIN`, `TG_PINNED_UPSTREAM`);
+   ручной тюнинг прокси и комментарии сохраняются (`env_set_line`/
+   `env_del_line`). Проверка: `tests/test_install_wdtt.py`.
 3. **CSRF fail-closed.** Нужен совпадающий `Origin`/`Referer` либо
    `Sec-Fetch-Site: same-origin|none`; без браузерных заголовков —
    `X-Requested-With: Routeweave`. Неизвестный `Host` → `421`, превышение

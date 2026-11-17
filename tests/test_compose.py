@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 COMPOSE_PATH = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+WDTT_COMPOSE_PATH = Path(__file__).resolve().parents[1] / "docker-compose.wdtt.yml"
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
 
@@ -62,6 +63,23 @@ def test_port_published_on_server_ip_only(service):
     assert "${SERVER_IP" in mapping, mapping
     assert not mapping.startswith(("1443:", "0.0.0.0", ":")), mapping
     assert mapping.endswith(":1443:1443"), mapping
+
+
+def test_wdtt_override_publishes_single_port_on_wdtt_ip():
+    """Override WDTT: ровно один порт на ${WDTT_SERVER_IP}, не 0.0.0.0."""
+    data = yaml.safe_load(WDTT_COMPOSE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(data, dict), "docker-compose.wdtt.yml: ожидался YAML-объект"
+    ports = data["services"]["tg-ws-proxy"]["ports"]
+    assert isinstance(ports, list) and len(ports) == 1, ports
+    mapping = str(ports[0])
+    assert "${WDTT_SERVER_IP" in mapping, mapping
+    assert not mapping.startswith(("1443:", "0.0.0.0", ":")), mapping
+    assert mapping.endswith(":1443:1443"), mapping
+
+
+def test_base_compose_has_no_wdtt_bind(compose_text):
+    """Base-файл обязан работать без WDTT: никакого второго bind и ключа override."""
+    assert "WDTT_SERVER_IP" not in compose_text
 
 
 def test_read_only_and_no_capabilities(service):

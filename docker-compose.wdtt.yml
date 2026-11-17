@@ -1,0 +1,8 @@
+# Override для хостов с WDTT: публикует tg-ws-proxy на адресе wdtt0.
+# Подключается install.sh только при существующем wdtt0:
+#   docker compose -f docker-compose.yml -f docker-compose.wdtt.yml up -d
+# Адрес можно переопределить WDTT_SERVER_IP (по умолчанию 10.66.66.1).
+services:
+  tg-ws-proxy:
+    ports:
+      - "${WDTT_SERVER_IP:-10.66.66.1}:1443:1443"

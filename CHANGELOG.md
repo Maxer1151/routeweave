@@ -102,6 +102,13 @@
 
 ### Изменено
 
+- tg-ws-proxy: `.env.tgws` при повторной установке обновляется построчно
+  только по управляемым ключам (`TG_SECRET`, `BASE_DOMAIN`,
+  `TG_CF_WORKER_DOMAIN`, `TG_PINNED_UPSTREAM`), ручной тюнинг (например,
+  `TG_CF_IP`, таймауты, `TG_LINK_IP`) и комментарии сохраняются. На хостах с
+  WDTT установщик пишет drop-in
+  `/etc/systemd/system/docker.service.d/10-wdtt.conf` с `After=wdtt.service`,
+  чтобы docker стартовал после появления `wdtt0`.
 - Лицензирование: добавлены `NOTICE` и `lists/README.md`; область действия MIT
   ограничена кодом и документацией Routeweave, зафиксированы лицензии
   сторонних компонентов и провенанс списков: `lists/geo.txt` и
@@ -143,6 +150,11 @@
 
 ### Исправлено
 
+- Установка без WDTT: `docker-compose.yml` больше не публикует `1443` на
+  `10.66.66.1`. Второй bind вынесен в `docker-compose.wdtt.yml`, который
+  `install.sh` подключает только при существующем `wdtt0`; иначе Docker падал
+  на bind несуществующего адреса и `INSTALL_TGWS=yes` без WDTT не
+  устанавливался.
 - Панель: проба `tg-ws-proxy` проверяет `SERVER_IP:1443`, а не `127.0.0.1`
   (порт публикуется только на LAN-адрес, loopback давал ложный
   `connection refused`).

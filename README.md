@@ -188,6 +188,12 @@ forwarding разрешён для tailnet. Независимо от ufw вхо
 `TS_AUTHKEY`) действует только на время установки и не сохраняется в
 `/etc/routeweave/.env`.
 
+Ключи контейнера tg-ws-proxy (`TG_SECRET`, `BASE_DOMAIN`,
+`TG_CF_WORKER_DOMAIN`, `TG_PINNED_UPSTREAM`) лежат не в общем `.env`, а в
+`/etc/routeweave/.env.tgws` (`0640 root:root`). При повторной установке
+обновляются только эти управляемые ключи; остальные строки файла — например,
+ручной сетевой тюнинг прокси вроде `TG_CF_IP` — сохраняются.
+
 Скачанные mihomo, zashboard и WDTT сверяются с sha256, зашитыми в `install.sh`;
 без совпадения установка останавливается. Архивы zashboard и WDTT
 распаковываются в `mktemp`, симлинки, setuid и абсолютные пути/`..`
@@ -453,6 +459,16 @@ WDTT-Plus включается `INSTALL_WDTT=yes`, только amd64. DTLS `560
 умолчанию DNS слушает `0.0.0.0:53` и покрывает `wdtt0`. `10.66.66.1` (адрес
 шлюза в `WG_SUBNET`) задавайте, только если хотите ограничить листенер
 этим адресом.
+
+Для WDTT-клиентов tg-ws-proxy публикуется ещё и на адресе `wdtt0`
+(`10.66.66.1:1443`): base `docker-compose.yml` содержит только bind на
+`SERVER_IP`, а второй — в `docker-compose.wdtt.yml`. `install.sh` подключает
+override только когда интерфейс `wdtt0` реально существует (иначе Docker не
+смог бы забиндить несуществующий адрес и установка без WDTT падала), и
+идемпотентно пишет drop-in
+`/etc/systemd/system/docker.service.d/10-wdtt.conf` с `After=wdtt.service`,
+чтобы после перезагрузки интерфейс успевал появиться раньше контейнера.
+Адрес можно переопределить `WDTT_SERVER_IP`.
 
 ## Опционально: Tailscale (exit node)
 
