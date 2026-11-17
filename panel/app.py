@@ -595,14 +595,17 @@ def probe_youtube_direct() -> dict:
 def probe_tg_local() -> dict:
     if not tgws_enabled():
         return {"ok": True, "detail": "tg-ws-proxy не установлен (опциональный компонент)", "skipped": True}
+    # docker-compose публикует порт на SERVER_IP, а не на loopback:
+    # проверка 127.0.0.1:1443 даёт ложный отказ (connection refused).
+    host = env_value("SERVER_IP") or "127.0.0.1"
     try:
         started = time.monotonic()
-        with socket.create_connection(("127.0.0.1", TGWS_PORT), timeout=4):
+        with socket.create_connection((host, TGWS_PORT), timeout=4):
             pass
         elapsed = int((time.monotonic() - started) * 1000)
-        return {"ok": True, "detail": f"tg-ws-proxy слушает :{TGWS_PORT}, TCP ok, {elapsed} мс"}
+        return {"ok": True, "detail": f"tg-ws-proxy слушает {host}:{TGWS_PORT}, TCP ok, {elapsed} мс"}
     except OSError as exc:
-        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc} ({host}:{TGWS_PORT})"}
 
 
 def probe_worker() -> dict:
