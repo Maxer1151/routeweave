@@ -424,6 +424,19 @@ mihomo и съедаются — YouTube не пробивается. Марки
 arm64 — `mihomo-linux-arm64`. Стратегия по умолчанию — `fake,multidisorder`
 и `md5sig`; это стартовая стратегия, её подбирают через `blockcheck.sh`.
 
+### Профили zapret
+
+Дополнительные стратегии для отдельных доменов задаются файлами
+`/etc/routeweave/zapret.d/<name>.conf` (`LIST`, `QNUM`, `DESYNC`, `FOOLING`,
+`AUTOTTL_ARG`, `TTL_ARG`, `EXTRA`) и включаются как
+`zapret-nfqws@<name>.service`; пример — `templates/zapret.d/split.conf.example`.
+Правила NFQUEUE идут цепочкой: **default первым**, затем профили по имени
+файла; hostlist default генерируется из `lists/dpi.txt` **минус** домены
+профилей (равные и поддомены), поэтому split-домены не попадают в
+default-очередь. Если домен вручную добавлен и в `dpi.txt`, и в список
+профиля, его обработает default — уберите домен из одного из списков. Порядок
+default-first обязателен: split-стратегия перед default ломает YouTube.
+
 ## Опционально: Telegram
 
 Включается `INSTALL_TGWS=yes`. Нужны Docker Engine и compose v2, порт `1443`.

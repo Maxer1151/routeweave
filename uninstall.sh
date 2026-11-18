@@ -45,6 +45,7 @@ UNITS=(
   routeweave-lists-update.service
   routeweave-firewall.service
   zapret-nfqws.service
+  zapret-nfqws@.service
   mihomo.service
   routeweave-panel.service
 )
@@ -53,6 +54,7 @@ HELPERS=(
   /usr/local/sbin/routeweave-tgws-state.sh
   /usr/local/sbin/routeweave-tailscale-state.sh
   /usr/local/sbin/routeweave-update-lists.sh
+  /usr/local/sbin/routeweave-zapret-apply.sh
   /usr/local/sbin/routeweave-guard.sh
   /usr/local/sbin/routeweave-wdtt-health.sh
   /usr/local/sbin/routeweave-diag-dump.sh
@@ -91,7 +93,7 @@ Routeweave — удаление шлюза.
 
 Что делает:
   - останавливает и отключает systemd-юниты Routeweave (включая монитор
-    WDTT routeweave-wdtt-health.timer);
+    WDTT routeweave-wdtt-health.timer и экземпляры zapret-nfqws@*);
   - снимает правила firewall (fw-nfq.sh stop, fw-wan.sh stop, fw-base.sh stop);
   - возвращает net.ipv4.ip_forward из /etc/routeweave/ip_forward.orig;
   - удаляет юниты, helper-скрипты, sudoers панели, лаунчер nfqws, панель;
@@ -547,6 +549,14 @@ info "Остановка и отключение сервисов..."
 for unit in "${UNITS[@]}"; do
   do_systemctl disable --now "$unit" || true
 done
+# Экземпляры профилей zapret: их имена заранее неизвестны, останавливаем
+# маской. После шаблона в UNITS они уже не нужны; без остановки nfqws
+# продолжал бы держать NFQUEUE с очередями из fw-nfq.sh.
+if [ "$DRY_RUN" = 1 ]; then
+  printf 'DRY: systemctl disable --now zapret-nfqws@*.service\n'
+else
+  systemctl disable --now 'zapret-nfqws@*.service' >/dev/null 2>&1 || true
+fi
 # Сервисы без юнитов (на случай, если юнит уже удалён, а процесс жив) —
 # просто глушим, ошибки не важны.
 for svc in mihomo zapret-nfqws routeweave-panel; do
@@ -966,6 +976,7 @@ echo "Удалено:"
 echo "  - systemd-юниты: routeweave-firewall, routeweave-panel,"
 echo "    routeweave-lists-update.service/.timer, routeweave-guard.service/.timer,"
 echo "    routeweave-wdtt-health.service/.timer (монитор WDTT);"
+echo "    zapret-nfqws@* — экземпляры профилей и шаблон zapret-nfqws@.service;"
 echo "    mihomo/zapret-nfqws — только если не были чужими; scoped-правила"
 echo "    firewall сняты, включая WAN-маркировку и ip rule 8993;"
 echo "  - контейнер routeweave-tgwsproxy (docker compose down + docker rm -f);"

@@ -24,6 +24,7 @@ OPT_PANEL=/opt/routeweave-panel
 ZAPRET_DIR=/opt/zapret
 BACKUP_DIR="$ETC/backup"
 SUDOERS_PANEL=/etc/sudoers.d/routeweave-panel
+ZAPRET_APPLY=/usr/local/sbin/routeweave-zapret-apply.sh
 TGWS_RESTART=/usr/local/sbin/routeweave-tgws-restart.sh
 TGWS_STATE=/usr/local/sbin/routeweave-tgws-state.sh
 TAILSCALE_STATE=/usr/local/sbin/routeweave-tailscale-state.sh
@@ -678,6 +679,8 @@ preflight() { # preflight <каталог репозитория> — всё, ч
     templates/mihomo.service
     templates/routeweave-firewall.service
     templates/zapret-nfqws.service
+    templates/zapret-nfqws@.service
+    templates/routeweave-zapret-apply.sh
     templates/routeweave-panel.service
     templates/routeweave-lists-update.service
     templates/routeweave-lists-update.timer
@@ -1205,9 +1208,9 @@ write_panel_sudoers() {
   cat > "$tmp" <<EOF
 # Routeweave: минимальные права веб-панели. Файл генерируется install.sh.
 # Пользователь routeweave может только перезапускать перечисленные юниты и
-# запускать пять helper-скриптов; is-active проверяется без root.
+# запускать шесть helper-скриптов; is-active проверяется без root.
 routeweave ALL=(root) NOPASSWD: $systemctl_bin restart mihomo, $systemctl_bin restart zapret-nfqws, $systemctl_bin restart routeweave-panel, $systemctl_bin start routeweave-lists-update.service
-routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh, /usr/local/sbin/routeweave-tailscale-state.sh, /usr/local/sbin/routeweave-diag-dump.sh
+routeweave ALL=(root) NOPASSWD: /usr/local/sbin/routeweave-update-lists.sh, /usr/local/sbin/routeweave-tgws-restart.sh, /usr/local/sbin/routeweave-tgws-state.sh, /usr/local/sbin/routeweave-tailscale-state.sh, /usr/local/sbin/routeweave-diag-dump.sh, $ZAPRET_APPLY
 EOF
   chmod 0640 "$tmp"
   "$visudo_bin" -cf "$tmp" >/dev/null \
@@ -1696,6 +1699,12 @@ chown -R routeweave:routeweave "$ETC/lists"
 chmod 0755 "$ETC/lists"
 find "$ETC/lists" -maxdepth 1 -type f -exec chmod 0644 {} +
 
+# Каталог профилей zapret: панель пишет сюда от routeweave (атомарная замена
+# файла), nfqws-launch.sh читает от root. Профиль — данные, а не shell:
+# лаунчер разбирает его без source и проверяет значения по whitelist.
+# install -d не трогает уже лежащие *.conf.
+install -d -m 0755 -o routeweave -g routeweave "$ETC/zapret.d"
+
 # .env.tgws — отдельный файл для docker compose (без секретов панели/mihomo).
 if [ "$INSTALL_TGWS" = "yes" ]; then
   if [ -f "$ETC/.env.tgws" ]; then
@@ -1847,6 +1856,42 @@ fi
 
 install -m 0755 "$APP_DIR/templates/nfqws-launch.sh" "$ETC/nfqws-launch.sh"
 
+# Включение/перезапуск экземпляров zapret-nfqws@<name> для профилей из
+# $ETC/zapret.d. Без каталога или без *.conf — штатная установка без профилей,
+# это не ошибка. Имена проверяются так же, как в fw-nfq.sh и лаунчере.
+zapret_profile_action() { # zapret_profile_action enable|restart [каталог]
+  local action=$1 dir=${2:-$ETC/zapret.d} conf name
+  local files=()
+  [ -d "$dir" ] || {
+    info "профили zapret: каталога $dir нет — шаг пропущен"
+    return 0
+  }
+  shopt -s nullglob
+  files=("$dir"/*.conf)
+  shopt -u nullglob
+  if [ "${#files[@]}" -eq 0 ]; then
+    info "профили zapret: в $dir нет *.conf — шаг пропущен"
+    return 0
+  fi
+  for conf in "${files[@]}"; do
+    name=${conf##*/}
+    name=${name%.conf}
+    if [[ ! $name =~ ^[a-z0-9][a-z0-9-]{0,15}$ ]] || [ "$name" = "default" ]; then
+      warn "профиль '$name' пропущен: недопустимое имя (a-z0-9/дефис, до 16 символов)"
+      continue
+    fi
+    if systemctl "$action" "zapret-nfqws@$name.service" >/dev/null 2>&1; then
+      ok "zapret-nfqws@$name.service: $action"
+    else
+      warn "не удалось выполнить systemctl $action zapret-nfqws@$name.service"
+    fi
+  done
+  return 0
+}
+
+enable_zapret_profiles() { zapret_profile_action enable "$@"; }
+restart_zapret_profiles() { zapret_profile_action restart "$@"; }
+
 # ---------- 8. systemd-юниты и helper-скрипты ----------
 info "Установка systemd-юнитов..."
 # Владение «спорными» юнитами фиксируем до перезаписи: mihomo и zapret могли
@@ -1866,6 +1911,7 @@ unset unit unit_path unit_owner
 install -m 0644 "$APP_DIR/templates/mihomo.service"                  /etc/systemd/system/mihomo.service
 install -m 0644 "$APP_DIR/templates/routeweave-firewall.service"     /etc/systemd/system/routeweave-firewall.service
 install -m 0644 "$APP_DIR/templates/zapret-nfqws.service"            /etc/systemd/system/zapret-nfqws.service
+install -m 0644 "$APP_DIR/templates/zapret-nfqws@.service"           /etc/systemd/system/zapret-nfqws@.service
 install -m 0644 "$APP_DIR/templates/routeweave-panel.service"        /etc/systemd/system/routeweave-panel.service
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.service" /etc/systemd/system/routeweave-lists-update.service
 install -m 0644 "$APP_DIR/templates/routeweave-lists-update.timer"   /etc/systemd/system/routeweave-lists-update.timer
@@ -1875,13 +1921,14 @@ install -m 0644 "$APP_DIR/templates/routeweave-wdtt-health.service"  /etc/system
 install -m 0644 "$APP_DIR/templates/routeweave-wdtt-health.timer"    /etc/systemd/system/routeweave-wdtt-health.timer
 
 install -m 0755 "$APP_DIR/templates/routeweave-update-lists.sh"      /usr/local/sbin/routeweave-update-lists.sh
+install -m 0755 "$APP_DIR/templates/routeweave-zapret-apply.sh"      "$ZAPRET_APPLY"
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-restart.sh"      "$TGWS_RESTART"
 install -m 0755 "$APP_DIR/templates/routeweave-tgws-state.sh"        "$TGWS_STATE"
 install -m 0755 "$APP_DIR/templates/routeweave-tailscale-state.sh"   "$TAILSCALE_STATE"
 install -m 0755 "$APP_DIR/templates/routeweave-guard.sh"             /usr/local/sbin/routeweave-guard.sh
 install -m 0755 "$APP_DIR/templates/routeweave-wdtt-health.sh"       /usr/local/sbin/routeweave-wdtt-health.sh
 install -m 0755 "$APP_DIR/templates/routeweave-diag-dump.sh"         /usr/local/sbin/routeweave-diag-dump.sh
-ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,tgws-restart,tgws-state,tailscale-state}.sh, guard.sh, wdtt-health.sh, diag-dump.sh"
+ok "helper-скрипты: /usr/local/sbin/routeweave-{update-lists,zapret-apply,tgws-restart,tgws-state,tailscale-state}.sh, guard.sh, wdtt-health.sh, diag-dump.sh"
 
 # Снимки диагностики: helper пишет их от root через sudo из панели, панель
 # читает как группа routeweave. Каталог создаётся здесь, потому что юнит
@@ -2208,12 +2255,17 @@ fi
 info "Запуск сервисов..."
 systemctl daemon-reload
 systemctl enable routeweave-firewall mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
+# Экземпляры профилей включаем до перезапуска default: fw-nfq.sh start (его
+# ExecStartPre) заново сгенерирует hostlist'ы, после чего профили надо
+# перезапустить, чтобы они прочитали свежие списки.
+enable_zapret_profiles
 # restart, а не enable --now: enable --now не перечитывает код уже активного
 # юнита, поэтому после git pull + повторного install.sh security-фикс
 # применялся бы только после ручного restart. restart и запускает неактивный
 # юнит, и перечитывает код активного.
 systemctl restart routeweave-firewall >/dev/null 2>&1 || true
 systemctl restart mihomo zapret-nfqws routeweave-panel >/dev/null 2>&1 || true
+restart_zapret_profiles
 systemctl enable --now routeweave-lists-update.timer >/dev/null 2>&1 \
   || warn "не удалось включить routeweave-lists-update.timer — проверьте: systemctl status routeweave-lists-update.timer"
 systemctl enable --now routeweave-guard.timer >/dev/null 2>&1 \

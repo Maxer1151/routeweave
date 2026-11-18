@@ -92,20 +92,23 @@ def test_wait_timeout_is_five_seconds():
 
 def test_insert_failure_exits_nonzero():
     text = FW_NFQ.read_text(encoding="utf-8")
-    start_body = text.split("start()", 1)[1].split("stop()", 1)[0]
-    assert "-I POSTROUTING" in start_body, "start() не вставляет правило"
-    assert "exit 1" in start_body, "ошибка вставки правила не приводит к exit 1"
+    add_body = text.split("add_rule()", 1)[1].split("delete_all_our_rules()", 1)[0]
+    assert "-A POSTROUTING" in add_body, "add_rule() не добавляет правило"
+    assert "exit 1" in add_body, "ошибка добавления правила не приводит к exit 1"
     assert re.search(
-        r"-I POSTROUTING.*\|\|\s*\{[^}]*exit 1", start_body, re.DOTALL
-    ), "нет обработки неудачной вставки правила (|| { ...; exit 1; })"
+        r"-A POSTROUTING.*\|\|\s*\{[^}]*exit 1", add_body, re.DOTALL
+    ), "нет обработки неудачного добавления правила (|| { ...; exit 1; })"
+    start_body = text.split("start()", 1)[1].split("stop()", 1)[0]
+    assert "add_rule" in start_body, "start() не вызывает add_rule"
 
 
 def test_optional_deletion_still_tolerates_absence():
     text = FW_NFQ.read_text(encoding="utf-8")
+    delete_body = text.split("delete_rule()", 1)[1].split("add_rule()", 1)[0]
+    assert "-D POSTROUTING" in delete_body, "delete_rule() не удаляет правило"
+    assert "|| true" in delete_body, "delete_rule() должен переживать отсутствие правила"
     stop_body = text.split("stop()", 1)[1].split("case ", 1)[0]
-    delete_lines = [ln.strip() for ln in stop_body.splitlines() if "-D POSTROUTING" in ln]
-    assert delete_lines, "stop() не удаляет правило"
-    assert any("|| true" in ln for ln in delete_lines), "stop() должен переживать отсутствие правила"
+    assert "delete_rule" in stop_body, "stop() не удаляет правило"
 
 
 def test_bash_syntax_ok():
@@ -177,7 +180,7 @@ class TestRuleBuild:
                 #!/bin/sh
                 printf '%s\\n' "$*" >> "$FAKE_IPT_LOG"
                 case " $* " in
-                  *" -C "*) exit 1 ;;
+                  *" -C "*|*" -D "*) exit 1 ;;
                   *) exit 0 ;;
                 esac
                 """
@@ -188,13 +191,30 @@ class TestRuleBuild:
         (bin_dir / "pgrep").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         (bin_dir / "pgrep").chmod(0o755)
 
+        run_dir = tmp_path / "run"
+        lists_dir = tmp_path / "lists"
+        profile_dir = etc / "zapret.d"
+        lists_dir.mkdir()
+        profile_dir.mkdir()
+        (lists_dir / "dpi.txt").write_text("+.example.com\n", encoding="utf-8")
+
         def write_conf(extra_line: str = "") -> None:
             (etc / "zapret.conf").write_text(
                 "WAN_IFACE=dummy0\n"
                 f"QNUM={QNUM}\n"
-                f"HOSTLIST={tmp_path / 'run' / 'dpi-zapret.txt'}\n"
-                f"SRC_HOSTLIST={tmp_path / 'missing-dpi.txt'}\n"
+                f"SRC_HOSTLIST={lists_dir / 'dpi.txt'}\n"
+                f"HOSTLIST={run_dir / 'dpi-zapret.txt'}\n"
+                f"HOSTLIST_DIR={run_dir}\n"
+                f"PROFILE_DIR={profile_dir}\n"
+                f"LIST_DIR={lists_dir}\n"
                 f"{extra_line}\n",
+                encoding="utf-8",
+            )
+
+        def write_profile(name: str = "split", list_name: str = "dpi-split.txt",
+                          qnum: str = "2212") -> None:
+            (profile_dir / f"{name}.conf").write_text(
+                f"LIST={list_name}\nQNUM={qnum}\nDESYNC=multisplit\n",
                 encoding="utf-8",
             )
 
@@ -216,7 +236,9 @@ class TestRuleBuild:
             )
 
         return SimpleNamespace(
-            etc=etc, log=log, write_conf=write_conf, run=run
+            etc=etc, log=log, run_dir=run_dir, lists_dir=lists_dir,
+            profile_dir=profile_dir, write_conf=write_conf,
+            write_profile=write_profile, run=run,
         )
 
     @staticmethod
@@ -230,19 +252,23 @@ class TestRuleBuild:
         assert res.returncode == 0, res.stderr
 
         calls = self.calls(sandbox)
-        inserted = [c for c in calls if "-I POSTROUTING" in c]
+        inserted = [c for c in calls if "-A POSTROUTING" in c]
         assert len(inserted) == 1, calls
         assert "-m mark ! --mark 0x80000/0x80000" in inserted[0], inserted[0]
 
-        legacy = [c for c in calls if "-D POSTROUTING" in c and "-j NFQUEUE" in c]
+        legacy = [
+            c
+            for c in calls
+            if "-D POSTROUTING" in c and "-j NFQUEUE" in c and "--mark" not in c
+        ]
         assert legacy, calls
-        assert all("--queue-bypass" in c and "--mark" not in c for c in legacy), legacy
+        assert all("--queue-bypass" in c for c in legacy), legacy
 
     def test_mark_from_extra_for_old_install(self, sandbox):
         sandbox.write_conf('EXTRA="--dpi-desync-fwmark=0x90000"')
         res = sandbox.run("start")
         assert res.returncode == 0, res.stderr
-        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        inserted = [c for c in self.calls(sandbox) if "-A POSTROUTING" in c]
         assert len(inserted) == 1, self.calls(sandbox)
         assert "--mark 0x90000/0x90000" in inserted[0], inserted[0]
 
@@ -252,7 +278,7 @@ class TestRuleBuild:
         )
         res = sandbox.run("start")
         assert res.returncode == 0, res.stderr
-        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        inserted = [c for c in self.calls(sandbox) if "-A POSTROUTING" in c]
         assert len(inserted) == 1, self.calls(sandbox)
         assert "--mark 0xA0000/0xA0000" in inserted[0], inserted[0]
 
@@ -261,9 +287,66 @@ class TestRuleBuild:
         res = sandbox.run("start")
         assert res.returncode == 0, res.stderr
         assert "не похож на число" in res.stderr
-        inserted = [c for c in self.calls(sandbox) if "-I POSTROUTING" in c]
+        inserted = [c for c in self.calls(sandbox) if "-A POSTROUTING" in c]
         assert len(inserted) == 1, self.calls(sandbox)
         assert "--mark 0x80000/0x80000" in inserted[0], inserted[0]
+
+    def test_default_rule_goes_first_then_profiles_by_name(self, sandbox):
+        """default — первым: иначе split-стратегия ломает YouTube."""
+        sandbox.write_profile("zeta", "dpi-zeta.txt", "2213")
+        sandbox.write_profile("alpha", "dpi-alpha.txt", "2212")
+        (sandbox.lists_dir / "dpi-alpha.txt").write_text("a.example\n", encoding="utf-8")
+        (sandbox.lists_dir / "dpi-zeta.txt").write_text("z.example\n", encoding="utf-8")
+
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+
+        added = [c for c in self.calls(sandbox) if "-A POSTROUTING" in c]
+        assert len(added) == 3, added
+        assert f"--queue-num {QNUM}" in added[0], added
+        assert "--queue-num 2212" in added[1], added
+        assert "--queue-num 2213" in added[2], added
+
+    def test_default_hostlist_excludes_profile_domains(self, sandbox):
+        """dpi.txt минус профильные домены: default не должен их десинкать."""
+        (sandbox.lists_dir / "dpi.txt").write_text(
+            "# базовый список\n"
+            "+.youtube.com\n"
+            "+.reddit.com\n"
+            "+.workers.dev\n"
+            "+.sub.reddit.com\n"
+            "+.notreddit.com\n"
+            "+.UPPER.example\n",
+            encoding="utf-8",
+        )
+        (sandbox.lists_dir / "dpi-split.txt").write_text(
+            "# профиль split\n+.reddit.com\n+.workers.dev\n",
+            encoding="utf-8",
+        )
+        sandbox.write_profile("split", "dpi-split.txt")
+
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+
+        default_lines = (sandbox.run_dir / "dpi-zapret.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert default_lines == ["youtube.com", "notreddit.com", "upper.example"], (
+            default_lines
+        )
+        profile_lines = (sandbox.run_dir / "dpi-zapret-split.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        assert profile_lines == ["reddit.com", "workers.dev"], profile_lines
+
+    def test_profile_qnum_must_not_collide_with_default(self, sandbox):
+        sandbox.write_profile("split", "dpi-split.txt", QNUM)
+        (sandbox.lists_dir / "dpi-split.txt").write_text("reddit.com\n", encoding="utf-8")
+        res = sandbox.run("start")
+        assert res.returncode == 0, res.stderr
+        assert "уже занят" in res.stderr
+        added = [c for c in self.calls(sandbox) if "-A POSTROUTING" in c]
+        assert len(added) == 1, added
 
 
 # --------------------------------------------------------------------------
@@ -352,7 +435,10 @@ class TestNetns:
             "WAN_IFACE=dummy0\n"
             f"QNUM={QNUM}\n"
             f"SRC_HOSTLIST={hosts}\n"
-            f"HOSTLIST={generated}\n",
+            f"HOSTLIST={generated}\n"
+            f"HOSTLIST_DIR={generated.parent}\n"
+            f"PROFILE_DIR={etc / 'zapret.d'}\n"
+            f"LIST_DIR={etc / 'lists'}\n",
             encoding="utf-8",
         )
 
@@ -452,6 +538,41 @@ class TestNetns:
         # повторный stop не падает на отсутствующем правиле
         again = run_fw(started.etc, "stop")
         assert again.returncode == 0, again.stderr
+
+    def test_profile_rules_follow_default(self, started):
+        """default-очередь первая, профиль — следующей; hostlist свой."""
+        profile_dir = started.etc / "zapret.d"
+        lists_dir = started.etc / "lists"
+        profile_dir.mkdir(exist_ok=True)
+        lists_dir.mkdir(exist_ok=True)
+        profile_qnum = "2212"
+        (lists_dir / "dpi-split.txt").write_text(
+            "+.reddit.com\n+.workers.dev\n", encoding="utf-8"
+        )
+        profile_conf = profile_dir / "split.conf"
+        profile_conf.write_text(
+            f"LIST=dpi-split.txt\nQNUM={profile_qnum}\nDESYNC=multisplit\n",
+            encoding="utf-8",
+        )
+        try:
+            res = run_fw(started.etc, "start")
+            assert res.returncode == 0, res.stderr
+            rules = nfq_rules()
+            assert len(rules) == 2, rules
+            assert f"--queue-num {QNUM}" in rules[0], rules
+            assert f"--queue-num {profile_qnum}" in rules[1], rules
+
+            generated = started.work / "run" / "dpi-zapret-split.txt"
+            assert generated.read_text(encoding="utf-8").splitlines() == [
+                "reddit.com",
+                "workers.dev",
+            ]
+
+            assert run_fw(started.etc, "stop").returncode == 0
+            assert nfq_rules() == [], nfq_rules()
+        finally:
+            profile_conf.unlink(missing_ok=True)
+            assert run_fw(started.etc, "start").returncode == 0
 
     def test_start_without_wan_iface_fails(self, started, tmp_path):
         """Пустой WAN_IFACE — ошибка с понятным сообщением, а не «тихий успех»."""

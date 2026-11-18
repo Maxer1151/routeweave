@@ -19,6 +19,14 @@ WAN_IFACE={{WAN_IFACE}}
 # формат mihomo (+.domain) преобразуется в голые хосты для nfqws.
 HOSTLIST=/run/routeweave/dpi-zapret.txt
 
+# Каталог дополнительных профилей (по файлу на профиль).
+# Профиль — свой список, QNUM и стратегия; правила NFQUEUE идут цепочкой:
+# первый — default, затем профили по имени файла. Домены профилей вычитаются
+# из hostlist default, поэтому пересечений нет; если домен вручную попал в
+# оба списка, его обработает default. Пример:
+# templates/zapret.d/split.conf.example (install.sh его не устанавливает).
+PROFILE_DIR=/etc/routeweave/zapret.d
+
 # Стартовая стратегия: fake + multidisorder, TLS-режим с подменой SNI.
 # Подбирается blockcheck.sh под вашего провайдера.
 # ВАЖНО: --dpi-desync-fwmark=$NFQWS_MARK обязателен при активном TUN mihomo:

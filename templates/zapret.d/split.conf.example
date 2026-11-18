@@ -1,0 +1,27 @@
+# Пример дополнительного профиля zapret.
+#
+# Файл кладётся в /etc/routeweave/zapret.d/<name>.conf (имя: a-z0-9 и дефис,
+# до 16 символов). install.sh профили не создаёт — это ручная/панельная
+# настройка. После добавления:
+#   sudo systemctl enable --now zapret-nfqws@split.service
+#   sudo /usr/local/sbin/routeweave-zapret-apply.sh
+#
+# Правила NFQUEUE — цепочка: default первым, затем профили по имени файла.
+# nfqws ставит метку только на пакеты своего десинка, поэтому домен, которого
+# нет в LIST этого профиля, без метки уходит в следующую очередь.
+# hostlist default генерируется из dpi.txt минус домены профилей (равные и
+# поддомены), так что split-домены не попадают в default-очередь. Если домен
+# вручную добавить и в dpi.txt, и сюда, его обработает default (он первый):
+# уберите его из одного списка. Обратный порядок (split первым) ломает
+# YouTube/Google — не меняйте его.
+#
+# LIST — только имя файла из /etc/routeweave/lists (без слэшей и '..').
+# QNUM уникален: не должен совпадать с QNUM из zapret.conf или других профилей.
+LIST=dpi-split.txt
+QNUM=201
+
+DESYNC=multisplit
+FOOLING=none
+AUTOTTL_ARG=
+TTL_ARG=
+EXTRA="--dpi-desync-split-pos=1 --dpi-desync-fwmark=$NFQWS_MARK"

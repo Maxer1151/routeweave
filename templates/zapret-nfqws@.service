@@ -1,0 +1,39 @@
+# Routeweave: дополнительный профиль zapret (nfqws DPI-desync).
+#
+# Экземпляр шаблона: zapret-nfqws@<name>.service, где <name> — имя файла
+# /etc/routeweave/zapret.d/<name>.conf. Лаунчер читает профиль и запускает
+# nfqws со своим QNUM/hostlist/стратегией.
+#
+# Requires/After основного юнита: правила NFQUEUE (цепочка профилей + default)
+# создаёт ExecStartPre=fw-nfq.sh start в zapret-nfqws.service. Здесь нет
+# ExecStartPre/ExecStopPost, чтобы профили не пересобирали правила и не
+# снимали их при собственном рестарте.
+#
+# Хардненинг — как у zapret-nfqws.service: nfqws нужны CAP_NET_ADMIN
+# (NFQUEUE), CAP_NET_RAW (raw-сокеты), CAP_NET_BIND_SERVICE. ProtectSystem
+# оставляет запись только в /etc/routeweave и /run.
+
+[Unit]
+Description=Routeweave zapret profile %i (nfqws DPI desync)
+After=network-online.target zapret-nfqws.service
+Wants=network-online.target
+Requires=zapret-nfqws.service
+
+[Service]
+Type=simple
+ExecStart=/etc/routeweave/nfqws-launch.sh %i
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/routeweave /run
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

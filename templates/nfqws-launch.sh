@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Routeweave — обёртка запуска nfqws (zapret) из /etc/routeweave/zapret.conf.
+# Routeweave — обёртка запуска nfqws (zapret).
+#
+# Без аргумента (или с аргументом `default`) запускает стратегию из
+# /etc/routeweave/zapret.conf — это прежнее поведение, совместимое со старым
+# юнитом zapret-nfqws.service. С аргументом `<name>` читает дополнительный
+# профиль /etc/routeweave/zapret.d/<name>.conf: свой QNUM, DESYNC/FOOLING/EXTRA
+# и hostlist /run/routeweave/dpi-zapret-<name>.txt. Так YouTube/Google и
+# Cloudflare Workers можно пробивать разными стратегиями: fw-nfq.sh строит
+# цепочку NFQUEUE (default первым, затем профили), а тут — запуск нужного nfqws.
 #
 # Зачем нужна обёртка, если есть systemd:
 #   Раньше юнит запускал `/bin/sh -c '... --dpi-desync=${DESYNC} ...
@@ -21,6 +29,10 @@
 # Лучше не запустить десинк, чем исполнить инъекцию:
 # сервис останется в failed и это видно в `systemctl status zapret-nfqws`.
 #
+# Профили разбираются тем же построчным парсером, что и zapret.conf, а не
+# через `.`/source: точка выполнила бы `$(...)` из файла профиля от root до
+# любых проверок. Формат файла — данные, а не shell.
+#
 # NFQWS_BIN — законное расширение для тестов и нестандартной сборки: путь к
 # бинарнику можно переопределить переменной окружения (по умолчанию
 # /opt/zapret/bin/nfqws). В production юнит переменную не задаёт, поэтому
@@ -30,6 +42,12 @@ set -Eeuo pipefail
 ETC="${ROUTEWEAVE_ETC:-/etc/routeweave}"
 NFQWS_BIN="${NFQWS_BIN:-/opt/zapret/bin/nfqws}"
 CONF="$ETC/zapret.conf"
+
+PROFILE="${1:-default}"
+if [ "$#" -gt 1 ]; then
+  echo "nfqws-launch: лишние аргументы: ожидается необязательное имя профиля" >&2
+  exit 1
+fi
 
 die() { echo "nfqws-launch: $*" >&2; exit 1; }
 warn() { echo "nfqws-launch: предупреждение: $*" >&2; }
@@ -46,6 +64,9 @@ TTL_ARG=""
 EXTRA=""
 HOSTLIST=""
 NFQWS_MARK=""
+LIST=""
+PROFILE_DIR=""
+HOSTLIST_DIR=""
 
 # Конфиг разбирается ВРУЧНУЮ, без `. "$CONF"`.
 # Почему не source: точка выполнила бы содержимое файла шеллом ДО любой
@@ -53,8 +74,13 @@ NFQWS_MARK=""
 # раньше, чем whitelist успел бы их заметить, и вся защита ниже потеряла бы
 # смысл. Разбор повторяет семантику systemd EnvironmentFile: KEY=VALUE,
 # одна пара кавычек снимается, подстановок и исполнения нет.
-load_conf() { # load_conf <файл>
+#
+# Разрешённые ключи передаются списком: zapret.conf и профиль имеют разные
+# наборы (LIST и DST нужны только профилю, HOSTLIST/HOSTLIST_DIR — базе).
+load_conf() { # load_conf <файл> <разрешённые ключи...>
   local file="$1" line key val lineno=0
+  shift
+  local allowed=" $* "
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
     line=${line%$'\r'}                       # конфиг мог быть сохранён в CRLF
@@ -71,19 +97,61 @@ load_conf() { # load_conf <файл>
       elif [[ $val == \'*\' && ${#val} -ge 2 ]]; then
         val=${val:1:${#val}-2}
       fi
-      case $key in
-        QNUM | DESYNC | FOOLING | AUTOTTL_ARG | TTL_ARG | EXTRA | HOSTLIST | NFQWS_MARK)
-          printf -v "$key" '%s' "$val"
-          ;;
+      case $allowed in
+        *" $key "*) printf -v "$key" '%s' "$val" ;;
         *) : ;; # WAN_IFACE, SRC_HOSTLIST и прочее лаунчеру не нужны
       esac
     else
-      warn "строка $lineno в $CONF не похожа на KEY=VALUE — пропущена"
+      warn "строка $lineno в $file не похожа на KEY=VALUE — пропущена"
     fi
   done < "$file"
 }
 
-load_conf "$CONF"
+load_conf "$CONF" QNUM DESYNC FOOLING AUTOTTL_ARG TTL_ARG EXTRA HOSTLIST NFQWS_MARK PROFILE_DIR HOSTLIST_DIR
+# QNUM default нужен для проверки уникальности очереди профиля: два nfqws на
+# одной очереди конкурируют за пакеты и ломают десинк.
+DEFAULT_QNUM="$QNUM"
+
+# Каталог профилей и рантайм-каталог hostlist'ов. Значения из zapret.conf
+# важнее окружения? Нет: юнит не задаёт их, а тесты/нестандартная установка
+# могут переопределить. Пустое значение = путь по умолчанию.
+PROFILE_DIR="${PROFILE_DIR:-$ETC/zapret.d}"
+HOSTLIST_DIR="${HOSTLIST_DIR:-/run/routeweave}"
+[ -n "$PROFILE_DIR" ] || PROFILE_DIR="$ETC/zapret.d"
+[ -n "$HOSTLIST_DIR" ] || HOSTLIST_DIR="/run/routeweave"
+
+validate_profile_name() { # validate_profile_name <имя>
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,15}$ ]] && return 0
+  die "недопустимое имя профиля (разрешены a-z0-9 и дефис, до 16 символов): $(printf '%q' "$1")"
+}
+
+if [ "$PROFILE" != "default" ]; then
+  validate_profile_name "$PROFILE"
+  PROFILE_CONF="$PROFILE_DIR/$PROFILE.conf"
+  [ -f "$PROFILE_CONF" ] || die "профиль '$PROFILE' не найден: $PROFILE_CONF отсутствует"
+  [ -r "$PROFILE_CONF" ] || die "профиль '$PROFILE' не читается: $PROFILE_CONF"
+
+  # Профиль задаёт стратегию целиком: не наследуем DESYNC/FOOLING/EXTRA из
+  # default, иначе забытый в профиле ключ незаметно менял бы поведение.
+  QNUM=""
+  DESYNC=""
+  FOOLING=""
+  AUTOTTL_ARG=""
+  TTL_ARG=""
+  EXTRA=""
+  LIST=""
+  load_conf "$PROFILE_CONF" LIST QNUM DESYNC FOOLING AUTOTTL_ARG TTL_ARG EXTRA
+
+  [ -n "$LIST" ] || die "LIST пустой — укажите имя файла из $ETC/lists в $PROFILE_CONF"
+  if [ -n "$QNUM" ] && [ "$QNUM" = "$DEFAULT_QNUM" ]; then
+    die "QNUM=$QNUM совпадает с очередью default — у профиля должна быть своя очередь"
+  fi
+  # LIST — только имя файла: слэши и `..` позволили бы выйти из каталога списков.
+  if [[ $LIST == */* || $LIST == *..* || ! $LIST =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    die "недопустимое имя списка в LIST (только файл из $ETC/lists, без слэшей и '..'): $(printf '%q' "$LIST")"
+  fi
+  HOSTLIST="$HOSTLIST_DIR/dpi-zapret-$PROFILE.txt"
+fi
 
 # Подстановка метки nfqws в EXTRA. Раньше значение было литералом; теперь
 # шаблон пишет --dpi-desync-fwmark=$NFQWS_MARK, чтобы метка задавалась в одном

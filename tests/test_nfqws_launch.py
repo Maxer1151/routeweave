@@ -60,13 +60,35 @@ class Sandbox:
             "TTL_ARG": "",
             "EXTRA": "--dpi-desync-repeats=11 --dpi-desync-split-pos=1,midsld",
             "HOSTLIST": HOSTLIST,
+            "HOSTLIST_DIR": str(self.root / "run"),
         }
         values.update(override)
         lines = ["# тестовый zapret.conf"]
         lines += [f"{key}={value}" for key, value in values.items()]
         return "\n".join(lines) + "\n"
 
-    def run(self):
+    def profile(self, name: str = "split", **override: str) -> Path:
+        """Записать профиль /etc/routeweave/zapret.d/<name>.conf."""
+        profile_dir = self.etc / "zapret.d"
+        profile_dir.mkdir(exist_ok=True)
+        values = {
+            "LIST": "dpi-split.txt",
+            "QNUM": "201",
+            "DESYNC": "multisplit",
+            "FOOLING": "none",
+            "AUTOTTL_ARG": "",
+            "TTL_ARG": "",
+            "EXTRA": "--dpi-desync-split-pos=1",
+        }
+        values.update(override)
+        path = profile_dir / f"{name}.conf"
+        path.write_text(
+            "# профиль\n" + "\n".join(f"{k}={v}" for k, v in values.items()) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def run(self, *profile_args: str):
         """Запустить лаунчер. Возвращает (CompletedProcess, argv или None)."""
         self.argv_log.unlink(missing_ok=True)
         env = {
@@ -78,7 +100,7 @@ class Sandbox:
             "ROUTEWEAVE_TEST_ARGV": str(self.argv_log),
         }
         res = subprocess.run(
-            [BASH, str(LAUNCH)],
+            [BASH, str(LAUNCH), *profile_args],
             check=False,
             env=env,
             capture_output=True,
@@ -335,3 +357,116 @@ def test_conf_with_crlf_and_quotes(sandbox: Sandbox):
         "--dpi-desync-fooling=md5sig",
     ]
     assert argv[-1] == f"--hostlist={HOSTLIST}"
+
+
+# --------------------------------------------------------------------------
+# профили: свой QNUM, свой hostlist, никакого наследования default
+# --------------------------------------------------------------------------
+
+def test_profile_uses_own_qnum_strategy_and_hostlist(sandbox: Sandbox):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile(
+        "split",
+        QNUM="201",
+        DESYNC="multisplit",
+        FOOLING="none",
+        EXTRA="--dpi-desync-split-pos=1 --dpi-desync-fwmark=0x80000",
+    )
+
+    res, argv = sandbox.run("split")
+
+    assert res.returncode == 0, res.stderr
+    assert argv == [
+        "--qnum=201",
+        "--dpi-desync=multisplit",
+        "--dpi-desync-fooling=none",
+        "--dpi-desync-split-pos=1",
+        "--dpi-desync-fwmark=0x80000",
+        f"--hostlist={sandbox.root / 'run' / 'dpi-zapret-split.txt'}",
+    ]
+
+
+def test_profile_does_not_inherit_default_strategy(sandbox: Sandbox):
+    """Забытый в профиле DESYNC — ошибка, а не тихое наследование default."""
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile("split", DESYNC="")
+
+    res, argv = sandbox.run("split")
+
+    assert res.returncode != 0
+    assert argv is None
+    assert "DESYNC пустой" in res.stderr, res.stderr
+
+
+def test_unknown_profile_is_rejected(sandbox: Sandbox):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+
+    res, argv = sandbox.run("missing")
+
+    assert res.returncode != 0
+    assert argv is None
+    assert "не найден" in res.stderr, res.stderr
+
+
+def test_profile_qnum_collision_with_default_is_rejected(sandbox: Sandbox):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile("split", QNUM="200")
+
+    res, argv = sandbox.run("split")
+
+    assert res.returncode != 0
+    assert argv is None
+    assert "совпадает с очередью default" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize("name", ["../evil", "split;id", "Split", "-bad", "a" * 17])
+def test_invalid_profile_name_is_rejected(sandbox: Sandbox, name: str):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+
+    res, argv = sandbox.run(name)
+
+    assert res.returncode != 0, name
+    assert argv is None, name
+    assert "недопустимое имя профиля" in res.stderr, res.stderr
+
+
+def test_extra_profile_argument_is_rejected(sandbox: Sandbox):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile()
+
+    res, argv = sandbox.run("split", "extra")
+
+    assert res.returncode != 0
+    assert argv is None
+    assert "лишние аргументы" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize("list_name", ["../dpi.txt", "sub/dpi.txt", "..", "a" * 129])
+def test_profile_list_must_be_plain_filename(sandbox: Sandbox, list_name: str):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile("split", LIST=list_name)
+
+    res, argv = sandbox.run("split")
+
+    assert res.returncode != 0, list_name
+    assert argv is None, list_name
+    assert "недопустимое имя списка" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize(
+    ("key", "payload"),
+    [
+        ("QNUM", "201;id"),
+        ("DESYNC", "multisplit$(id)"),
+        ("EXTRA", "--dpi-desync-split-pos=1 && id"),
+    ],
+)
+def test_profile_rejects_shell_injection(sandbox: Sandbox, key: str, payload: str):
+    sandbox.etc.joinpath("zapret.conf").write_text(sandbox.conf(), encoding="utf-8")
+    sandbox.profile("split", **{key: payload})
+
+    res, argv = sandbox.run("split")
+
+    assert res.returncode != 0, f"{key}={payload}"
+    assert argv is None
+    assert "nfqws-launch:" in res.stderr, res.stderr
