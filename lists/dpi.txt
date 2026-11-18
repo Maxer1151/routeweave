@@ -50,3 +50,4 @@
 +.reddit.com
 +.redd.it
 +.redditstatic.com
++.workers.dev
