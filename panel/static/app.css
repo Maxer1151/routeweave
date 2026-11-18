@@ -768,6 +768,93 @@ a:hover { text-decoration: underline; }
 }
 .note .icon { color: var(--warn); margin-top: 1px; }
 
+/* Стратегия профиля zapret: карточка под редактором списка. */
+.strategy-card {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.strategy-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.strategy-title { font-size: 15px; color: var(--text-strong); }
+.strategy-desc { margin-top: 5px; font-size: 12px; color: var(--faint); }
+.strategy-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0 14px;
+  margin: 12px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.strategy-meta .kv-row { padding: 8px 11px; }
+.strategy-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field--wide { grid-column: 1 / -1; }
+.field-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+.input {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: 13px/1.45 var(--mono);
+}
+.input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.input[disabled] { opacity: 0.55; cursor: default; }
+.input--area { min-height: 74px; resize: vertical; }
+.strategy-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.strategy-state { font-size: 12px; color: var(--muted); }
+.strategy-state[data-tone="ok"] { color: var(--ok); }
+.strategy-state[data-tone="bad"] { color: var(--bad); }
+.strategy-state[data-tone="warn"] { color: var(--warn); }
+.strategy-warnings {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-border);
+  border-radius: 10px;
+  background: var(--warn-bg);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.strategy-warnings-title {
+  font-weight: 600;
+  color: var(--warn);
+  margin-bottom: 4px;
+}
+.strategy-warnings ul { margin: 0; padding-left: 18px; }
+.strategy-warnings li + li { margin-top: 3px; }
+
 /* ---------------- Конфигурация ---------------- */
 
 .config-grid {

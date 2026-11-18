@@ -55,6 +55,7 @@ HELPERS=(
   /usr/local/sbin/routeweave-tailscale-state.sh
   /usr/local/sbin/routeweave-update-lists.sh
   /usr/local/sbin/routeweave-zapret-apply.sh
+  /usr/local/sbin/routeweave-zapret-profile-set.sh
   /usr/local/sbin/routeweave-guard.sh
   /usr/local/sbin/routeweave-wdtt-health.sh
   /usr/local/sbin/routeweave-diag-dump.sh

@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 INSTALL = REPO / "install.sh"
 UNINSTALL = REPO / "uninstall.sh"
 APPLY = REPO / "templates" / "routeweave-zapret-apply.sh"
+PROFILE_SET = REPO / "templates" / "routeweave-zapret-profile-set.sh"
 UNIT = REPO / "templates" / "zapret-nfqws@.service"
 
 BASE_ENV = {
@@ -61,11 +62,16 @@ def test_install_preflight_knows_profile_files():
     section = text[text.index("preflight()"):text.index("# <<< pure-functions <<<")]
     assert "templates/zapret-nfqws@.service" in section
     assert "templates/routeweave-zapret-apply.sh" in section
+    assert "templates/routeweave-zapret-profile-set.sh" in section
 
 
 def test_install_installs_template_unit_and_helper():
     text = INSTALL.read_text(encoding="utf-8")
     assert "ZAPRET_APPLY=/usr/local/sbin/routeweave-zapret-apply.sh" in text
+    assert (
+        "ZAPRET_PROFILE_SET=/usr/local/sbin/routeweave-zapret-profile-set.sh"
+        in text
+    )
     assert (
         'install -m 0644 "$APP_DIR/templates/zapret-nfqws@.service"'
         in text
@@ -74,10 +80,16 @@ def test_install_installs_template_unit_and_helper():
         'install -m 0755 "$APP_DIR/templates/routeweave-zapret-apply.sh"'
         in text
     )
+    assert (
+        'install -m 0755 "$APP_DIR/templates/routeweave-zapret-profile-set.sh"'
+        in text
+    )
     assert '"$ZAPRET_APPLY"' in text
-    # Helper доступен панели через sudo без wildcard.
+    assert '"$ZAPRET_PROFILE_SET"' in text
+    # Helpers доступны панели через sudo без wildcard.
     sudoers = text.split("write_panel_sudoers()", 1)[1].split("}", 1)[0]
     assert "$ZAPRET_APPLY" in sudoers
+    assert "$ZAPRET_PROFILE_SET" in sudoers
     assert "routeweave ALL=(root) NOPASSWD:" in sudoers
 
 
@@ -314,7 +326,7 @@ def test_apply_ignores_invalid_profile_names(apply_sandbox):
 
 
 def test_apply_and_unit_bash_syntax():
-    for path in (APPLY,):
+    for path in (APPLY, PROFILE_SET):
         proc = subprocess.run(
             ["bash", "-n", str(path)],
             check=False,
@@ -338,6 +350,7 @@ def test_uninstall_removes_template_helper_and_instances():
     helpers = re.search(r"^HELPERS=\(\n(.*?)^\)\n", text, re.MULTILINE | re.DOTALL)
     assert helpers, "не найден массив HELPERS"
     assert "/usr/local/sbin/routeweave-zapret-apply.sh" in helpers.group(1).split()
+    assert "/usr/local/sbin/routeweave-zapret-profile-set.sh" in helpers.group(1).split()
 
     assert "systemctl disable --now 'zapret-nfqws@*.service'" in text
     assert "DRY: systemctl disable --now zapret-nfqws@*.service" in text
@@ -366,3 +379,136 @@ def test_uninstall_dry_run_shows_profile_stop(tmp_path):
     assert "DRY: systemctl disable --now zapret-nfqws@*.service" in proc.stdout
     # Без --purge сам /etc/routeweave (включая zapret.d) остаётся.
     assert f"DRY: rm -rf {etc}" not in proc.stdout.splitlines()
+
+
+# ------------------------------------------------------- profile-set helper
+
+
+def run_profile_set(etc: Path, *args: str):
+    env = dict(BASE_ENV)
+    env["ROUTEWEAVE_ETC"] = str(etc)
+    return subprocess.run(
+        ["bash", str(PROFILE_SET), *args],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+def test_profile_set_default_upserts_only_strategy_keys(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    conf = etc / "zapret.conf"
+    conf.write_text(
+        "# комментарий владельца\n"
+        "QNUM=200\n"
+        "NFQWS_MARK=0x80000\n"
+        "DESYNC=fake,multidisorder\n"
+        "FOOLING=md5sig\n"
+        'EXTRA="--dpi-desync-repeats=11"\n'
+        "AUTOTTL_ARG=10-20\n"
+        "TTL_ARG=64\n",
+        encoding="utf-8",
+    )
+
+    proc = run_profile_set(
+        etc,
+        "default",
+        "--desync",
+        "multisplit",
+        "--fooling",
+        "none",
+        "--extra",
+        "--dpi-desync-split-pos=1 --dpi-desync-fwmark=$NFQWS_MARK",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    assert proc.stderr == ""
+    text = conf.read_text(encoding="utf-8")
+    assert "# комментарий владельца" in text
+    assert "QNUM=200" in text
+    assert "NFQWS_MARK=0x80000" in text
+    assert 'DESYNC="multisplit"' in text
+    assert 'FOOLING="none"' in text
+    assert '$NFQWS_MARK' in text
+    # Неуказанные optional-ключи не стираются.
+    assert "AUTOTTL_ARG=10-20" in text
+    assert "TTL_ARG=64" in text
+
+
+def test_profile_set_updates_profile_and_optional_keys(tmp_path):
+    etc = tmp_path / "etc"
+    profiles = etc / "zapret.d"
+    profiles.mkdir(parents=True)
+    conf = profiles / "split.conf"
+    conf.write_text(
+        "LIST=dpi-split.txt\nQNUM=201\nDESYNC=multisplit\n"
+        "FOOLING=none\nAUTOTTL_ARG=\nTTL_ARG=\nEXTRA=\n",
+        encoding="utf-8",
+    )
+
+    proc = run_profile_set(
+        etc,
+        "split",
+        "--desync",
+        "hostfakesplit",
+        "--fooling",
+        "md5sig",
+        "--extra",
+        "--dpi-desync-split-pos=1",
+        "--autottl",
+        "1-2",
+        "--ttl",
+        "5",
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    text = conf.read_text(encoding="utf-8")
+    assert "LIST=dpi-split.txt" in text
+    assert "QNUM=201" in text
+    assert 'DESYNC="hostfakesplit"' in text
+    assert 'FOOLING="md5sig"' in text
+    assert 'AUTOTTL_ARG="1-2"' in text
+    assert 'TTL_ARG="5"' in text
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("default", "--desync", "evil", "--fooling", "none", "--extra", ""),
+        ("default", "--desync", "multisplit", "--fooling", "evil", "--extra", ""),
+        ("default", "--desync", "multisplit", "--fooling", "none", "--extra", "x;id"),
+        ("default", "--desync", "multisplit", "--fooling", "none", "--extra", "x$(id)"),
+        ("default", "--desync", "multisplit", "--fooling", "none", "--extra", "x`id`"),
+        ("default", "--desync", "multisplit", "--fooling", "none"),
+        ("../split", "--desync", "multisplit", "--fooling", "none", "--extra", ""),
+    ],
+)
+def test_profile_set_rejects_invalid_values(tmp_path, args):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    conf = etc / "zapret.conf"
+    original = "DESYNC=fake,multidisorder\nFOOLING=md5sig\n"
+    conf.write_text(original, encoding="utf-8")
+
+    proc = run_profile_set(etc, *args)
+
+    assert proc.returncode == 1, (args, proc.stdout, proc.stderr)
+    assert proc.stderr.startswith("routeweave-zapret-profile-set:"), proc.stderr
+    assert conf.read_text(encoding="utf-8") == original
+
+
+def test_profile_set_requires_existing_profile(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "zapret.conf").write_text("DESYNC=fake,multidisorder\n", encoding="utf-8")
+    (etc / "zapret.d").mkdir()
+
+    proc = run_profile_set(
+        etc, "split", "--desync", "multisplit", "--fooling", "none", "--extra", ""
+    )
+
+    assert proc.returncode == 1
+    assert "не найден" in proc.stderr

@@ -110,6 +110,10 @@ for unit in mihomo zapret-nfqws routeweave-firewall routeweave-panel; do
   section "systemctl show NRestarts,ActiveEnterTimestamp ($unit)" \
     systemctl show -p NRestarts,ActiveEnterTimestamp "$unit"
 done
+# Экземпляры профилей: их имена заранее неизвестны, поэтому списком, а не
+# фиксированным перечнем.
+section_pipe "systemctl list-units zapret-nfqws@*" \
+  "systemctl list-units 'zapret-nfqws@*.service' --all --no-legend --no-pager"
 
 # Сторож: его проверка показывает, видит ли он сам поломку, а журнал — что он
 # уже пытался чинить. Проверка ходит в сеть (пробы трафика), поэтому таймаут
@@ -118,8 +122,8 @@ section_pipe "Сторож: $GUARD check" "timeout 25 '$GUARD' check" 30
 section "journalctl -u routeweave-guard -n 30" \
   journalctl -u routeweave-guard -n 30 -o short-iso
 
-section_pipe "journalctl -u mihomo -u zapret-nfqws -u routeweave-firewall" \
-  "journalctl -u mihomo -u zapret-nfqws -u routeweave-firewall --since '-10 min' -o short-iso | tail -n 300"
+section_pipe "journalctl -u mihomo -u zapret-nfqws -u zapret-nfqws@* -u routeweave-firewall" \
+  "journalctl -u mihomo -u zapret-nfqws -u 'zapret-nfqws@*' -u routeweave-firewall --since '-10 min' -o short-iso | tail -n 300"
 
 size=$(wc -c <"$DUMP")
 truncated=0

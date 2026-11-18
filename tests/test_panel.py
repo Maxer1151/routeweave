@@ -673,12 +673,14 @@ def test_apply_runs_in_background_and_reports_job(panel):
     assert ["sudo", "-n", "/usr/local/sbin/routeweave-update-lists.sh"] in panel.calls
 
 
-def test_apply_dpi_restarts_zapret(panel):
+def test_apply_dpi_uses_zapret_apply(panel):
     response = panel.client.post("/api/lists/dpi/apply", auth=AUTH)
     assert response.status_code == 200
     job = panel.client.get("/api/jobs/apply", auth=AUTH).json()
     assert job["ok"] is True
-    assert ["sudo", "-n", "systemctl", "restart", "zapret-nfqws"] in panel.calls
+    assert ["sudo", "-n", panel.module.ZAPRET_APPLY] in panel.calls
+    # updater запускается внутри helper'а, а не отдельным вызовом панели.
+    assert ["sudo", "-n", panel.module.UPDATER] not in panel.calls
 
 
 def test_apply_conflict_when_running(panel):
@@ -1113,3 +1115,344 @@ def test_sudo_failure_returns_502(etc, monkeypatch):
     response = client.post("/api/restart/mihomo", auth=AUTH)
     assert response.status_code == 502
     assert "пароль не требуется" in response.json()["detail"]
+
+
+# ---------------- Профили zapret: API и стратегии ----------------
+
+def write_default_zapret(panel, extra: str = "") -> Path:
+    path = panel.etc / "zapret.conf"
+    path.write_text(
+        "# default\n"
+        "QNUM=200\n"
+        "DESYNC=fake,multidisorder\n"
+        "FOOLING=md5sig\n"
+        'EXTRA="--dpi-desync-repeats=11"\n'
+        "AUTOTTL_ARG=\n"
+        "TTL_ARG=\n" + extra,
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_zapret_profile(
+    panel,
+    name: str = "split",
+    list_name: str = "dpi-split.txt",
+    qnum: str = "201",
+    desync: str = "multisplit",
+    fooling: str = "none",
+    extra: str = "--dpi-desync-split-pos=1",
+) -> Path:
+    profile_dir = panel.etc / "zapret.d"
+    profile_dir.mkdir(exist_ok=True)
+    path = profile_dir / f"{name}.conf"
+    path.write_text(
+        f"LIST={list_name}\nQNUM={qnum}\nDESYNC={desync}\nFOOLING={fooling}\n"
+        f'EXTRA="{extra}"\nAUTOTTL_ARG=\nTTL_ARG=\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_zapret_profiles_get_default_and_profile(panel):
+    write_default_zapret(panel)
+    write_zapret_profile(panel)
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["warnings"] == []
+    assert [item["name"] for item in data["profiles"]] == ["default", "split"]
+
+    default, split = data["profiles"]
+    assert default == {
+        "name": "default",
+        "list": "dpi.txt",
+        "qnum": "200",
+        "desync": "fake,multidisorder",
+        "fooling": "md5sig",
+        "extra": "--dpi-desync-repeats=11",
+        "autottl": "",
+        "ttl": "",
+        "unit": "zapret-nfqws",
+        "active": "active",
+        "order": 0,
+    }
+    assert split["name"] == "split"
+    assert split["list"] == "dpi-split.txt"
+    assert split["qnum"] == "201"
+    assert split["unit"] == "zapret-nfqws@split"
+    assert split["order"] == 1
+    assert "error" not in split
+
+
+def test_zapret_profiles_broken_profile_is_not_500(panel):
+    write_default_zapret(panel)
+    profile_dir = panel.etc / "zapret.d"
+    profile_dir.mkdir()
+    (profile_dir / "broken.conf").write_text("LIST=dpi-split.txt\nQNUM=201\n", encoding="utf-8")
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    broken = response.json()["profiles"][1]
+    assert broken["name"] == "broken"
+    assert "DESYNC" in broken["error"]
+
+
+def test_zapret_profiles_get_without_conf_has_error(panel):
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    default = response.json()["profiles"][0]
+    assert default["list"] == "dpi.txt"
+    assert "zapret.conf" in default["error"]
+
+
+def test_zapret_profile_put_default_uses_helper_and_keeps_file(panel):
+    conf = write_default_zapret(panel)
+    before = conf.read_bytes()
+
+    response = panel.client.put(
+        "/api/zapret/profiles/default",
+        json={
+            "desync": "multisplit",
+            "fooling": "none",
+            "extra": "--dpi-desync-split-pos=1 --dpi-desync-fwmark=$NFQWS_MARK",
+        },
+        auth=AUTH,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert response.json()["profile"]["name"] == "default"
+    assert conf.read_bytes() == before, "панель не должна писать zapret.conf напрямую"
+    assert [
+        "sudo",
+        "-n",
+        panel.module.ZAPRET_PROFILE_SET,
+        "default",
+        "--desync",
+        "multisplit",
+        "--fooling",
+        "none",
+        "--extra",
+        "--dpi-desync-split-pos=1 --dpi-desync-fwmark=$NFQWS_MARK",
+    ] in panel.calls
+
+
+def test_zapret_profile_put_named_profile_uses_helper(panel):
+    write_default_zapret(panel)
+    conf = write_zapret_profile(panel)
+    before = conf.read_bytes()
+
+    response = panel.client.put(
+        "/api/zapret/profiles/split",
+        json={
+            "desync": "hostfakesplit",
+            "fooling": "md5sig",
+            "extra": "--dpi-desync-split-pos=1",
+            "autottl": "1-2",
+            "ttl": "5",
+        },
+        auth=AUTH,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["profile"]["name"] == "split"
+    assert conf.read_bytes() == before, "панель не должна писать профиль напрямую"
+    call = next(
+        item for item in panel.calls if panel.module.ZAPRET_PROFILE_SET in item
+    )
+    assert call == [
+        "sudo",
+        "-n",
+        panel.module.ZAPRET_PROFILE_SET,
+        "split",
+        "--desync",
+        "hostfakesplit",
+        "--fooling",
+        "md5sig",
+        "--extra",
+        "--dpi-desync-split-pos=1",
+        "--autottl",
+        "1-2",
+        "--ttl",
+        "5",
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"desync": "evil", "fooling": "none", "extra": ""},
+        {"desync": "multisplit", "fooling": "evil", "extra": ""},
+        {"desync": "multisplit", "fooling": "none", "extra": "x;id"},
+        {"desync": "multisplit", "fooling": "none", "extra": "x$(id)"},
+        {"desync": "multisplit", "fooling": "none", "extra": "x`id`"},
+        {"desync": "multisplit", "fooling": "none"},
+        {"desync": 1, "fooling": "none", "extra": ""},
+    ],
+)
+def test_zapret_profile_put_rejects_invalid_values(panel, payload):
+    write_default_zapret(panel)
+
+    response = panel.client.put(
+        "/api/zapret/profiles/default", json=payload, auth=AUTH
+    )
+
+    assert response.status_code == 400, response.text
+    assert not any(panel.module.ZAPRET_PROFILE_SET in call for call in panel.calls)
+
+
+def test_zapret_profile_put_body_limit(panel):
+    write_default_zapret(panel)
+
+    response = panel.client.put(
+        "/api/zapret/profiles/default",
+        content=b"{" + b"x" * 5000,
+        auth=AUTH,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Тело запроса больше 4 КБ"
+
+
+@pytest.mark.parametrize("name", ["split", "Bad", "../split"])
+def test_zapret_profile_put_unknown_404(panel, name):
+    write_default_zapret(panel)
+
+    response = panel.client.put(
+        f"/api/zapret/profiles/{name}",
+        json={"desync": "multisplit", "fooling": "none", "extra": ""},
+        auth=AUTH,
+    )
+
+    assert response.status_code == 404
+
+
+def test_zapret_profile_put_helper_failure_502(etc, monkeypatch):
+    def failing(args, timeout=60):
+        if "is-active" in args:
+            return subprocess.CompletedProcess(args, 0, "active\n", "")
+        if any("routeweave-zapret-profile-set.sh" in arg for arg in args):
+            return subprocess.CompletedProcess(args, 1, "", "helper: bad value")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    module, client, _ = make_client(monkeypatch, handler=failing)
+    (etc / "zapret.conf").write_text(
+        "QNUM=200\nDESYNC=fake,multidisorder\nFOOLING=md5sig\n", encoding="utf-8"
+    )
+
+    response = client.put(
+        "/api/zapret/profiles/default",
+        json={"desync": "multisplit", "fooling": "none", "extra": ""},
+        auth=AUTH,
+    )
+
+    assert response.status_code == 502
+    assert "helper: bad value" in response.json()["detail"]
+
+
+def test_dpi_split_list_get_missing_is_empty(panel):
+    response = panel.client.get("/api/lists/dpi-split", auth=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"name": "dpi-split", "content": ""}
+
+
+def test_dpi_split_list_put_writes_file(panel):
+    response = panel.client.put(
+        "/api/lists/dpi-split", content="+.reddit.com\n+.workers.dev\n", auth=AUTH
+    )
+
+    assert response.status_code == 200, response.text
+    assert (panel.etc / "lists" / "dpi-split.txt").read_text(encoding="utf-8") == (
+        "+.reddit.com\n+.workers.dev\n"
+    )
+
+
+def test_apply_dpi_split_uses_zapret_apply(panel):
+    response = panel.client.post("/api/lists/dpi-split/apply", auth=AUTH)
+    assert response.status_code == 200
+
+    job = panel.client.get("/api/jobs/apply", auth=AUTH).json()
+    assert job["ok"] is True
+    assert ["sudo", "-n", panel.module.ZAPRET_APPLY] in panel.calls
+    assert ["sudo", "-n", panel.module.UPDATER] not in panel.calls
+
+
+def test_zapret_apply_endpoint_uses_job(panel):
+    response = panel.client.post("/api/zapret/apply", auth=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"started": True}
+
+    job = panel.client.get("/api/jobs/apply", auth=AUTH).json()
+    assert job["running"] is False
+    assert job["ok"] is True
+    assert ["sudo", "-n", panel.module.ZAPRET_APPLY] in panel.calls
+
+
+def test_zapret_warnings_intersection(panel):
+    write_default_zapret(panel)
+    write_zapret_profile(panel)
+    (panel.etc / "lists" / "dpi.txt").write_text(
+        "+.reddit.com\n+.www.reddit.com\n+.youtube.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "dpi-split.txt").write_text(
+        "+.reddit.com\n+.workers.dev\n", encoding="utf-8"
+    )
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    warnings = response.json()["warnings"]
+    assert warnings == [
+        "домен reddit.com есть и в dpi.txt, и в dpi-split.txt — его обработает "
+        "default (он первый); уберите из одного списка",
+        "домен www.reddit.com есть и в dpi.txt, и в dpi-split.txt — его обработает "
+        "default (он первый); уберите из одного списка",
+    ]
+
+
+def test_probe_reddit_direct(panel, monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return FakeResponse()
+
+    monkeypatch.setattr(panel.module.httpx, "Client", FakeClient)
+
+    result = panel.module.probe_reddit_direct()
+
+    assert result["ok"] is True
+    assert "HTTP 200" in result["detail"]
+    assert "direct+zapret" in result["detail"]
+    assert requests == [("https://www.reddit.com/", {"follow_redirects": False})]
+    assert panel.module.PROBES["reddit_direct"] is panel.module.probe_reddit_direct
+
+
+def test_static_has_dpi_split_and_strategy_controls(panel):
+    html = panel.client.get("/", auth=AUTH).text
+    js = panel.client.get("/static/app.js", auth=AUTH).text
+
+    assert 'data-list="dpi-split"' in html
+    assert 'id="strategy-card"' in html
+    assert 'id="strategy-desync"' in html
+    assert 'id="strategy-extra"' in html
+    assert "'dpi-split'" in js
+    assert "reddit_direct" in js
+    assert "zapretProfiles" in js

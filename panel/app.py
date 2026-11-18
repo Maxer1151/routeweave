@@ -6,8 +6,11 @@
 ``/etc/sudoers.d/routeweave-panel``: ``systemctl restart`` для mihomo,
 zapret-nfqws и самой панели, запуск routeweave-lists-update.service и
 helper-скрипты в ``/usr/local/sbin`` (состояние tg-ws-proxy и Tailscale,
-диагностический снимок состояния). Прямых обращений к Docker-сокету и
-запусков systemctl/docker без sudo в коде нет.
+диагностический снимок состояния, применение профилей zapret). Стратегии
+default/профилей пишутся только через root-helper
+``routeweave-zapret-profile-set.sh``: панель не редактирует zapret.conf
+напрямую. Прямых обращений к Docker-сокету и запусков systemctl/docker без
+sudo в коде нет.
 
 Каталог конфигурации задаётся переменной окружения ``ROUTEWEAVE_ETC``
 (по умолчанию системный каталог routeweave). Доступ только по
@@ -44,6 +47,8 @@ logger = logging.getLogger("routeweave")
 ETC = Path(os.environ.get("ROUTEWEAVE_ETC", "/etc/routeweave"))
 ENV_FILE = ETC / ".env"
 LISTS_DIR = ETC / "lists"
+ZAPRET_CONF = ETC / "zapret.conf"
+PROFILE_DIR = ETC / "zapret.d"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DIAG_DIR = Path(os.environ.get("ROUTEWEAVE_DIAG_DIR", "/var/log/routeweave"))
 DIAG_LAST = "last-dump.txt"
@@ -51,10 +56,13 @@ DIAG_LAST = "last-dump.txt"
 LISTS = {
     "geo-custom": "geo-custom.txt",
     "dpi": "dpi.txt",
+    "dpi-split": "dpi-split.txt",
     "ru-custom": "ru-direct-custom.txt",
 }
 
 UPDATER = "/usr/local/sbin/routeweave-update-lists.sh"
+ZAPRET_APPLY = "/usr/local/sbin/routeweave-zapret-apply.sh"
+ZAPRET_PROFILE_SET = "/usr/local/sbin/routeweave-zapret-profile-set.sh"
 TGWS_RESTART = "/usr/local/sbin/routeweave-tgws-restart.sh"
 TGWS_STATE = "/usr/local/sbin/routeweave-tgws-state.sh"
 TAILSCALE_STATE = "/usr/local/sbin/routeweave-tailscale-state.sh"
@@ -65,10 +73,24 @@ TGWS_PORT = 1443
 
 MAX_LIST_BYTES = 200_000
 MAX_DUMP_BYTES = 262_144
+MAX_PROFILE_BYTES = 4096
 DIAG_DUMP_NAME_RE = re.compile(r"dump-\d{8}-\d{6}\.txt")
 DOMAIN_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 DOMAIN_TLD_RE = re.compile(r"[a-z]{2,63}")
 DOMAIN_PREFIXES = ("+.", "*.")
+
+# Профиль zapret — те же ограничения, что в nfqws-launch.sh и helper'е.
+PROFILE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,15}")
+PROFILE_LIST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+PROFILE_EXTRA_RE = re.compile(r"[A-Za-z0-9 _.,:=/+@%-]*")
+# fake — штатная стратегия шаблона zapret.conf (fake,multidisorder).
+DESYNC_VALUES = frozenset(
+    "fake multisplit multidisorder fakedsplit fakeddisorder hostfakesplit "
+    "ipfrag2 udplen tamper".split()
+)
+FOOLING_VALUES = frozenset(
+    "none md5sig badseq badsum datanoack ts hopbyhop hopbyhop2".split()
+)
 SOCKS_SCHEMES = {"socks5", "socks5h", "socks", "http", "https"}
 
 SECURITY_HEADERS = {
@@ -596,6 +618,24 @@ def probe_youtube_direct() -> dict:
         }
 
 
+def probe_reddit_direct() -> dict:
+    """Reddit идёт через split-профиль zapret: проверяем прямой путь."""
+    try:
+        started = time.monotonic()
+        with httpx.Client(timeout=10) as client:  # без прокси: direct + split-профиль
+            response = client.get("https://www.reddit.com/", follow_redirects=False)
+        elapsed = int((time.monotonic() - started) * 1000)
+        return {
+            "ok": response.status_code in (200, 301, 302, 403),
+            "detail": f"HTTP {response.status_code}, {elapsed} мс (direct+zapret)",
+        }
+    except (httpx.HTTPError, OSError) as exc:
+        return {
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {exc} — split-профиль не спасает или Reddit ушёл из списка",
+        }
+
+
 def probe_tg_local() -> dict:
     if not tgws_enabled():
         return {"ok": True, "detail": "tg-ws-proxy не установлен (опциональный компонент)", "skipped": True}
@@ -628,6 +668,7 @@ PROBES = {
     "chatgpt_via_socks": probe_socks_chatgpt,
     "socks_exit_ip": probe_socks_exit_ip,
     "youtube_direct": probe_youtube_direct,
+    "reddit_direct": probe_reddit_direct,
     "tg_ws_proxy": probe_tg_local,
     "cf_worker": probe_worker,
 }
@@ -1144,6 +1185,318 @@ def _read_list_file(path: Path) -> str:
         raise HTTPException(400, "Список должен быть в кодировке UTF-8") from exc
 
 
+# ---------------- Профили zapret ----------------
+
+ZAPRET_CONF_KEYS = ("QNUM", "DESYNC", "FOOLING", "EXTRA", "AUTOTTL_ARG", "TTL_ARG")
+PROFILE_CONF_KEYS = ("LIST",) + ZAPRET_CONF_KEYS
+
+
+def _read_conf_values(path: Path, keys: tuple[str, ...]) -> dict[str, str] | None:
+    """Читает KEY=VALUE без source. None — файла нет, он не читается или не обычный файл."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+        os.close(fd)
+        return None
+    values = {key: "" for key in keys}
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key = key.strip()
+                if key not in values:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                values[key] = value
+    except OSError:
+        return None
+    return values
+
+
+def _add_profile_error(entry: dict, message: str) -> None:
+    entry["error"] = f"{entry['error']}; {message}" if entry.get("error") else message
+
+
+def _default_profile() -> dict:
+    values = _read_conf_values(ZAPRET_CONF, ZAPRET_CONF_KEYS)
+    entry = {
+        "name": "default",
+        "list": LISTS["dpi"],
+        "qnum": "",
+        "desync": "",
+        "fooling": "",
+        "extra": "",
+        "autottl": "",
+        "ttl": "",
+        "unit": "zapret-nfqws",
+        "active": svc_active("zapret-nfqws"),
+        "order": 0,
+    }
+    if values is None:
+        _add_profile_error(entry, "zapret.conf не найден или не читается")
+        return entry
+    entry.update(
+        qnum=values["QNUM"],
+        desync=values["DESYNC"],
+        fooling=values["FOOLING"],
+        extra=values["EXTRA"],
+        autottl=values["AUTOTTL_ARG"],
+        ttl=values["TTL_ARG"],
+    )
+    if not values["QNUM"] or not values["QNUM"].isdigit():
+        _add_profile_error(entry, "QNUM не задан или не число")
+    if not values["DESYNC"]:
+        _add_profile_error(entry, "DESYNC не задан")
+    return entry
+
+
+def _profile_entry(name: str, path: Path, order: int) -> dict:
+    entry = {
+        "name": name,
+        "list": "",
+        "qnum": "",
+        "desync": "",
+        "fooling": "",
+        "extra": "",
+        "autottl": "",
+        "ttl": "",
+        "unit": f"zapret-nfqws@{name}",
+        "active": svc_active(f"zapret-nfqws@{name}"),
+        "order": order,
+    }
+    values = _read_conf_values(path, PROFILE_CONF_KEYS)
+    if values is None:
+        _add_profile_error(entry, "файл не читается или не обычный файл")
+        return entry
+    entry.update(
+        list=values["LIST"],
+        qnum=values["QNUM"],
+        desync=values["DESYNC"],
+        fooling=values["FOOLING"],
+        extra=values["EXTRA"],
+        autottl=values["AUTOTTL_ARG"],
+        ttl=values["TTL_ARG"],
+    )
+    missing = [key for key in ("LIST", "QNUM", "DESYNC") if not values[key]]
+    if missing:
+        _add_profile_error(entry, "не заданы: " + ", ".join(missing))
+    if values["QNUM"] and not values["QNUM"].isdigit():
+        _add_profile_error(entry, "QNUM не число")
+    if values["LIST"] and (
+        not PROFILE_LIST_RE.fullmatch(values["LIST"]) or ".." in values["LIST"]
+    ):
+        _add_profile_error(entry, "недопустимый LIST")
+    return entry
+
+
+def _zapret_profiles() -> list[dict]:
+    profiles = [_default_profile()]
+    try:
+        candidates = sorted(PROFILE_DIR.glob("*.conf"), key=lambda item: item.name)
+    except OSError:
+        candidates = []
+    for path in candidates:
+        if path.is_symlink() or not path.is_file():
+            logger.warning("zapret: пропущен профиль %s (симлинк или не файл)", path.name)
+            continue
+        name = path.name[: -len(".conf")]
+        if not PROFILE_NAME_RE.fullmatch(name):
+            logger.warning("zapret: пропущен профиль с недопустимым именем %s", path.name)
+            continue
+        profiles.append(_profile_entry(name, path, len(profiles)))
+    seen: dict[str, str] = {}
+    default_qnum = profiles[0]["qnum"]
+    if default_qnum.isdigit():
+        seen[default_qnum] = "default"
+    for entry in profiles[1:]:
+        qnum = entry["qnum"]
+        if not qnum.isdigit():
+            continue
+        if qnum in seen:
+            _add_profile_error(entry, f"QNUM {qnum} уже занят ({seen[qnum]})")
+        else:
+            seen[qnum] = entry["name"]
+    return profiles
+
+
+def _normalize_domains(text: str) -> set[str]:
+    domains: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip().lower()
+        if not line or line.startswith("#"):
+            continue
+        for prefix in DOMAIN_PREFIXES + (".",):
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                break
+        if line:
+            domains.add(line)
+    return domains
+
+
+def _domain_covered(entry: str, parent: str) -> bool:
+    return entry == parent or entry.endswith("." + parent)
+
+
+def _warning_list_text(name: str) -> str:
+    if not name or ".." in name or not PROFILE_LIST_RE.fullmatch(name):
+        return ""
+    try:
+        return _read_list_file(LISTS_DIR / name)
+    except HTTPException:
+        return ""
+
+
+def _zapret_warnings(profiles: list[dict]) -> list[str]:
+    """Пересечения dpi.txt с профильными списками: default забирает домен первым."""
+    dpi = _normalize_domains(_warning_list_text(LISTS["dpi"]))
+    if not dpi:
+        return []
+    warnings: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in profiles[1:]:
+        list_name = entry.get("list", "")
+        if not list_name or list_name == LISTS["dpi"]:
+            continue
+        profile_domains = _normalize_domains(_warning_list_text(list_name))
+        if not profile_domains:
+            continue
+        for domain in sorted(dpi):
+            if not any(
+                _domain_covered(domain, own) or _domain_covered(own, domain)
+                for own in profile_domains
+            ):
+                continue
+            key = (list_name, domain)
+            if key in seen:
+                continue
+            seen.add(key)
+            warnings.append(
+                f"домен {domain} есть и в dpi.txt, и в {list_name} — его обработает "
+                "default (он первый); уберите из одного списка"
+            )
+    return warnings
+
+
+def _enum_value_ok(value: str, allowed: frozenset[str]) -> bool:
+    if not value or len(value) > 128:
+        return False
+    return all(part in allowed for part in value.split(","))
+
+
+def _extra_value_ok(value: str) -> bool:
+    if len(value) > 1024 or "\n" in value or "\r" in value:
+        return False
+    # Литерал $NFQWS_MARK подставляет лаунчер; для проверки символов заменяем
+    # его числом. Любой другой '$' останется и будет отклонён.
+    probe = value.replace("$NFQWS_MARK", "0x0")
+    return PROFILE_EXTRA_RE.fullmatch(probe) is not None
+
+
+def _validate_strategy_payload(data: dict) -> dict[str, str]:
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Тело запроса должно быть JSON-объектом")
+    for key in ("desync", "fooling", "extra"):
+        if key not in data:
+            raise HTTPException(400, f"Поле {key} обязательно")
+        if not isinstance(data[key], str):
+            raise HTTPException(400, f"Поле {key} должно быть строкой")
+    desync = data["desync"]
+    fooling = data["fooling"]
+    extra = data["extra"]
+    if not _enum_value_ok(desync, DESYNC_VALUES):
+        raise HTTPException(400, "DESYNC: недопустимая стратегия")
+    if not _enum_value_ok(fooling, FOOLING_VALUES):
+        raise HTTPException(400, "FOOLING: недопустимое значение")
+    if not _extra_value_ok(extra):
+        raise HTTPException(400, "EXTRA: недопустимые символы")
+    result = {"desync": desync, "fooling": fooling, "extra": extra}
+    for key in ("autottl", "ttl"):
+        if key not in data:
+            continue
+        if not isinstance(data[key], str):
+            raise HTTPException(400, f"Поле {key} должно быть строкой")
+        if not _extra_value_ok(data[key]):
+            raise HTTPException(400, f"{key.upper()}: недопустимые символы")
+        result[key] = data[key]
+    return result
+
+
+@app.get("/api/zapret/profiles")
+def api_zapret_profiles():
+    profiles = _zapret_profiles()
+    return {"profiles": profiles, "warnings": _zapret_warnings(profiles)}
+
+
+@app.put("/api/zapret/profiles/{name}")
+async def api_zapret_profile_put(name: str, request: Request):
+    if name == "default":
+        target = ZAPRET_CONF
+    else:
+        if not PROFILE_NAME_RE.fullmatch(name):
+            raise HTTPException(404, "Неизвестный профиль")
+        target = PROFILE_DIR / f"{name}.conf"
+    if target.is_symlink() or not target.is_file():
+        raise HTTPException(404, "Неизвестный профиль")
+
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared and len(declared) <= 12:
+        try:
+            if int(declared) > MAX_PROFILE_BYTES:
+                raise HTTPException(413, "Тело запроса больше 4 КБ")
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_PROFILE_BYTES:
+            raise HTTPException(413, "Тело запроса больше 4 КБ")
+        chunks.append(chunk)
+    try:
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "Тело запроса должно быть корректным JSON") from exc
+
+    values = _validate_strategy_payload(data)
+    args = [
+        ZAPRET_PROFILE_SET,
+        name,
+        "--desync",
+        values["desync"],
+        "--fooling",
+        values["fooling"],
+        "--extra",
+        values["extra"],
+    ]
+    if "autottl" in values:
+        args += ["--autottl", values["autottl"]]
+    if "ttl" in values:
+        args += ["--ttl", values["ttl"]]
+    result = sudo_run(args, timeout=30)
+    if result.returncode != 0:
+        raise _sudo_error(result, "Не удалось сохранить стратегию")
+
+    profiles = _zapret_profiles()
+    entry = next((item for item in profiles if item["name"] == name), None)
+    return {"ok": True, "profile": entry, "warnings": _zapret_warnings(profiles)}
+
+
 @app.get("/api/lists/{name}")
 def api_list_get(name: str):
     path = _list_path(name)
@@ -1219,18 +1572,20 @@ def _run_apply(name: str) -> None:
     """Обновляет списки и перезапускает нужный компонент; статус — в JOB."""
     try:
         _job_update(running=True, started_at=_utcnow(), finished_at=None, ok=None, detail="Применение...")
-        result = sudo_run([UPDATER], timeout=180)
-        detail = _tail((result.stdout or "") + ("\n" + result.stderr if result.stderr else ""))
-        ok = result.returncode == 0
-        if ok and name == "dpi":
-            restart = sudo_run(["systemctl", "restart", "zapret-nfqws"], timeout=60)
-            if restart.returncode != 0:
-                ok = False
-                detail = _tail(detail + "\nzapret-nfqws: " + (restart.stderr or restart.stdout))
-            else:
-                detail = _tail(detail + "\nzapret-nfqws перезапущен")
-        elif ok:
-            detail = _tail(detail + "\nmihomo перечитал списки")
+        if name in ("dpi", "dpi-split", "zapret"):
+            # ZAPRET_APPLY сам запускает updater и перезапускает default и все
+            # профили; отдельный updater здесь дал бы двойной запуск.
+            result = sudo_run([ZAPRET_APPLY], timeout=180)
+            detail = _tail((result.stdout or "") + ("\n" + result.stderr if result.stderr else ""))
+            ok = result.returncode == 0
+            if ok:
+                detail = _tail(detail + "\nсписки обновлены, zapret-nfqws и профили перезапущены")
+        else:
+            result = sudo_run([UPDATER], timeout=180)
+            detail = _tail((result.stdout or "") + ("\n" + result.stderr if result.stderr else ""))
+            ok = result.returncode == 0
+            if ok:
+                detail = _tail(detail + "\nmihomo перечитал списки")
         _job_update(ok=ok, detail=detail or ("Готово" if ok else "Обновление списков не удалось"))
     except Exception as exc:
         logger.exception("Ошибка применения списков %s", name)
@@ -1239,9 +1594,7 @@ def _run_apply(name: str) -> None:
         _job_update(running=False, finished_at=_utcnow())
 
 
-@app.post("/api/lists/{name}/apply")
-def api_list_apply(name: str, background: BackgroundTasks):
-    _list_path(name)
+def _start_apply_job(name: str, background: BackgroundTasks) -> dict:
     try:
         with JOB_LOCK:
             # Состояние живёт в памяти процесса и после рестарта всегда False:
@@ -1257,6 +1610,17 @@ def api_list_apply(name: str, background: BackgroundTasks):
             JOB["running"] = False
         raise
     return {"started": True}
+
+
+@app.post("/api/lists/{name}/apply")
+def api_list_apply(name: str, background: BackgroundTasks):
+    _list_path(name)
+    return _start_apply_job(name, background)
+
+
+@app.post("/api/zapret/apply")
+def api_zapret_apply(background: BackgroundTasks):
+    return _start_apply_job("zapret", background)
 
 
 @app.get("/api/jobs/apply")

@@ -211,8 +211,8 @@ zapret он не отключает.
 одном воркере: состояние заданий и кэш `/api/status` живут в памяти процесса,
 multi-worker не поддерживается. Юнит ограничен `MemoryMax=256M` и `TasksMax=64`.
 Панель работает от системного пользователя `routeweave`, а привилегированные
-действия (перезапуск mihomo/zapret/панели, обновление списков, управление tgws)
-выполняются через `sudo -n` строго по allowlist из
+действия (перезапуск mihomo/zapret/панели, обновление списков, управление tgws,
+запись стратегий zapret) выполняются через `sudo -n` строго по allowlist из
 `/etc/sudoers.d/routeweave-panel` — без wildcard.
 
 Проверка `Host` идёт до аутентификации: разрешены только `SERVER_IP`,
@@ -244,16 +244,34 @@ curl -u admin:ПАРОЛЬ -X PUT \
 Вкладки:
 
 - `geo-custom (→ SOCKS)` — пишет `geo-custom.txt`;
-- `dpi (→ zapret)` — пишет `dpi.txt`;
+- `dpi (→ zapret)` — пишет `dpi.txt` (стратегия default);
+- `dpi-split (→ zapret: split)` — пишет `dpi-split.txt` (стратегия профиля);
 - `ru-custom (→ direct)` — пишет `ru-direct-custom.txt`.
 
-Кнопка «Сохранить» только пишет файл. Кнопка «Сохранить, обновить списки и
-mihomo» запускает апдейтер (для `dpi` — перезапуск `zapret-nfqws`); применение
-выполняется в фоне, прогресс отдаёт `GET /api/jobs/apply`. Подсказка в панели
-напоминает, что `geo.txt` и `ru-direct.txt` генерируются таймером, поэтому
-править нужно custom-списки и `dpi.txt`. Zashboard панель не раздаёт: его
+Кнопка «Сохранить» только пишет файл. Кнопка «Сохранить и применить» запускает
+апдейтер (для `dpi` и `dpi-split` — helper `routeweave-zapret-apply.sh`, который
+перезапускает default и все `zapret-nfqws@*`); применение выполняется в фоне,
+прогресс отдаёт `GET /api/jobs/apply`. Подсказка в панели напоминает, что
+`geo.txt` и `ru-direct.txt` генерируются таймером, поэтому править нужно
+custom-списки, `dpi.txt` и `dpi-split.txt`. Zashboard панель не раздаёт: его
 отдаёт сам mihomo по `http://SERVER_IP:9090/ui/`, это отдельный origin, и CSP
 панели на него не распространяется.
+
+Под редактором `dpi`/`dpi-split` есть карточка стратегии: QNUM только для
+чтения, состояние юнита, DESYNC/FOOLING (select), EXTRA и кнопки сохранения и
+применения. Для default панель показывает `zapret-nfqws` и `dpi.txt`, для
+`dpi-split` — профиль из `zapret.d`, у которого `LIST=dpi-split.txt`. Стратегия
+пишется не напрямую, а через root-helper
+`/usr/local/sbin/routeweave-zapret-profile-set.sh`: он проверяет значения по
+белому списку и атомарно меняет только `DESYNC`/`FOOLING`/`EXTRA` (и
+необязательные `AUTOTTL_ARG`/`TTL_ARG`), сохраняя комментарии, права и
+владельца. API: `GET /api/zapret/profiles`, `PUT /api/zapret/profiles/{default|name}`,
+`POST /api/zapret/apply`.
+
+Если домен есть и в `dpi.txt`, и в списке профиля, панель показывает
+предупреждение и не блокирует сохранение: домен обработает default (он первый),
+поэтому его следует убрать из одного списка. Проба **Reddit** (`reddit_direct`)
+проверяет `https://www.reddit.com/` без прокси и ожидает 200/301/302/403.
 
 При заданном `TG_SECRET` панель показывает готовую ссылку
 `tg://proxy?server=<TG_LINK_IP|SERVER_IP>&port=1443&secret=<TG_SECRET>`.

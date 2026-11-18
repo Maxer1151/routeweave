@@ -23,6 +23,9 @@
     job: '/api/jobs/apply',
     list: (name) => '/api/lists/' + encodeURIComponent(name),
     apply: (name) => '/api/lists/' + encodeURIComponent(name) + '/apply',
+    zapretProfiles: '/api/zapret/profiles',
+    zapretProfile: (name) => '/api/zapret/profiles/' + encodeURIComponent(name),
+    zapretApply: '/api/zapret/apply',
     restart: (name) => '/api/restart/' + encodeURIComponent(name),
     diagDump: '/api/diagnostics/dump',
     diagLast: '/api/diagnostics/dump/last'
@@ -61,11 +64,12 @@
     chatgpt_via_socks: { label: 'ChatGPT через SOCKS' },
     socks_exit_ip: { label: 'Выходной IP SOCKS' },
     youtube_direct: { label: 'YouTube, direct + zapret' },
+    reddit_direct: { label: 'Reddit, direct + zapret' },
     tg_ws_proxy: { label: 'Telegram-прокси :1443' },
     cf_worker: { label: 'CF Worker' }
   };
 
-  const PROBE_ORDER = ['chatgpt_via_socks', 'socks_exit_ip', 'youtube_direct', 'tg_ws_proxy', 'cf_worker'];
+  const PROBE_ORDER = ['chatgpt_via_socks', 'socks_exit_ip', 'youtube_direct', 'reddit_direct', 'tg_ws_proxy', 'cf_worker'];
 
   const LIST_META = {
     'geo-custom': {
@@ -78,6 +82,11 @@
       desc: 'Домены, для которых zapret снимает DPI-блокировки.',
       applyHint: 'Применение обновляет списки и перезапускает zapret-nfqws.'
     },
+    'dpi-split': {
+      file: 'dpi-split.txt', route: '→ zapret: split',
+      desc: 'Домены, которые пробивает split-профиль (Reddit, Cloudflare/Workers).',
+      applyHint: 'Применение обновляет списки, перезапускает default и все профили.'
+    },
     'ru-custom': {
       file: 'ru-direct-custom.txt', route: '→ direct',
       desc: 'Домены, которые должны идти напрямую, минуя прокси.',
@@ -85,7 +94,10 @@
     }
   };
 
-  const LIST_ORDER = ['geo-custom', 'dpi', 'ru-custom'];
+  const LIST_ORDER = ['geo-custom', 'dpi', 'dpi-split', 'ru-custom'];
+
+  const DESYNC_OPTIONS = ['fake', 'multisplit', 'multidisorder', 'fakedsplit', 'fakeddisorder', 'hostfakesplit', 'ipfrag2', 'udplen', 'tamper'];
+  const FOOLING_OPTIONS = ['none', 'md5sig', 'badseq', 'badsum', 'datanoack', 'ts', 'hopbyhop', 'hopbyhop2'];
 
   /* ---------------- Состояние ---------------- */
 
@@ -104,7 +116,13 @@
     updatedAt: null,
     editorMessage: null,
     probeStartedAt: 0,
-    applyStartedAt: 0
+    applyStartedAt: 0,
+    zapretProfiles: null,
+    zapretWarnings: [],
+    zapretError: null,
+    zapretLoading: false,
+    strategySaving: false,
+    strategyMessage: null
   };
 
   const refs = {
@@ -128,6 +146,22 @@
     applyIcon: null,
     saveBtn: null,
     applyHint: null,
+    strategyCard: null,
+    strategyTitle: null,
+    strategyName: null,
+    strategyActive: null,
+    strategyDesc: null,
+    strategyList: null,
+    strategyQnum: null,
+    strategyUnit: null,
+    strategyDesync: null,
+    strategyFooling: null,
+    strategyExtra: null,
+    strategySave: null,
+    strategyApply: null,
+    strategyState: null,
+    strategyWarnings: null,
+    strategyWarningList: null,
     tgCard: null,
     tgList: null,
     tgOpen: null,
@@ -777,7 +811,7 @@
   function renderProbeSkeleton() {
     const body = refs.probeBody;
     body.textContent = '';
-    const names = PROBE_ORDER.slice(0, 5);
+    const names = PROBE_ORDER;
     for (const name of names) {
       body.appendChild(h('tr', { 'aria-hidden': 'true' },
         h('td', null,
@@ -999,9 +1033,11 @@
     if (!LIST_META[id] || id === state.currentList) return;
     state.currentList = id;
     state.editorMessage = null;
+    state.strategyMessage = null;
     renderTabs();
     renderEditor();
     if (!listState(id).loaded) loadList(id);
+    loadZapretProfiles();
     if (options && options.focusEditor) refs.editor.focus();
   }
 
@@ -1034,6 +1070,7 @@
     if (!state.applying) refs.applyBtn.disabled = !item.loaded;
 
     renderEditorMeta();
+    renderStrategy();
   }
 
   function renderEditorMeta() {
@@ -1122,6 +1159,241 @@
     updateBeforeUnload();
   }
 
+  /* ---------------- Стратегия профиля zapret ---------------- */
+
+  function profileForCurrentList() {
+    if (state.currentList === 'dpi') {
+      return (state.zapretProfiles || []).find((item) => item.name === 'default') || null;
+    }
+    if (state.currentList === 'dpi-split') {
+      return (state.zapretProfiles || []).find(
+        (item) => item.name !== 'default' && item.list === LIST_META['dpi-split'].file
+      ) || null;
+    }
+    return null;
+  }
+
+  function fillStrategySelect(select, options, current) {
+    const values = options.slice();
+    if (current && values.indexOf(current) === -1) values.push(current);
+    select.textContent = '';
+    for (const value of values) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+    if (current) select.value = current;
+  }
+
+  function setStrategyState(tone, text) {
+    refs.strategyState.dataset.tone = tone || '';
+    refs.strategyState.textContent = text || '';
+  }
+
+  function renderStrategyWarnings() {
+    const warnings = state.zapretWarnings || [];
+    refs.strategyWarnings.hidden = warnings.length === 0;
+    refs.strategyWarningList.textContent = '';
+    for (const text of warnings) {
+      refs.strategyWarningList.appendChild(h('li', { text: text }));
+    }
+  }
+
+  function renderStrategy() {
+    if (!refs.strategyCard) return;
+    const visible = state.currentList === 'dpi' || state.currentList === 'dpi-split';
+    refs.strategyCard.hidden = !visible;
+    if (!visible) return;
+
+    renderStrategyWarnings();
+    const busy = state.zapretLoading || state.applying || state.strategySaving;
+    const disabled = (value) => { value.disabled = busy; };
+
+    if (!state.zapretProfiles) {
+      refs.strategyTitle.textContent = 'Стратегия профиля';
+      refs.strategyName.textContent = '—';
+      refs.strategyDesc.textContent = 'Загрузка профилей zapret…';
+      refs.strategyList.textContent = '—';
+      refs.strategyQnum.textContent = '—';
+      refs.strategyUnit.textContent = '—';
+      setStrategyState('warn', 'Загрузка…');
+      disabled(refs.strategyDesync);
+      disabled(refs.strategyFooling);
+      disabled(refs.strategyExtra);
+      refs.strategySave.disabled = true;
+      refs.strategyApply.disabled = true;
+      return;
+    }
+
+    if (state.zapretError) {
+      refs.strategyTitle.textContent = 'Стратегия профиля';
+      refs.strategyName.textContent = '—';
+      refs.strategyDesc.textContent = 'Не удалось получить профили zapret.';
+      refs.strategyList.textContent = '—';
+      refs.strategyQnum.textContent = '—';
+      refs.strategyUnit.textContent = '—';
+      setStrategyState('bad', 'Ошибка: ' + truncate(state.zapretError, 160));
+      disabled(refs.strategyDesync);
+      disabled(refs.strategyFooling);
+      disabled(refs.strategyExtra);
+      refs.strategySave.disabled = true;
+      refs.strategyApply.disabled = true;
+      return;
+    }
+
+    const profile = profileForCurrentList();
+    if (!profile) {
+      refs.strategyTitle.textContent = 'Стратегия split-профиля';
+      refs.strategyName.textContent = '—';
+      refs.strategyActive.dataset.tone = 'warn';
+      refs.strategyActive.textContent = 'нет профиля';
+      refs.strategyDesc.textContent = 'В /etc/routeweave/zapret.d нет профиля со списком dpi-split.txt. Добавьте split.conf по примеру templates/zapret.d/split.conf.example и примените.';
+      refs.strategyList.textContent = LIST_META['dpi-split'].file;
+      refs.strategyQnum.textContent = '—';
+      refs.strategyUnit.textContent = '—';
+      setStrategyState('warn', 'Профиль не найден');
+      disabled(refs.strategyDesync);
+      disabled(refs.strategyFooling);
+      disabled(refs.strategyExtra);
+      refs.strategySave.disabled = true;
+      refs.strategyApply.disabled = busy;
+      return;
+    }
+
+    refs.strategyTitle.textContent = profile.name === 'default'
+      ? 'Стратегия default'
+      : 'Стратегия профиля';
+    refs.strategyName.textContent = profile.name;
+    refs.strategyDesc.textContent = profile.name === 'default'
+      ? 'default обслуживает dpi.txt и весь остальной трафик; домены профилей из его hostlist вычтены.'
+      : 'Профиль обслуживает ' + (profile.list || 'свой список') + '. На пересечении списков домен остаётся за default.';
+    refs.strategyList.textContent = profile.list || '—';
+    refs.strategyQnum.textContent = profile.qnum || '—';
+    refs.strategyUnit.textContent = profile.unit || '—';
+    const active = profile.active || 'unknown';
+    refs.strategyActive.dataset.tone = active === 'active' ? 'ok' : (active === 'failed' ? 'bad' : 'warn');
+    refs.strategyActive.textContent = active;
+
+    fillStrategySelect(refs.strategyDesync, DESYNC_OPTIONS, profile.desync || '');
+    fillStrategySelect(refs.strategyFooling, FOOLING_OPTIONS, profile.fooling || '');
+    if (document.activeElement !== refs.strategyExtra) {
+      refs.strategyExtra.value = profile.extra || '';
+    }
+
+    disabled(refs.strategyDesync);
+    disabled(refs.strategyFooling);
+    disabled(refs.strategyExtra);
+    refs.strategySave.disabled = busy || !!profile.error;
+    refs.strategyApply.disabled = busy;
+
+    if (state.strategySaving) {
+      setStrategyState('warn', 'Сохранение…');
+    } else if (profile.error) {
+      setStrategyState('bad', 'Профиль: ' + profile.error);
+    } else if (state.strategyMessage) {
+      setStrategyState(state.strategyMessage.tone, state.strategyMessage.text);
+    } else {
+      setStrategyState('ok', 'Стратегия загружена');
+    }
+  }
+
+  async function loadZapretProfiles(options) {
+    if (state.zapretLoading) return;
+    if (state.zapretProfiles && !(options && options.force)) return;
+    state.zapretLoading = true;
+    state.zapretError = null;
+    renderStrategy();
+    try {
+      const res = await api(API.zapretProfiles, { timeout: 15000 });
+      state.zapretProfiles = Array.isArray(res && res.profiles) ? res.profiles : [];
+      state.zapretWarnings = Array.isArray(res && res.warnings) ? res.warnings : [];
+    } catch (err) {
+      if (err.status !== 401) {
+        state.zapretError = err.message;
+        state.zapretProfiles = state.zapretProfiles || [];
+      }
+    } finally {
+      state.zapretLoading = false;
+      renderStrategy();
+    }
+  }
+
+  async function saveStrategy() {
+    if (state.strategySaving || state.applying) return;
+    const profile = profileForCurrentList();
+    if (!profile) {
+      toast('warn', 'Профиль не найден', 'Создайте профиль zapret для этого списка.');
+      return;
+    }
+    const payload = {
+      desync: refs.strategyDesync.value,
+      fooling: refs.strategyFooling.value,
+      extra: refs.strategyExtra.value,
+      autottl: profile.autottl || '',
+      ttl: profile.ttl || ''
+    };
+    state.strategySaving = true;
+    state.strategyMessage = null;
+    renderStrategy();
+    try {
+      const res = await api(API.zapretProfile(profile.name), {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+        timeout: 30000
+      });
+      if (res && Array.isArray(res.warnings)) state.zapretWarnings = res.warnings;
+      state.strategyMessage = { tone: 'ok', text: 'Сохранено · ' + timeNow() };
+      toast('ok', 'Стратегия сохранена', profile.name + ' · не забудьте применить изменения.');
+    } catch (err) {
+      if (err.status === 401) {
+        state.strategyMessage = { tone: 'bad', text: 'Требуется авторизация' };
+      } else {
+        state.strategyMessage = { tone: 'bad', text: 'Ошибка: ' + truncate(err.message, 160) };
+        toast('bad', 'Не удалось сохранить стратегию', err.message);
+      }
+    } finally {
+      state.strategySaving = false;
+      await loadZapretProfiles({ force: true });
+      renderStrategy();
+    }
+  }
+
+  async function applyStrategy() {
+    if (state.applying) return;
+    const profile = profileForCurrentList();
+    if (!profile) {
+      toast('warn', 'Профиль не найден', 'Создайте профиль zapret для этого списка.');
+      return;
+    }
+    const baselineTs = (state.probes && state.probes.ts) || null;
+    setApplyBusy(true, 'Применяется…');
+    startApplyTicker();
+    say('Применение стратегии zapret (' + profile.name + ')');
+    try {
+      const res = await api(API.zapretApply, { method: 'POST', timeout: APPLY_TIMEOUT_MS });
+      if (res && res.started === true) {
+        await pollApplyJob(baselineTs);
+      } else if (res && typeof res.ok === 'boolean') {
+        finishApply(res.ok, res.detail);
+      } else {
+        await syncMode(baselineTs);
+      }
+    } catch (err) {
+      if (err.status === 401) {
+        state.strategyMessage = { tone: 'bad', text: 'Требуется авторизация' };
+      } else {
+        finishApply(false, err.message);
+      }
+    } finally {
+      stopApplyTicker();
+      setApplyBusy(false, 'Сохранить и применить');
+      renderEditorMeta();
+      updateBeforeUnload();
+      loadStatus({ quiet: true });
+    }
+  }
+
   async function saveList(options) {
     if (state.applying || state.saving) return false;
     const id = state.currentList;
@@ -1192,6 +1464,11 @@
     setIcon(refs.applyIcon ? refs.applyIcon.querySelector('svg') : null, busy ? 'i-spinner' : 'i-refresh');
     if (label) refs.applyLabel.textContent = label;
     refs.editor.readOnly = busy;
+    if (refs.strategySave) refs.strategySave.disabled = busy || state.strategySaving;
+    if (refs.strategyApply) refs.strategyApply.disabled = busy;
+    if (refs.strategyDesync) refs.strategyDesync.disabled = busy;
+    if (refs.strategyFooling) refs.strategyFooling.disabled = busy;
+    if (refs.strategyExtra) refs.strategyExtra.disabled = busy;
     const tabs = document.querySelectorAll('.tab');
     for (const tab of tabs) tab.disabled = busy;
   }
@@ -1770,6 +2047,8 @@
     refs.saveBtn.addEventListener('click', () => { saveList(); });
     refs.applyBtn.addEventListener('click', applyList);
     refs.editor.addEventListener('input', onEditorInput);
+    refs.strategySave.addEventListener('click', () => { saveStrategy(); });
+    refs.strategyApply.addEventListener('click', () => { applyStrategy(); });
 
     refs.editor.addEventListener('keydown', (event) => {
       if ((event.ctrlKey || event.metaKey) && (event.key === 's' || event.key === 'S')) {
@@ -1816,6 +2095,22 @@
     refs.applyIcon = $('#apply-icon');
     refs.saveBtn = $('#list-save');
     refs.applyHint = $('#apply-hint');
+    refs.strategyCard = $('#strategy-card');
+    refs.strategyTitle = $('#strategy-title');
+    refs.strategyName = $('#strategy-name');
+    refs.strategyActive = $('#strategy-active');
+    refs.strategyDesc = $('#strategy-desc');
+    refs.strategyList = $('#strategy-list');
+    refs.strategyQnum = $('#strategy-qnum');
+    refs.strategyUnit = $('#strategy-unit');
+    refs.strategyDesync = $('#strategy-desync');
+    refs.strategyFooling = $('#strategy-fooling');
+    refs.strategyExtra = $('#strategy-extra');
+    refs.strategySave = $('#strategy-save');
+    refs.strategyApply = $('#strategy-apply');
+    refs.strategyState = $('#strategy-state');
+    refs.strategyWarnings = $('#strategy-warnings');
+    refs.strategyWarningList = $('#strategy-warning-list');
     refs.tgCard = $('#tg-card');
     refs.tgList = $('#tg-list');
     refs.tgOpen = $('#tg-open');
@@ -1859,6 +2154,7 @@
 
     loadStatus();
     loadList(state.currentList);
+    loadZapretProfiles();
     startPolling();
   }
 

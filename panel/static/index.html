@@ -189,6 +189,11 @@
           <span class="tab-note">→ zapret</span>
           <span class="tab-dirty" id="dirty-dpi" hidden aria-label="есть несохранённые изменения">•</span>
         </button>
+        <button type="button" class="tab" role="tab" id="tab-dpi-split" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="dpi-split">
+          dpi-split
+          <span class="tab-note">→ zapret: split</span>
+          <span class="tab-dirty" id="dirty-dpi-split" hidden aria-label="есть несохранённые изменения">•</span>
+        </button>
         <button type="button" class="tab" role="tab" id="tab-ru-custom" aria-controls="list-panel" aria-selected="false" tabindex="-1" data-list="ru-custom">
           ru-custom
           <span class="tab-note">→ direct</span>
@@ -228,8 +233,51 @@
 
         <p class="note" id="lists-note">
           <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
-          <span><code>geo.txt</code> и <code>ru-direct.txt</code> генерируются таймером обновления — правьте только custom-списки и <code>dpi.txt</code>, иначе изменения перезапишутся.</span>
+          <span><code>geo.txt</code> и <code>ru-direct.txt</code> генерируются таймером обновления — правьте только custom-списки, <code>dpi.txt</code> и <code>dpi-split.txt</code>, иначе изменения перезапишутся.</span>
         </p>
+      </div>
+
+      <div class="strategy-card" id="strategy-card" hidden>
+        <div class="strategy-head">
+          <h3 class="strategy-title" id="strategy-title">Стратегия профиля</h3>
+          <span class="pill pill--mono" id="strategy-name">—</span>
+          <span class="badge" id="strategy-active" data-tone="idle">unknown</span>
+        </div>
+        <p class="strategy-desc" id="strategy-desc"></p>
+        <dl class="strategy-meta">
+          <div class="kv-row"><dt>Список</dt><dd><code id="strategy-list">—</code></dd></div>
+          <div class="kv-row"><dt>QNUM</dt><dd><code id="strategy-qnum">—</code></dd></div>
+          <div class="kv-row"><dt>Юнит</dt><dd><code id="strategy-unit">—</code></dd></div>
+        </dl>
+        <div class="strategy-form">
+          <label class="field">
+            <span class="field-label">DESYNC</span>
+            <select class="input" id="strategy-desync" aria-describedby="strategy-state"></select>
+          </label>
+          <label class="field">
+            <span class="field-label">FOOLING</span>
+            <select class="input" id="strategy-fooling" aria-describedby="strategy-state"></select>
+          </label>
+          <label class="field field--wide">
+            <span class="field-label">EXTRA</span>
+            <textarea class="input input--area" id="strategy-extra" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="strategy-state"></textarea>
+          </label>
+        </div>
+        <div class="strategy-actions">
+          <button type="button" class="btn" id="strategy-save">
+            <svg class="icon" aria-hidden="true"><use href="#i-save"/></svg>
+            <span>Сохранить стратегию</span>
+          </button>
+          <button type="button" class="btn btn--primary" id="strategy-apply">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+            <span>Применить</span>
+          </button>
+          <p class="strategy-state" id="strategy-state" role="status"></p>
+        </div>
+        <div class="strategy-warnings" id="strategy-warnings" hidden>
+          <p class="strategy-warnings-title">Пересечение списков</p>
+          <ul id="strategy-warning-list"></ul>
+        </div>
       </div>
     </section>
 
