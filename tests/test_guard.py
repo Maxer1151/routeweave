@@ -155,7 +155,7 @@ FAKES = {
         url=""
         for arg in "$@"; do url="$arg"; done
         case "$url" in
-          *discord*) state="$FAKE_STATE/curl_dpi" ;;
+          *youtube.com/generate_204*) state="$FAKE_STATE/curl_dpi" ;;
           *) state="$FAKE_STATE/curl_plain" ;;
         esac
         code="$(cat "$state")"
@@ -513,6 +513,21 @@ def test_repair_restarts_nfqws_when_queue_not_bound(sandbox: Sandbox):
     assert "guard: nfqws active, но очередь 200 не привязана" in res.stdout
 
 
+def test_check_accepts_multiple_queue_readers(sandbox: Sandbox):
+    # Многопрофильная схема: default 200 и профиль 201 читаются разными
+    # процессами nfqws. Лишняя строка очереди не должна считаться поломкой.
+    sandbox.queue.write_text(
+        "  201  4343 00000000 00000000\n  200  4242 00000000 00000000\n",
+        encoding="utf-8",
+    )
+
+    res = sandbox.run("check")
+
+    assert res.returncode == 0, res.stderr
+    assert "nfqws читает очередь 200" in res.stdout
+    assert "проблем:" not in res.stderr
+
+
 def test_repair_enables_ip_forward(sandbox: Sandbox):
     sandbox.set("ip_forward", "0")
 
@@ -665,6 +680,37 @@ def test_check_probes_ok(sandbox: Sandbox):
     assert sum(1 for c in calls if c.startswith("ping ")) == 1
     assert sum(1 for c in calls if c.startswith("curl ")) == 2
     assert sandbox.mutating_calls() == []
+
+
+def test_default_dpi_probe_is_youtube_generate_204(sandbox: Sandbox):
+    res = sandbox.run("check")
+
+    assert res.returncode == 0, res.stderr
+    curls = [c for c in probe_calls(sandbox) if c.startswith("curl ")]
+    assert any("https://www.youtube.com/generate_204" in c for c in curls)
+    assert not any("discord" in c for c in curls)
+
+
+def test_dpi_probe_url_env_override(sandbox: Sandbox):
+    res = sandbox.run(
+        "check", GUARD_PROBE_DPI_URL="https://example.com/probe"
+    )
+
+    assert res.returncode == 0, res.stderr
+    curls = [c for c in probe_calls(sandbox) if c.startswith("curl ")]
+    assert any("https://example.com/probe" in c for c in curls)
+    assert not any("youtube.com/generate_204" in c for c in curls)
+
+
+def test_invalid_dpi_probe_url_falls_back_to_youtube(sandbox: Sandbox):
+    res = sandbox.run("check", GUARD_PROBE_DPI_URL="ftp://example.com/probe")
+
+    assert res.returncode == 0, res.stderr
+    assert "не https-URL" in res.stderr
+    assert "https://www.youtube.com/generate_204" in res.stderr
+    curls = [c for c in probe_calls(sandbox) if c.startswith("curl ")]
+    assert any("https://www.youtube.com/generate_204" in c for c in curls)
+    assert not any("ftp://" in c for c in curls)
 
 
 def test_check_probe_plain_fail_with_ping_is_problem(sandbox: Sandbox):

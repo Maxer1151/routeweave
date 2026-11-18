@@ -45,9 +45,12 @@ STUCK_TTL="${GUARD_STUCK_TTL:-21600}"
 PROBES="${GUARD_PROBE:-yes}"
 PROBE_PING_HOST="${GUARD_PROBE_PING_HOST:-1.1.1.1}"
 PROBE_PLAIN_URL="${GUARD_PROBE_PLAIN_URL:-https://ya.ru/}"
-PROBE_DPI_URL="${GUARD_PROBE_DPI_URL:-https://discord.com/}"
-# Адрес, через который проверяется десинк: домен из dpi.txt. Без десинка он
-# в РФ не открывается, с работающим nfqws — отдаёт 200.
+PROBE_DPI_URL="${GUARD_PROBE_DPI_URL:-https://www.youtube.com/generate_204}"
+# Адрес, через который проверяется десинк: домен из dpi.txt, который DPI
+# блокирует, а nfqws пробивает, с предсказуемым ответом 2xx/3xx. Discord не
+# годится: DPI пропускает его нестабильно, счётчик неудач скачет, и guard
+# делает ложные рестарты. YouTube/generate_204 при живом десинке отдаёт 204,
+# без него — 000.
 
 # QNUM читаем ровно как fw-nfq.sh: тот же trust-конфиг, тот же номер очереди.
 # Источник истины один, иначе сторож проверял бы не ту очередь.
@@ -134,8 +137,8 @@ if ! https_url_ok "$PROBE_PLAIN_URL"; then
   PROBE_PLAIN_URL="https://ya.ru/"
 fi
 if ! https_url_ok "$PROBE_DPI_URL"; then
-  warn "GUARD_PROBE_DPI_URL='$PROBE_DPI_URL' не https-URL — беру https://discord.com/"
-  PROBE_DPI_URL="https://discord.com/"
+  warn "GUARD_PROBE_DPI_URL='$PROBE_DPI_URL' не https-URL — беру https://www.youtube.com/generate_204"
+  PROBE_DPI_URL="https://www.youtube.com/generate_204"
 fi
 
 # Хост ping — только буквы, цифры, точка, дефис, двоеточие: значение из
