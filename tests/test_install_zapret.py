@@ -21,6 +21,7 @@ UNINSTALL = REPO / "uninstall.sh"
 APPLY = REPO / "templates" / "routeweave-zapret-apply.sh"
 PROFILE_SET = REPO / "templates" / "routeweave-zapret-profile-set.sh"
 UNIT = REPO / "templates" / "zapret-nfqws@.service"
+PANEL_UNIT = REPO / "templates" / "routeweave-panel.service"
 
 BASE_ENV = {
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -95,7 +96,13 @@ def test_install_installs_template_unit_and_helper():
 
 def test_install_creates_profile_dir_and_enables_instances():
     text = INSTALL.read_text(encoding="utf-8")
-    assert 'install -d -m 0755 -o routeweave -g routeweave "$ETC/zapret.d"' in text
+    assert 'install -d -m 0755 -o root -g root "$ETC/zapret.d"' in text
+    assert 'chown root:root "$ETC/zapret.d"' in text
+    assert 'chmod 0755 "$ETC/zapret.d"' in text
+    assert (
+        "find \"$ETC/zapret.d\" -maxdepth 1 -type f -name '*.conf' "
+        "-exec chown root:root {} + -exec chmod 0644 {} +"
+    ) in text
     assert "enable_zapret_profiles" in text
     assert "restart_zapret_profiles" in text
     # Профили включаются до перезапуска default, перезапускаются — после:
@@ -127,6 +134,21 @@ def test_unit_template_contract():
         "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE",
     ):
         assert line in directives, line
+
+    # Юнит панели: helper стратегий наследует её mount-namespace и заменяет
+    # zapret.conf/профили через mktemp+mv в том же каталоге. Без каталога в
+    # ReadWritePaths ProtectSystem=strict отдаёт root-helper'у EROFS.
+    panel = PANEL_UNIT.read_text(encoding="utf-8")
+    panel_directives = "\n".join(
+        line for line in panel.splitlines() if not line.lstrip().startswith("#")
+    )
+    read_write = [
+        line
+        for line in panel_directives.splitlines()
+        if line.startswith("ReadWritePaths=")
+    ]
+    assert len(read_write) == 1
+    assert "/etc/routeweave" in read_write[0].split("=", 1)[1].split()
 
 
 # ------------------------------------------------------------ enable/restart

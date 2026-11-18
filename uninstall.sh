@@ -804,14 +804,23 @@ ok "sudoers и helper-скрипты удалены"
 
 # ------------------------------------------------------- 7. пользователь
 # Конфиги в /etc/routeweave сохраняются, но install.sh выставлял на них
-# владельца routeweave:routeweave (lists) и root:routeweave (.env). После
-# userdel/groupdel это дало бы висячие uid/gid, а .env остался бы 0640 с
-# несуществующей группой — то есть секреты могли бы читать те, кому достанется
-# этот gid. Поэтому сначала возвращаем root и ужесточаем .env, потом удаляем
-# пользователя.
+# владельца routeweave:routeweave (lists), root:routeweave (.env), а старые
+# версии — ещё и routeweave:routeweave на zapret.d. После userdel/groupdel это
+# дало бы висячие uid/gid, а .env остался бы 0640 с несуществующей группой —
+# то есть секреты могли бы читать те, кому достанется этот gid. Поэтому
+# сначала возвращаем root и ужесточаем .env, потом удаляем пользователя.
 info "Удаление пользователя $SERVICE_USER..."
 if [ -e "$ETC/lists" ]; then
   do_chown -R root:root "$ETC/lists" || err "не удалось вернуть root:root на $ETC/lists"
+fi
+if [ -e "$ETC/zapret.d" ]; then
+  do_chown root:root "$ETC/zapret.d" || err "не удалось вернуть root:root на $ETC/zapret.d"
+  do_chmod 0755 "$ETC/zapret.d" || err "не удалось выставить 0755 на $ETC/zapret.d"
+  for profile in "$ETC/zapret.d"/*.conf; do
+    [ -f "$profile" ] && [ ! -L "$profile" ] || continue
+    do_chown root:root "$profile" || err "не удалось вернуть root:root на $profile"
+    do_chmod 0644 "$profile" || err "не удалось выставить 0644 на $profile"
+  done
 fi
 if [ -e "$ETC/.env" ]; then
   do_chown root:root "$ETC/.env" || err "не удалось вернуть root:root на $ETC/.env"

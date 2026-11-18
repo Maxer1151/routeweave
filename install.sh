@@ -1701,11 +1701,17 @@ chown -R routeweave:routeweave "$ETC/lists"
 chmod 0755 "$ETC/lists"
 find "$ETC/lists" -maxdepth 1 -type f -exec chmod 0644 {} +
 
-# Каталог профилей zapret: панель пишет сюда от routeweave (атомарная замена
-# файла), nfqws-launch.sh читает от root. Профиль — данные, а не shell:
-# лаунчер разбирает его без source и проверяет значения по whitelist.
-# install -d не трогает уже лежащие *.conf.
-install -d -m 0755 -o routeweave -g routeweave "$ETC/zapret.d"
+# Каталог профилей zapret: принадлежит root, панель меняет стратегии только
+# через root-helper (sudo -n): он делает mktemp рядом с целевым файлом и
+# атомарно заменяет его через mv. Профиль — данные, а не shell: лаунчер
+# разбирает его без source и проверяет значения по whitelist.
+# install -d не трогает уже лежащие *.conf, поэтому владельца и права
+# существующих профилей фиксируем явно: старые версии установщика оставляли
+# каталог за routeweave.
+install -d -m 0755 -o root -g root "$ETC/zapret.d"
+chown root:root "$ETC/zapret.d"
+chmod 0755 "$ETC/zapret.d"
+find "$ETC/zapret.d" -maxdepth 1 -type f -name '*.conf' -exec chown root:root {} + -exec chmod 0644 {} +
 
 # .env.tgws — отдельный файл для docker compose (без секретов панели/mihomo).
 if [ "$INSTALL_TGWS" = "yes" ]; then

@@ -65,6 +65,18 @@ def test_lists_directory_is_writable():
     assert "/etc/routeweave/lists" in paths
 
 
+def test_etc_routeweave_is_writable_for_strategy_helper():
+    """Helper стратегий заменяет файлы через mktemp+mv в их каталоге.
+
+    ProtectSystem=strict делает ФС read-only и для root-helper'а, запущенного
+    панелью через sudo: mount-namespace наследуется. Запись в каталог нужна
+    для атомарной замены zapret.conf и zapret.d/<name>.conf; сами файлы
+    остаются root:root, поэтому routeweave их напрямую не пишет.
+    """
+    paths = service_value("ReadWritePaths").split()
+    assert "/etc/routeweave" in paths
+
+
 def test_staging_directory_is_writable():
     """Апдейтер запускается панелью через sudo в её mount-namespace.
 

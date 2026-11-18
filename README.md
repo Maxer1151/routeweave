@@ -457,6 +457,9 @@ arm64 — `mihomo-linux-arm64`. Стратегия по умолчанию — `
 `/etc/routeweave/zapret.d/<name>.conf` (`LIST`, `QNUM`, `DESYNC`, `FOOLING`,
 `AUTOTTL_ARG`, `TTL_ARG`, `EXTRA`) и включаются как
 `zapret-nfqws@<name>.service`; пример — `templates/zapret.d/split.conf.example`.
+Каталог `zapret.d` и файлы профилей принадлежат `root:root` (0755 и 0644):
+панель не пишет их напрямую и меняет стратегию только через root-helper
+`routeweave-zapret-profile-set.sh`.
 Правила NFQUEUE идут цепочкой: **default первым**, затем профили по имени
 файла; hostlist default генерируется из `lists/dpi.txt` **минус** домены
 профилей (равные и поддомены), поэтому split-домены не попадают в

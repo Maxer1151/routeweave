@@ -32,14 +32,21 @@
 #
 # Почему ProtectSystem=strict и ReadWritePaths только нужные пути:
 #   панель не должна писать в /etc, /opt, /usr — это делает установщик от
-#   root. Единственное, что ей реально нужно на запись: каталог списков
-#   (/etc/routeweave/lists — правка/загрузка dpi.txt), staging апдейтера
-#   (/etc/routeweave/.staging — применение списка панель выполняет через
-#   `sudo -n /usr/local/sbin/routeweave-update-lists.sh`, root-helper
-#   наследует mount-namespace юнита и пишет новые списки через staging;
-#   сам каталог остаётся 0700 root:root, поэтому пользователь routeweave
-#   писать в него не может), /run (рантайм-файлы, например /run/routeweave)
-#   и /var/log/routeweave (снимки диагностики).
+#   root. Но root-helper'ы, запущенные панелью через `sudo -n`, наследуют
+#   mount-namespace юнита, поэтому их записи тоже упираются в ProtectSystem.
+#   ReadWritePaths открывает ровно нужное:
+#   - /etc/routeweave — helper стратегий делает mktemp рядом с zapret.conf
+#     или профилем и mv в тот же каталог: атомарная замена требует записи в
+#     каталог, а не только в файл. Сам каталог остаётся root:root, файлы
+#     zapret.conf и zapret.d/*.conf — root:root; пользователь routeweave
+#     напрямую их не пишет, панель меняет стратегию только через helper;
+#   - /etc/routeweave/lists — правка/загрузка dpi.txt самой панелью;
+#   - /etc/routeweave/.staging — апдейтер списков (root-helper) пишет новые
+#     списки через staging; каталог 0700 root:root, писать в него
+#     пользователь routeweave не может;
+#   - /run — рантайм-файлы, например /run/routeweave;
+#   - /var/log/routeweave — снимки диагностики (root-helper; каталог
+#     0750 root:routeweave, файлы 0640).
 #   ProtectSystem=strict делает всю остальную ФС read-only, ReadWritePaths
 #   открывает ровно эти пути. Снимок пишет root-helper, запущенный панелью
 #   через `sudo -n`: он наследует mount-namespace этого юнита, поэтому без
@@ -79,7 +86,7 @@ NoNewPrivileges=no
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/etc/routeweave/lists /etc/routeweave/.staging /run -/var/log/routeweave
+ReadWritePaths=/etc/routeweave /etc/routeweave/lists /etc/routeweave/.staging /run -/var/log/routeweave
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_KILL CAP_AUDIT_WRITE CAP_SYS_CHROOT
 

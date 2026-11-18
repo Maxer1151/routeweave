@@ -304,6 +304,14 @@ def test_static_uninstall_invariants():
     assert "restore_dropin()" in text
     assert "is_routeweave_dropin()" in text
 
+    # Старые установки могли оставить zapret.d за routeweave. Перед userdel
+    # возвращаем каталог и профили root:root, иначе останутся висячие uid/gid.
+    assert 'do_chown root:root "$ETC/zapret.d"' in text
+    assert 'do_chmod 0755 "$ETC/zapret.d"' in text
+    assert 'for profile in "$ETC/zapret.d"/*.conf' in text
+    assert 'do_chown root:root "$profile"' in text
+    assert 'do_chmod 0644 "$profile"' in text
+
     # Ошибки не прерывают удаление, но дают код возврата 1.
     assert "ERRORS=$((ERRORS + 1))" in text
     assert 'if [ "$ERRORS" -gt 0 ]' in text
