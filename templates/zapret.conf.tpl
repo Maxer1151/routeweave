@@ -21,9 +21,11 @@ HOSTLIST=/run/routeweave/dpi-zapret.txt
 
 # Каталог дополнительных профилей (по файлу на профиль).
 # Профиль — свой список, QNUM и стратегия; правила NFQUEUE идут цепочкой:
-# первый — default, затем профили по имени файла. Домены профилей вычитаются
-# из hostlist default, поэтому пересечений нет; если домен вручную попал в
-# оба списка, его обработает default. Пример:
+# первый — default, затем профили по имени файла. Hostlist default = dpi.txt
+# минус домены профилей (равные и поддомены), поэтому домен из обоих списков
+# обрабатывает профиль. В dpi.txt его надо оставлять: dpi.txt вычитается из
+# geo.txt и даёт DIRECT-исключение mihomo. Порядок default-first обязателен,
+# иначе split ломает YouTube/Google. Пример:
 # templates/zapret.d/split.conf.example (install.sh его не устанавливает).
 PROFILE_DIR=/etc/routeweave/zapret.d
 

@@ -1157,6 +1157,12 @@ def write_zapret_profile(
 def test_zapret_profiles_get_default_and_profile(panel):
     write_default_zapret(panel)
     write_zapret_profile(panel)
+    (panel.etc / "lists" / "dpi.txt").write_text(
+        "+.reddit.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "dpi-split.txt").write_text(
+        "+.www.reddit.com\n", encoding="utf-8"
+    )
 
     response = panel.client.get("/api/zapret/profiles", auth=AUTH)
     assert response.status_code == 200
@@ -1392,25 +1398,91 @@ def test_zapret_apply_endpoint_uses_job(panel):
     assert ["sudo", "-n", panel.module.ZAPRET_APPLY] in panel.calls
 
 
-def test_zapret_warnings_intersection(panel):
+def test_zapret_warnings_dpi_overlap_is_normal(panel):
     write_default_zapret(panel)
     write_zapret_profile(panel)
     (panel.etc / "lists" / "dpi.txt").write_text(
-        "+.reddit.com\n+.www.reddit.com\n+.youtube.com\n", encoding="utf-8"
+        "+.reddit.com\n+.youtube.com\n", encoding="utf-8"
     )
     (panel.etc / "lists" / "dpi-split.txt").write_text(
-        "+.reddit.com\n+.workers.dev\n", encoding="utf-8"
+        "+.reddit.com\n+.www.reddit.com\n", encoding="utf-8"
     )
 
     response = panel.client.get("/api/zapret/profiles", auth=AUTH)
 
     assert response.status_code == 200
-    warnings = response.json()["warnings"]
-    assert warnings == [
-        "домен reddit.com есть и в dpi.txt, и в dpi-split.txt — его обработает "
-        "default (он первый); уберите из одного списка",
-        "домен www.reddit.com есть и в dpi.txt, и в dpi-split.txt — его обработает "
-        "default (он первый); уберите из одного списка",
+    # Пересечение dpi.txt с профильным списком — штатное состояние:
+    # домены профиля вычитаются из hostlist default и обрабатываются профилем.
+    assert response.json()["warnings"] == []
+
+
+def test_zapret_warnings_domain_missing_from_dpi(panel):
+    write_default_zapret(panel)
+    write_zapret_profile(panel)
+    (panel.etc / "lists" / "dpi.txt").write_text(
+        "+.youtube.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "dpi-split.txt").write_text(
+        "+.reddit.com\n+.www.reddit.com\n", encoding="utf-8"
+    )
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        "домен reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
+        "он не исключается из geo.txt, и если geo.txt его содержит, "
+        "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
+        "добавьте reddit.com в dpi.txt",
+        "домен www.reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
+        "он не исключается из geo.txt, и если geo.txt его содержит, "
+        "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
+        "добавьте www.reddit.com в dpi.txt",
+    ]
+
+
+def test_zapret_warnings_missing_or_empty_profile_list(panel):
+    write_default_zapret(panel)
+    write_zapret_profile(panel, name="empty", list_name="empty.txt", qnum="201")
+    write_zapret_profile(panel, name="missing", list_name="missing.txt", qnum="202")
+    (panel.etc / "lists" / "dpi.txt").write_text(
+        "+.youtube.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "empty.txt").write_text("# пусто\n", encoding="utf-8")
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        "профиль empty: список empty.txt отсутствует или пуст — домены профиля "
+        "не десинкаются стратегией профиля; их обработает default "
+        "(fake,multidisorder), что для Reddit/Workers не работает",
+        "профиль missing: список missing.txt отсутствует или пуст — домены профиля "
+        "не десинкаются стратегией профиля; их обработает default "
+        "(fake,multidisorder), что для Reddit/Workers не работает",
+    ]
+
+
+def test_zapret_warnings_duplicate_between_profile_lists(panel):
+    write_default_zapret(panel)
+    write_zapret_profile(panel, name="alpha", list_name="alpha.txt", qnum="201")
+    write_zapret_profile(panel, name="beta", list_name="beta.txt", qnum="202")
+    (panel.etc / "lists" / "dpi.txt").write_text(
+        "+.reddit.com\n+.youtube.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "alpha.txt").write_text(
+        "+.www.reddit.com\n", encoding="utf-8"
+    )
+    (panel.etc / "lists" / "beta.txt").write_text(
+        "+.reddit.com\n", encoding="utf-8"
+    )
+
+    response = panel.client.get("/api/zapret/profiles", auth=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == [
+        "домен www.reddit.com есть в alpha.txt и beta.txt — обработает "
+        "профиль alpha (идёт первым по имени)"
     ]
 
 

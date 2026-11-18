@@ -1266,8 +1266,8 @@
       : 'Стратегия профиля';
     refs.strategyName.textContent = profile.name;
     refs.strategyDesc.textContent = profile.name === 'default'
-      ? 'default обслуживает dpi.txt и весь остальной трафик; домены профилей из его hostlist вычтены.'
-      : 'Профиль обслуживает ' + (profile.list || 'свой список') + '. На пересечении списков домен остаётся за default.';
+      ? 'default обслуживает dpi.txt без доменов профилей: они вычтены из его hostlist и обрабатываются профилями.'
+      : 'Профиль обслуживает ' + (profile.list || 'свой список') + '. Его домены вычтены из hostlist default и обрабатываются этим профилем; в dpi.txt их надо оставлять — он вычитается из geo.txt и даёт DIRECT-исключение mihomo.';
     refs.strategyList.textContent = profile.list || '—';
     refs.strategyQnum.textContent = profile.qnum || '—';
     refs.strategyUnit.textContent = profile.unit || '—';

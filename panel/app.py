@@ -1349,8 +1349,10 @@ def _normalize_domains(text: str) -> set[str]:
     return domains
 
 
-def _domain_covered(entry: str, parent: str) -> bool:
-    return entry == parent or entry.endswith("." + parent)
+def _domain_chain(domain: str) -> list[str]:
+    """Домен и все его родители: a.b.c -> [a.b.c, b.c, c]."""
+    labels = domain.split(".")
+    return [".".join(labels[index:]) for index in range(len(labels))]
 
 
 def _warning_list_text(name: str) -> str:
@@ -1363,32 +1365,89 @@ def _warning_list_text(name: str) -> str:
 
 
 def _zapret_warnings(profiles: list[dict]) -> list[str]:
-    """Пересечения dpi.txt с профильными списками: default забирает домен первым."""
-    dpi = _normalize_domains(_warning_list_text(LISTS["dpi"]))
-    if not dpi:
-        return []
+    """Проверяет списки профилей по фактической механике zapret/mihomo.
+
+    Пересечение dpi.txt с профильным списком — штатное состояние: hostlist
+    default строится из dpi.txt минус домены профилей, поэтому такой домен
+    обрабатывает профиль, а в dpi.txt он остаётся для DIRECT-исключений
+    mihomo. Предупреждаем только о доменах без покрытия в dpi.txt, пустых
+    списках и пересечениях между профильными списками.
+    """
+    named = sorted(profiles[1:], key=lambda entry: entry["name"])
+    dpi_name = LISTS["dpi"]
+    dpi_domains = _normalize_domains(_warning_list_text(dpi_name))
+    default_desync = profiles[0].get("desync", "") if profiles else ""
+    default_label = f"default ({default_desync})" if default_desync else "default"
     warnings: list[str] = []
-    seen: set[tuple[str, str]] = set()
-    for entry in profiles[1:]:
+    profile_domains: dict[str, set[str]] = {}
+    seen_missing: set[tuple[str, str]] = set()
+
+    for entry in named:
         list_name = entry.get("list", "")
-        if not list_name or list_name == LISTS["dpi"]:
+        if (
+            not list_name
+            or ".." in list_name
+            or not PROFILE_LIST_RE.fullmatch(list_name)
+        ):
+            # Невалидный LIST уже попал в error профиля; отдельное
+            # предупреждение здесь только дублировало бы его.
             continue
-        profile_domains = _normalize_domains(_warning_list_text(list_name))
-        if not profile_domains:
+        domains = _normalize_domains(_warning_list_text(list_name))
+        profile_domains[entry["name"]] = domains
+        if not domains:
+            # MATCH,DIRECT в mihomo не ломает такие домены: они остаются в
+            # hostlist default и получают default-стратегию, а не стратегию
+            # профиля. Для Reddit/Workers default обычно не подходит.
+            warnings.append(
+                f"профиль {entry['name']}: список {list_name} отсутствует или пуст — "
+                "домены профиля не десинкаются стратегией профиля; их обработает "
+                f"{default_label}, что для Reddit/Workers не работает"
+            )
             continue
-        for domain in sorted(dpi):
-            if not any(
-                _domain_covered(domain, own) or _domain_covered(own, domain)
-                for own in profile_domains
-            ):
+        for domain in sorted(domains):
+            # dpi.txt покрывает домен, если содержит его самого или родителя.
+            if any(parent in dpi_domains for parent in _domain_chain(domain)):
                 continue
             key = (list_name, domain)
-            if key in seen:
+            if key in seen_missing:
                 continue
-            seen.add(key)
+            seen_missing.add(key)
+            # Апдейтер вычитает dpi.txt из geo.txt, поэтому dpi-домен никогда
+            # не попадёт в RULE-SET,geo-domains,GEO. Без этого домен может
+            # остаться в geo-апстриме: GEO (socks-out при SOCKS_URL) сработает
+            # раньше RULE-SET,dpi-domains,DIRECT, и zapret его не увидит.
+            # Если в geo.txt домена нет, его поймает MATCH,DIRECT — тогда
+            # zapret его увидит, поэтому это предупреждение, а не ошибка.
             warnings.append(
-                f"домен {domain} есть и в dpi.txt, и в {list_name} — его обработает "
-                "default (он первый); уберите из одного списка"
+                f"домен {domain} есть в {list_name}, но отсутствует в {dpi_name} — "
+                "он не исключается из geo.txt, и если geo.txt его содержит, "
+                "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо "
+                f"zapret; добавьте {domain} в {dpi_name}"
+            )
+
+    # Пересечения между профилями: для каждого домена находим все профили,
+    # которые его покрывают (равенство или родительский домен), и оставляем
+    # предупреждение только с первым по имени — он и обработает домен.
+    all_domains = sorted(
+        {domain for domains in profile_domains.values() for domain in domains}
+    )
+    for domain in all_domains:
+        chain = _domain_chain(domain)
+        holders = [
+            entry
+            for entry in named
+            if any(
+                parent in profile_domains.get(entry["name"], ())
+                for parent in chain
+            )
+        ]
+        if len(holders) < 2:
+            continue
+        first = holders[0]
+        for other in holders[1:]:
+            warnings.append(
+                f"домен {domain} есть в {first['list']} и {other['list']} — "
+                f"обработает профиль {first['name']} (идёт первым по имени)"
             )
     return warnings
 
