@@ -135,7 +135,7 @@ Routeweave — домашний шлюз, который по своей при�
 ### Docker и tg-ws-proxy
 
 - Образ tg-ws-proxy запинен по digest
-  (`valnesfjord/tg-ws-proxy-rs:v2.5.8@sha256:d10285e7…`), а не по mutable-тегу
+  (`valnesfjord/tg-ws-proxy-rs:v2.7.0@sha256:1a4d03e9…`), а не по mutable-тегу
   `latest`: `docker compose pull` тянет ровно этот digest.
 - Контейнер запускается с `read_only`, `cap_drop: ALL`,
   `no-new-privileges:true`, лимитами памяти/pids/CPU и ротацией логов;

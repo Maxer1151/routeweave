@@ -14,7 +14,7 @@
 # запуск с внятной ошибкой: лучше упасть, чем молча опубликовать порт на
 # 0.0.0.0.
 #
-# Образ запинен по digest индекса (multi-arch), тег v2.5.8 оставлен для
+# Образ запинен по digest индекса (multi-arch), тег v2.7.0 оставлен для
 # читаемости и соответствует этому digest; источник истины — digest.
 # `latest` больше не используется: mutable-тег позволял подменить образ между
 # установками без изменения репозитория (Q-10). Обновление — вручную и
@@ -23,8 +23,8 @@
 # тег с digest, вписать сюда и записать изменение в CHANGELOG.md.
 # `docker compose pull` образ молча не «сдвинет»: при пине по digest он тянет
 # ровно этот digest. Манифесты этого digest:
-#   amd64 sha256:0ac16cec5e405ded0e1f39ba6ce68a89ae3a1ad89173be078dddad73fa1bbd8f
-#   arm64 sha256:0332173e2d22b2216de7d7636a529cd0ec6b3243169bd66c485360c44c83c8b3
+#   amd64 sha256:71d599a17f95b9632efe7987eb2b36f9517181e4177d367230c299017d968126
+#   arm64 sha256:b97c6d4deb3903dcb03ca6ae3f24f03683f01101bb42ec3cb41fa47135fa0689
 #
 # env_file — отдельный /etc/routeweave/.env.tgws, а не общий /etc/routeweave/.env:
 # контейнеру нужны только TG_SECRET, BASE_DOMAIN, TG_CF_WORKER_DOMAIN и (если
@@ -44,7 +44,7 @@ name: routeweave
 
 services:
   tg-ws-proxy:
-    image: valnesfjord/tg-ws-proxy-rs:v2.5.8@sha256:d10285e7735c6b2bd2abbfcdb2a4f133fbc6a601a0aae18fc55a2822d92b7d1e
+    image: valnesfjord/tg-ws-proxy-rs:v2.7.0@sha256:1a4d03e9d3d1207857dca01943c83959cb594389e7b95ffb9bdfdc37ae7c54bb
     container_name: routeweave-tgwsproxy
     restart: unless-stopped
     stop_grace_period: 10s

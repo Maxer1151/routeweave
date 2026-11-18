@@ -436,7 +436,7 @@ CF Worker описан в `docs/cf-worker-tg.md`; ключи — `BASE_DOMAIN`,
 работает как обычно.
 
 Образ запинен по digest
-(`valnesfjord/tg-ws-proxy-rs:v2.5.8@sha256:d10285e7…`), контейнер запускается
+(`valnesfjord/tg-ws-proxy-rs:v2.7.0@sha256:1a4d03e9…`), контейнер запускается
 с `read_only`, `cap_drop: ALL`, `no-new-privileges`, лимитами памяти/pids/CPU
 и ротацией логов. Порт публикуется как `${SERVER_IP}:1443:1443`, а не на
 `0.0.0.0`. Docker при этом всё равно вставляет свои правила в `DOCKER-USER`,

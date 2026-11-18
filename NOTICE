@@ -40,7 +40,7 @@ digest). Tailscale ставится из официального apt-репоз
 | WDTT-Plus (Ivan4537) | v20, installer 0.20.3 | GPL-3.0 | <https://github.com/Ivan4537/WDTT-Plus/blob/v20/LICENSE> (в релизном архиве текста нет) | то же, что для mihomo; исходники — в репозитории проекта |
 | zapret (bol-van) | коммит `c4d0b1990129dce2b28095277173ee0d7702d304` | MIT | <https://github.com/bol-van/zapret/blob/c4d0b1990129dce2b28095277173ee0d7702d304/docs/LICENSE.txt> | сохранять текст лицензии и copyright notice |
 | zashboard (Zephyruso) | v3.29.1 | MIT | <https://github.com/Zephyruso/zashboard/blob/v3.29.1/LICENSE> (в `dist.zip` текста нет) | приложить текст лицензии к распространяемой сборке |
-| tg-ws-proxy-rs (valnesfjord) | v2.5.8, digest `sha256:d10285e7…` | MIT | <https://github.com/valnesfjord/tg-ws-proxy-rs/blob/v2.5.8/LICENSE> | сохранять текст лицензии |
+| tg-ws-proxy-rs (valnesfjord) | v2.7.0, digest `sha256:1a4d03e9…` | MIT | <https://github.com/valnesfjord/tg-ws-proxy-rs/blob/v2.7.0/LICENSE> | сохранять текст лицензии |
 | Tailscale, клиент | из apt-репозитория, без фиксации | BSD-3-Clause | <https://github.com/tailscale/tailscale/blob/main/LICENSE> | соблюдать BSD-3-Clause и условия сервиса Tailscale |
 
 ### mihomo и WDTT-Plus: GPL-3.0
@@ -71,7 +71,7 @@ digest). Tailscale ставится из официального apt-репоз
 - zashboard: в `dist.zip` текста лицензии нет, поэтому при распространении
   сборки приложите текст из репозитория по тегу v3.29.1.
 - tg-ws-proxy-rs: образ фиксируется по digest, текст лицензии — в репозитории
-  по тегу v2.5.8.
+  по тегу v2.7.0.
 
 ### Tailscale
 
