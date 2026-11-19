@@ -85,11 +85,29 @@ PROFILE_LIST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 PROFILE_EXTRA_RE = re.compile(r"[A-Za-z0-9 _.,:=/+@%-]*")
 # fake — штатная стратегия шаблона zapret.conf (fake,multidisorder).
 DESYNC_VALUES = frozenset(
-    "fake multisplit multidisorder fakedsplit fakeddisorder hostfakesplit "
-    "ipfrag2 udplen tamper".split()
+    [
+        "fake",
+        "multisplit",
+        "multidisorder",
+        "fakedsplit",
+        "fakeddisorder",
+        "hostfakesplit",
+        "ipfrag2",
+        "udplen",
+        "tamper",
+    ]
 )
 FOOLING_VALUES = frozenset(
-    "none md5sig badseq badsum datanoack ts hopbyhop hopbyhop2".split()
+    [
+        "none",
+        "md5sig",
+        "badseq",
+        "badsum",
+        "datanoack",
+        "ts",
+        "hopbyhop",
+        "hopbyhop2",
+    ]
 )
 SOCKS_SCHEMES = {"socks5", "socks5h", "socks", "http", "https"}
 

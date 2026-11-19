@@ -1345,7 +1345,7 @@ def test_zapret_profile_put_helper_failure_502(etc, monkeypatch):
             return subprocess.CompletedProcess(args, 1, "", "helper: bad value")
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    module, client, _ = make_client(monkeypatch, handler=failing)
+    _module, client, _ = make_client(monkeypatch, handler=failing)
     (etc / "zapret.conf").write_text(
         "QNUM=200\nDESYNC=fake,multidisorder\nFOOLING=md5sig\n", encoding="utf-8"
     )
@@ -1430,14 +1430,18 @@ def test_zapret_warnings_domain_missing_from_dpi(panel):
 
     assert response.status_code == 200
     assert response.json()["warnings"] == [
-        "домен reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
-        "он не исключается из geo.txt, и если geo.txt его содержит, "
-        "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
-        "добавьте reddit.com в dpi.txt",
-        "домен www.reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
-        "он не исключается из geo.txt, и если geo.txt его содержит, "
-        "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
-        "добавьте www.reddit.com в dpi.txt",
+        (
+            "домен reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
+            "он не исключается из geo.txt, и если geo.txt его содержит, "
+            "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
+            "добавьте reddit.com в dpi.txt"
+        ),
+        (
+            "домен www.reddit.com есть в dpi-split.txt, но отсутствует в dpi.txt — "
+            "он не исключается из geo.txt, и если geo.txt его содержит, "
+            "при заданном SOCKS_URL mihomo отправит его через SOCKS мимо zapret; "
+            "добавьте www.reddit.com в dpi.txt"
+        ),
     ]
 
 
@@ -1454,12 +1458,16 @@ def test_zapret_warnings_missing_or_empty_profile_list(panel):
 
     assert response.status_code == 200
     assert response.json()["warnings"] == [
-        "профиль empty: список empty.txt отсутствует или пуст — домены профиля "
-        "не десинкаются стратегией профиля; их обработает default "
-        "(fake,multidisorder), что для Reddit/Workers не работает",
-        "профиль missing: список missing.txt отсутствует или пуст — домены профиля "
-        "не десинкаются стратегией профиля; их обработает default "
-        "(fake,multidisorder), что для Reddit/Workers не работает",
+        (
+            "профиль empty: список empty.txt отсутствует или пуст — домены профиля "
+            "не десинкаются стратегией профиля; их обработает default "
+            "(fake,multidisorder), что для Reddit/Workers не работает"
+        ),
+        (
+            "профиль missing: список missing.txt отсутствует или пуст — домены профиля "
+            "не десинкаются стратегией профиля; их обработает default "
+            "(fake,multidisorder), что для Reddit/Workers не работает"
+        ),
     ]
 
 
@@ -1481,8 +1489,10 @@ def test_zapret_warnings_duplicate_between_profile_lists(panel):
 
     assert response.status_code == 200
     assert response.json()["warnings"] == [
-        "домен www.reddit.com есть в alpha.txt и beta.txt — обработает "
-        "профиль alpha (идёт первым по имени)"
+        (
+            "домен www.reddit.com есть в alpha.txt и beta.txt — обработает "
+            "профиль alpha (идёт первым по имени)"
+        )
     ]
 
 

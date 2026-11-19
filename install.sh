@@ -1897,8 +1897,8 @@ zapret_profile_action() { # zapret_profile_action enable|restart [каталог
   return 0
 }
 
-enable_zapret_profiles() { zapret_profile_action enable "$@"; }
-restart_zapret_profiles() { zapret_profile_action restart "$@"; }
+enable_zapret_profiles() { zapret_profile_action enable; }
+restart_zapret_profiles() { zapret_profile_action restart; }
 
 # ---------- 8. systemd-юниты и helper-скрипты ----------
 info "Установка systemd-юнитов..."
